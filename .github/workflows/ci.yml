@@ -88,20 +88,6 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Cache
-        uses: whywaita/actions-cache-s3@v2
-        with:
-          path: |
-            ./build
-          key: r22-${{ github.repository }}-${{ runner.os }}-wasix-rust-${{ matrix.arch }}
-          aws-s3-bucket: github-cache-wasix
-          aws-endpoint: https://1541b1e8a3fc6ad155ce67ef38899700.r2.cloudflarestorage.com
-          aws-region: auto
-          aws-s3-bucket-endpoint: false
-          aws-s3-force-path-style: true
-          aws-access-key-id: ${{ secrets.CLOUDFLARE_ARTIFACTS_CACHE_ACCESS_TOKEN }}
-          aws-secret-access-key: ${{ secrets.CLOUDFLARE_ARTIFACTS_CACHE_ACCESS_KEY }}
-
       - name: Download wasix-libc artifact
         uses: actions/download-artifact@v3
         with:
@@ -134,6 +120,20 @@ jobs:
           repository: wasix-org/cargo-wasix
           ref: main
           path: cargo-wasix
+
+      - name: Cache
+        uses: whywaita/actions-cache-s3@v2
+        with:
+          path: |
+            wasix-rust/build/*
+          key: r22-${{ github.repository }}-${{ runner.os }}-wasix-rust-${{ matrix.arch }}
+          aws-s3-bucket: github-cache-wasix
+          aws-endpoint: https://1541b1e8a3fc6ad155ce67ef38899700.r2.cloudflarestorage.com
+          aws-region: auto
+          aws-s3-bucket-endpoint: false
+          aws-s3-force-path-style: true
+          aws-access-key-id: ${{ secrets.CLOUDFLARE_ARTIFACTS_CACHE_ACCESS_TOKEN }}
+          aws-secret-access-key: ${{ secrets.CLOUDFLARE_ARTIFACTS_CACHE_ACCESS_KEY }}
 
       # Linux!
 
