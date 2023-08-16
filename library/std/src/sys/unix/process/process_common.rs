@@ -355,6 +355,21 @@ impl Command {
         self.stderr = Some(stderr);
     }
 
+    #[allow(dead_code)]
+    pub fn get_stdin(&self) -> Option<&Stdio> {
+        self.stdin.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub fn get_stdout(&self) -> Option<&Stdio> {
+        self.stdout.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub fn get_stderr(&self) -> Option<&Stdio> {
+        self.stderr.as_ref()
+    }
+
     pub fn env_mut(&mut self) -> &mut CommandEnv {
         &mut self.env
     }
