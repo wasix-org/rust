@@ -2,15 +2,33 @@
 use crate::fmt;
 use crate::io;
 use crate::num::NonZeroI32;
+use crate::os::fd::FromRawFd;
+use crate::sys::pipe::AnonPipe;
 use crate::sys::process::process_common::*;
 use crate::sys::{unsupported, unsupported_err};
-use core::ffi::NonZero_c_int;
+use core::ffi::{CStr, NonZero_c_int};
+use wasi::{JoinStatus, JoinStatusType};
 
 use crate::io::ErrorKind;
 
 use libc::{c_int, pid_t};
 
-pub use crate::sys::{cvt, cvt_r, cvt_nz};
+pub use crate::sys::{cvt, cvt_nz, cvt_r};
+
+fn to_anon_pipe(option_fd: wasi::OptionFd) -> Option<AnonPipe> {
+    match wasi::Option::from(option_fd.tag) {
+        wasi::OPTION_SOME => Some(unsafe { AnonPipe::from_raw_fd(option_fd.u.some as i32) }),
+        _ => None,
+    }
+}
+
+fn to_wasi_mode(input: &Stdio) -> wasi::StdioMode {
+    match input {
+        Stdio::Inherit => wasi::STDIO_MODE_INHERIT,
+        Stdio::MakePipe => wasi::STDIO_MODE_PIPED,
+        _ => wasi::STDIO_MODE_NULL,
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Command
@@ -22,19 +40,44 @@ impl Command {
         default: Stdio,
         needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
-        let envp = self.capture_env();
+        let null = Stdio::Null;
+        let default_stdin = if needs_stdin { &default } else { &null };
+        let program = self
+            .get_program()
+            .to_str()
+            .ok_or_else(|| io::const_io_error!(ErrorKind::Other, "Spawn failed",))?;
 
-        if self.saw_nul() {
-            return Err(io::const_io_error!(
-                ErrorKind::InvalidInput,
-                "nul byte found in provided data",
-            ));
+        let handle = unsafe {
+            wasi::proc_spawn(
+                program,
+                wasi::BOOL_FALSE,
+                &self.get_argv_string(),
+                "",
+                to_wasi_mode(self.get_stdin().unwrap_or(default_stdin)),
+                to_wasi_mode(self.get_stdout().unwrap_or(&default)),
+                to_wasi_mode(self.get_stderr().unwrap_or(&default)),
+                ".",
+            )
         }
+        .map_err(|_| io::const_io_error!(ErrorKind::Other, "Spawn failed",))?;
 
-        let (ours, theirs) = self.setup_io(default, needs_stdin)?;
+        Ok((
+            Process { pid: handle.pid as i32, status: None },
+            StdioPipes {
+                stdin: to_anon_pipe(handle.stdin),
+                stderr: to_anon_pipe(handle.stderr),
+                stdout: to_anon_pipe(handle.stdout),
+            },
+        ))
+    }
 
-        let ret = self.posix_spawn(&theirs, envp.as_ref())?;
-        Ok((ret, ours))
+    fn get_argv_string(&self) -> String {
+        let argv = self
+            .get_argv()
+            .into_iter()
+            .map(|p| unsafe { CStr::from_ptr(p.clone()) }.to_string_lossy())
+            .collect::<Vec<_>>();
+        argv.join("\n")
     }
 
     pub fn output(&mut self) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
@@ -50,12 +93,10 @@ impl Command {
         }
 
         match self.setup_io(default, true) {
-            Ok((_, theirs)) => {
-                unsafe {
-                    let Err(e) = self.do_exec(theirs, envp.as_ref());
-                    e
-                }
-            }
+            Ok((_, theirs)) => unsafe {
+                let Err(e) = self.do_exec(theirs, envp.as_ref());
+                e
+            },
             Err(e) => e,
         }
     }
@@ -88,95 +129,6 @@ impl Command {
         libc::execvp(self.get_program_cstr().as_ptr(), self.get_argv().as_ptr());
         Err(io::Error::last_os_error())
     }
-
-    fn posix_spawn(
-        &mut self,
-        stdio: &ChildPipes,
-        envp: Option<&CStringArray>,
-    ) -> io::Result<Process> {
-        use crate::mem::MaybeUninit;
-        use crate::sys;
-
-        let pgroup = self.get_pgroup();
-
-        // Safety: -1 indicates we don't have a pidfd.
-        let mut p = unsafe { Process::new(0, -1) };
-
-        struct PosixSpawnFileActions<'a>(&'a mut MaybeUninit<libc::posix_spawn_file_actions_t>);
-
-        impl Drop for PosixSpawnFileActions<'_> {
-            fn drop(&mut self) {
-                unsafe {
-                    libc::posix_spawn_file_actions_destroy(self.0.as_mut_ptr());
-                }
-            }
-        }
-
-        struct PosixSpawnattr<'a>(&'a mut MaybeUninit<libc::posix_spawnattr_t>);
-
-        impl Drop for PosixSpawnattr<'_> {
-            fn drop(&mut self) {
-                unsafe {
-                    libc::posix_spawnattr_destroy(self.0.as_mut_ptr());
-                }
-            }
-        }
-
-        unsafe {
-            let mut attrs = MaybeUninit::uninit();
-            cvt_nz(libc::posix_spawnattr_init(attrs.as_mut_ptr()))?;
-            let attrs = PosixSpawnattr(&mut attrs);
-
-            let mut flags = 0;
-
-            let mut file_actions = MaybeUninit::uninit();
-            cvt_nz(libc::posix_spawn_file_actions_init(file_actions.as_mut_ptr()))?;
-            let file_actions = PosixSpawnFileActions(&mut file_actions);
-
-            if let Some(fd) = stdio.stdin.fd() {
-                cvt_nz(libc::posix_spawn_file_actions_adddup2(
-                    file_actions.0.as_mut_ptr(),
-                    fd,
-                    libc::STDIN_FILENO,
-                ))?;
-            }
-            if let Some(fd) = stdio.stdout.fd() {
-                cvt_nz(libc::posix_spawn_file_actions_adddup2(
-                    file_actions.0.as_mut_ptr(),
-                    fd,
-                    libc::STDOUT_FILENO,
-                ))?;
-            }
-            if let Some(fd) = stdio.stderr.fd() {
-                cvt_nz(libc::posix_spawn_file_actions_adddup2(
-                    file_actions.0.as_mut_ptr(),
-                    fd,
-                    libc::STDERR_FILENO,
-                ))?;
-            }
-
-            if let Some(pgroup) = pgroup {
-                flags |= libc::POSIX_SPAWN_SETPGROUP;
-                cvt_nz(libc::posix_spawnattr_setpgroup(attrs.0.as_mut_ptr(), pgroup))?;
-            }
-
-            cvt_nz(libc::posix_spawnattr_setflags(attrs.0.as_mut_ptr(), flags as _))?;
-
-            // Make sure we synchronize access to the global `environ` resource
-            let envp = envp.map(|c| c.as_ptr()).unwrap_or_else(|| libc::environ as *const _);
-
-            let spawn_fn = libc::posix_spawnp;
-            cvt_nz(spawn_fn(
-                &mut p.pid,
-                self.get_program_cstr().as_ptr(),
-                file_actions.0.as_ptr(),
-                attrs.0.as_ptr(),
-                self.get_argv().as_ptr() as *const _,
-                envp as *const _,
-            ))?;
-            Ok(p)
-        }
-    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -207,115 +159,173 @@ impl Process {
                 "invalid argument: can't kill an exited process",
             ))
         } else {
-            cvt(unsafe { libc::kill(self.pid, libc::SIGKILL) }).map(drop)
+            unsafe { wasi::proc_signal(self.pid as u32, wasi::SIGNAL_KILL) }
+                .map_err(|_| io::const_io_error!(ErrorKind::Other, "Kill failed",))
         }
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        use crate::sys::cvt_r;
         if let Some(status) = self.status {
             return Ok(status);
         }
-        let mut status = 0 as c_int;
-        cvt_r(|| unsafe { libc::waitpid(self.pid, &mut status, 0) })?;
-        self.status = Some(ExitStatus::new(status));
-        Ok(ExitStatus::new(status))
+
+        let mut pid = wasi::OptionPid { tag: 1, u: wasi::OptionPidU { some: self.pid as u32 } };
+
+        let join_status = unsafe { wasi::proc_join(&mut pid, 0) }
+            .map_err(|_| io::const_io_error!(ErrorKind::Other, "Join failed",))?;
+
+        let status = ExitStatus(join_status);
+
+        self.status = Some(status.clone());
+        Ok(status)
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        if let Some(status) = self.status {
-            return Ok(Some(status));
+        if let s @ Some(status) = self.status {
+            return Ok(s);
         }
-        let mut status = 0 as c_int;
-        let pid = cvt(unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) })?;
-        if pid == 0 {
-            Ok(None)
+
+        let mut pid = wasi::OptionPid { tag: 1, u: wasi::OptionPidU { some: self.pid as u32 } };
+
+        let join_status = unsafe { wasi::proc_join(&mut pid, wasi::JOIN_FLAGS_NON_BLOCKING) }
+            .map_err(|_| io::const_io_error!(ErrorKind::Other, "Join failed",))?;
+
+        let status = ExitStatus(join_status);
+
+        if status.code().is_some() || status.signal().is_some() {
+            self.status = Some(status.clone());
+            Ok(Some(status))
         } else {
-            self.status = Some(ExitStatus::new(status));
-            Ok(Some(ExitStatus::new(status)))
+            Ok(None)
         }
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub struct ExitStatus(c_int);
+#[derive(Clone, Copy)]
+pub struct ExitStatus(JoinStatus);
+
+impl PartialEq<ExitStatus> for ExitStatus {
+    fn eq(&self, other: &Self) -> bool {
+        self.code().eq(&other.code())
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.code().ne(&other.code())
+    }
+}
+
+impl Eq for ExitStatus {}
 
 impl fmt::Debug for ExitStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("wasix_wait_status").field(&self.0).finish()
+        f.debug_tuple("wasix_wait_status")
+            .field(&JoinStatusType::from(self.0.tag).message())
+            .finish()
     }
 }
 
 impl ExitStatus {
-    pub fn new(status: c_int) -> ExitStatus {
+    pub fn new(status: JoinStatus) -> ExitStatus {
         ExitStatus(status)
     }
 
-    fn exited(&self) -> bool {
-        libc::WIFEXITED(self.0)
-    }
-
     pub fn exit_ok(&self) -> Result<(), ExitStatusError> {
-        // This assumes that WIFEXITED(status) && WEXITSTATUS==0 corresponds to status==0. This is
-        // true on all actual versions of Unix, is widely assumed, and is specified in SuS
-        // https://pubs.opengroup.org/onlinepubs/9699919799/functions/wait.html. If it is not
-        // true for a platform pretending to be Unix, the tests (our doctests, and also
-        // procsss_unix/tests.rs) will spot it. `ExitStatusError::code` assumes this too.
-        match NonZero_c_int::try_from(self.0) {
-            /* was nonzero */ Ok(failure) => Err(ExitStatusError(failure)),
-            /* was zero, couldn't convert */ Err(_) => Ok(()),
+        if self.code() == Some(0) {
+            Ok(())
+        } else {
+            Err(ExitStatusError(self.0))
         }
     }
 
     pub fn code(&self) -> Option<i32> {
-        self.exited().then(|| libc::WEXITSTATUS(self.0))
+        unsafe {
+            match JoinStatusType::from(self.0.tag) {
+                wasi::JOIN_STATUS_TYPE_EXIT_NORMAL => Some(self.0.u.exit_normal.raw() as i32),
+                wasi::JOIN_STATUS_TYPE_EXIT_SIGNAL => {
+                    Some(self.0.u.exit_signal.exit_code.raw() as i32)
+                }
+                _ => None,
+            }
+        }
     }
 
     pub fn signal(&self) -> Option<i32> {
-        libc::WIFSIGNALED(self.0).then(|| libc::WTERMSIG(self.0))
+        unsafe {
+            match JoinStatusType::from(self.0.tag) {
+                wasi::JOIN_STATUS_TYPE_STOPPED => Some(self.0.u.stopped.raw() as i32),
+                wasi::JOIN_STATUS_TYPE_EXIT_SIGNAL => {
+                    Some(self.0.u.exit_signal.signal.raw() as i32)
+                }
+                _ => None,
+            }
+        }
     }
 
     pub fn core_dumped(&self) -> bool {
-        libc::WIFSIGNALED(self.0) && libc::WCOREDUMP(self.0)
+        self.code().map(|c| libc::WIFSIGNALED(c) && libc::WCOREDUMP(c)).unwrap_or(false)
     }
 
     pub fn stopped_signal(&self) -> Option<i32> {
-        libc::WIFSTOPPED(self.0).then(|| libc::WSTOPSIG(self.0))
+        unsafe {
+            match JoinStatusType::from(self.0.tag) {
+                wasi::JOIN_STATUS_TYPE_STOPPED => Some(self.0.u.stopped.raw() as i32),
+                _ => None,
+            }
+        }
     }
 
     pub fn continued(&self) -> bool {
-        libc::WIFCONTINUED(self.0)
+        self.code().map(|c| libc::WIFCONTINUED(c)).unwrap_or(false)
     }
 
-    pub fn into_raw(&self) -> c_int {
+    pub fn into_raw(&self) -> JoinStatus {
         self.0
     }
 }
 
-/// Converts a raw `c_int` to a type-safe `ExitStatus` by wrapping it without copying.
-impl From<c_int> for ExitStatus {
-    fn from(a: c_int) -> ExitStatus {
-        ExitStatus(a as i32)
+impl From<JoinStatus> for ExitStatus {
+    fn from(s: JoinStatus) -> ExitStatus {
+        ExitStatus(s)
     }
 }
 
 impl fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "exit code: {}", self.0)
+        write!(f, "{}", JoinStatusType::from(self.0.tag).message())
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct ExitStatusError(NonZero_c_int);
+#[derive(Clone, Copy)]
+pub struct ExitStatusError(JoinStatus);
+
+impl fmt::Debug for ExitStatusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("wasix_wait_status_error")
+            .field(&JoinStatusType::from(self.0.tag).message())
+            .finish()
+    }
+}
+
+impl PartialEq<ExitStatusError> for ExitStatusError {
+    fn eq(&self, other: &Self) -> bool {
+        self.code().eq(&other.code())
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.code().ne(&other.code())
+    }
+}
+
+impl Eq for ExitStatusError {}
 
 impl Into<ExitStatus> for ExitStatusError {
     fn into(self) -> ExitStatus {
-        ExitStatus(self.0.into())
+        ExitStatus(self.0)
     }
 }
 
 impl ExitStatusError {
     pub fn code(self) -> Option<NonZeroI32> {
-        ExitStatus(self.0.into()).code().map(|st| st.try_into().unwrap())
+        ExitStatus(self.0).code().map(|st| st.try_into().unwrap())
     }
 }
