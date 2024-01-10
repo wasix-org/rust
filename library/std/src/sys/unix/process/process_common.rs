@@ -78,6 +78,7 @@ cfg_if::cfg_if! {
         }
     } else {
         #[allow(unused_imports)]
+        #[cfg(not(target_os = "wasi"))]
         pub use libc::{sigemptyset, sigaddset};
     }
 }
