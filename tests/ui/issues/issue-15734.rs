@@ -1,6 +1,6 @@
 // run-pass
-// If `Index` used an associated type for its output, this test would
-// work more smoothly.
+// revisions: current next
+//[next] compile-flags: -Znext-solver
 
 use std::ops::Index;
 

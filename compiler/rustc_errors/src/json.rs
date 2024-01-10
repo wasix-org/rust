@@ -10,8 +10,9 @@
 // FIXME: spec the JSON output properly.
 
 use rustc_span::source_map::{FilePathMapping, SourceMap};
+use termcolor::{ColorSpec, WriteColor};
 
-use crate::emitter::{Emitter, HumanReadableErrorType};
+use crate::emitter::{should_show_source_code, Emitter, HumanReadableErrorType};
 use crate::registry::Registry;
 use crate::translation::{to_fluent_args, Translate};
 use crate::DiagnosticId;
@@ -21,7 +22,7 @@ use crate::{
 };
 use rustc_lint_defs::Applicability;
 
-use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::sync::{IntoDynSyncSend, Lrc};
 use rustc_error_messages::FluentArgs;
 use rustc_span::hygiene::ExpnData;
 use rustc_span::Span;
@@ -37,13 +38,14 @@ use serde::Serialize;
 mod tests;
 
 pub struct JsonEmitter {
-    dst: Box<dyn Write + Send>,
+    dst: IntoDynSyncSend<Box<dyn Write + Send>>,
     registry: Option<Registry>,
     sm: Lrc<SourceMap>,
     fluent_bundle: Option<Lrc<FluentBundle>>,
     fallback_bundle: LazyFallbackBundle,
     pretty: bool,
     ui_testing: bool,
+    ignored_directories_in_source_blocks: Vec<String>,
     json_rendered: HumanReadableErrorType,
     diagnostic_width: Option<usize>,
     macro_backtrace: bool,
@@ -65,13 +67,14 @@ impl JsonEmitter {
         terminal_url: TerminalUrl,
     ) -> JsonEmitter {
         JsonEmitter {
-            dst: Box::new(io::BufWriter::new(io::stderr())),
+            dst: IntoDynSyncSend(Box::new(io::BufWriter::new(io::stderr()))),
             registry,
             sm: source_map,
             fluent_bundle,
             fallback_bundle,
             pretty,
             ui_testing: false,
+            ignored_directories_in_source_blocks: Vec::new(),
             json_rendered,
             diagnostic_width,
             macro_backtrace,
@@ -119,13 +122,14 @@ impl JsonEmitter {
         terminal_url: TerminalUrl,
     ) -> JsonEmitter {
         JsonEmitter {
-            dst,
+            dst: IntoDynSyncSend(dst),
             registry,
             sm: source_map,
             fluent_bundle,
             fallback_bundle,
             pretty,
             ui_testing: false,
+            ignored_directories_in_source_blocks: Vec::new(),
             json_rendered,
             diagnostic_width,
             macro_backtrace,
@@ -137,6 +141,29 @@ impl JsonEmitter {
     pub fn ui_testing(self, ui_testing: bool) -> Self {
         Self { ui_testing, ..self }
     }
+
+    pub fn ignored_directories_in_source_blocks(self, value: Vec<String>) -> Self {
+        Self { ignored_directories_in_source_blocks: value, ..self }
+    }
+
+    fn emit(&mut self, val: EmitTyped<'_>) -> io::Result<()> {
+        if self.pretty {
+            serde_json::to_writer_pretty(&mut *self.dst, &val)?
+        } else {
+            serde_json::to_writer(&mut *self.dst, &val)?
+        };
+        self.dst.write_all(b"\n")?;
+        self.dst.flush()
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "$message_type", rename_all = "snake_case")]
+enum EmitTyped<'a> {
+    Diagnostic(Diagnostic),
+    Artifact(ArtifactNotification<'a>),
+    FutureIncompat(FutureIncompatReport<'a>),
+    UnusedExtern(UnusedExterns<'a, 'a, 'a>),
 }
 
 impl Translate for JsonEmitter {
@@ -152,63 +179,47 @@ impl Translate for JsonEmitter {
 impl Emitter for JsonEmitter {
     fn emit_diagnostic(&mut self, diag: &crate::Diagnostic) {
         let data = Diagnostic::from_errors_diagnostic(diag, self);
-        let result = if self.pretty {
-            writeln!(&mut self.dst, "{}", serde_json::to_string_pretty(&data).unwrap())
-        } else {
-            writeln!(&mut self.dst, "{}", serde_json::to_string(&data).unwrap())
-        }
-        .and_then(|_| self.dst.flush());
+        let result = self.emit(EmitTyped::Diagnostic(data));
         if let Err(e) = result {
-            panic!("failed to print diagnostics: {:?}", e);
+            panic!("failed to print diagnostics: {e:?}");
         }
     }
 
     fn emit_artifact_notification(&mut self, path: &Path, artifact_type: &str) {
         let data = ArtifactNotification { artifact: path, emit: artifact_type };
-        let result = if self.pretty {
-            writeln!(&mut self.dst, "{}", serde_json::to_string_pretty(&data).unwrap())
-        } else {
-            writeln!(&mut self.dst, "{}", serde_json::to_string(&data).unwrap())
-        }
-        .and_then(|_| self.dst.flush());
+        let result = self.emit(EmitTyped::Artifact(data));
         if let Err(e) = result {
-            panic!("failed to print notification: {:?}", e);
+            panic!("failed to print notification: {e:?}");
         }
     }
 
     fn emit_future_breakage_report(&mut self, diags: Vec<crate::Diagnostic>) {
-        let data: Vec<FutureBreakageItem> = diags
+        let data: Vec<FutureBreakageItem<'_>> = diags
             .into_iter()
             .map(|mut diag| {
                 if diag.level == crate::Level::Allow {
                     diag.level = crate::Level::Warning(None);
                 }
-                FutureBreakageItem { diagnostic: Diagnostic::from_errors_diagnostic(&diag, self) }
+                FutureBreakageItem {
+                    diagnostic: EmitTyped::Diagnostic(Diagnostic::from_errors_diagnostic(
+                        &diag, self,
+                    )),
+                }
             })
             .collect();
         let report = FutureIncompatReport { future_incompat_report: data };
-        let result = if self.pretty {
-            writeln!(&mut self.dst, "{}", serde_json::to_string_pretty(&report).unwrap())
-        } else {
-            writeln!(&mut self.dst, "{}", serde_json::to_string(&report).unwrap())
-        }
-        .and_then(|_| self.dst.flush());
+        let result = self.emit(EmitTyped::FutureIncompat(report));
         if let Err(e) = result {
-            panic!("failed to print future breakage report: {:?}", e);
+            panic!("failed to print future breakage report: {e:?}");
         }
     }
 
     fn emit_unused_externs(&mut self, lint_level: rustc_lint_defs::Level, unused_externs: &[&str]) {
         let lint_level = lint_level.as_str();
         let data = UnusedExterns { lint_level, unused_extern_names: unused_externs };
-        let result = if self.pretty {
-            writeln!(&mut self.dst, "{}", serde_json::to_string_pretty(&data).unwrap())
-        } else {
-            writeln!(&mut self.dst, "{}", serde_json::to_string(&data).unwrap())
-        }
-        .and_then(|_| self.dst.flush());
+        let result = self.emit(EmitTyped::UnusedExtern(data));
         if let Err(e) = result {
-            panic!("failed to print unused externs: {:?}", e);
+            panic!("failed to print unused externs: {e:?}");
         }
     }
 
@@ -305,13 +316,15 @@ struct ArtifactNotification<'a> {
 }
 
 #[derive(Serialize)]
-struct FutureBreakageItem {
-    diagnostic: Diagnostic,
+struct FutureBreakageItem<'a> {
+    // Always EmitTyped::Diagnostic, but we want to make sure it gets serialized
+    // with "$message_type".
+    diagnostic: EmitTyped<'a>,
 }
 
 #[derive(Serialize)]
-struct FutureIncompatReport {
-    future_incompat_report: Vec<FutureBreakageItem>,
+struct FutureIncompatReport<'a> {
+    future_incompat_report: Vec<FutureBreakageItem<'a>>,
 }
 
 // NOTE: Keep this in sync with the equivalent structs in rustdoc's
@@ -356,26 +369,36 @@ impl Diagnostic {
                 self.0.lock().unwrap().flush()
             }
         }
+        impl WriteColor for BufWriter {
+            fn supports_color(&self) -> bool {
+                false
+            }
+
+            fn set_color(&mut self, _spec: &ColorSpec) -> io::Result<()> {
+                Ok(())
+            }
+
+            fn reset(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
         let buf = BufWriter::default();
         let output = buf.clone();
         je.json_rendered
-            .new_emitter(
-                Box::new(buf),
-                Some(je.sm.clone()),
-                je.fluent_bundle.clone(),
-                je.fallback_bundle.clone(),
-                false,
-                je.diagnostic_width,
-                je.macro_backtrace,
-                je.track_diagnostics,
-                je.terminal_url,
-            )
+            .new_emitter(Box::new(buf), je.fallback_bundle.clone())
+            .sm(Some(je.sm.clone()))
+            .fluent_bundle(je.fluent_bundle.clone())
+            .diagnostic_width(je.diagnostic_width)
+            .macro_backtrace(je.macro_backtrace)
+            .track_diagnostics(je.track_diagnostics)
+            .terminal_url(je.terminal_url)
             .ui_testing(je.ui_testing)
+            .ignored_directories_in_source_blocks(je.ignored_directories_in_source_blocks.clone())
             .emit_diagnostic(diag);
         let output = Arc::try_unwrap(output.0).unwrap().into_inner().unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        let translated_message = je.translate_messages(&diag.message, &args);
+        let translated_message = je.translate_messages(&diag.messages, &args);
         Diagnostic {
             message: translated_message.to_string(),
             code: DiagnosticCode::map_opt_string(diag.code.clone(), je),
@@ -396,16 +419,12 @@ impl Diagnostic {
         args: &FluentArgs<'_>,
         je: &JsonEmitter,
     ) -> Diagnostic {
-        let translated_message = je.translate_messages(&diag.message, args);
+        let translated_message = je.translate_messages(&diag.messages, args);
         Diagnostic {
             message: translated_message.to_string(),
             code: None,
             level: diag.level.to_str(),
-            spans: diag
-                .render_span
-                .as_ref()
-                .map(|sp| DiagnosticSpan::from_multispan(sp, args, je))
-                .unwrap_or_else(|| DiagnosticSpan::from_multispan(&diag.span, args, je)),
+            spans: DiagnosticSpan::from_multispan(&diag.span, args, je),
             children: vec![],
             rendered: None,
         }
@@ -548,7 +567,11 @@ impl DiagnosticSpanLine {
             .span_to_lines(span)
             .map(|lines| {
                 // We can't get any lines if the source is unavailable.
-                if !je.sm.ensure_source_file_source_present(lines.file.clone()) {
+                if !should_show_source_code(
+                    &je.ignored_directories_in_source_blocks,
+                    &je.sm,
+                    &lines.file,
+                ) {
                     return vec![];
                 }
 

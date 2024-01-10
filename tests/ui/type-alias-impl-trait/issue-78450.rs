@@ -1,6 +1,8 @@
 // check-pass
+// revisions: current next
+//[next] compile-flags: -Znext-solver
 
-#![feature(type_alias_impl_trait)]
+#![feature(impl_trait_in_assoc_type)]
 
 pub trait AssociatedImpl {
     type ImplTrait;

@@ -1,7 +1,6 @@
-// run-rustfix
-
 #![allow(unused)]
 #![warn(clippy::needless_option_as_deref)]
+#![allow(clippy::useless_vec)]
 
 fn main() {
     // should lint

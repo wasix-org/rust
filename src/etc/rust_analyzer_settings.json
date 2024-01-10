@@ -7,12 +7,19 @@
         "check",
         "--json-output"
     ],
-    "rust-analyzer.linkedProjects": ["src/bootstrap/Cargo.toml", "Cargo.toml"],
+    "rust-analyzer.linkedProjects": [
+        "Cargo.toml",
+        "src/tools/x/Cargo.toml",
+        "src/bootstrap/Cargo.toml",
+        "src/tools/rust-analyzer/Cargo.toml",
+        "compiler/rustc_codegen_cranelift/Cargo.toml",
+        "compiler/rustc_codegen_gcc/Cargo.toml"
+    ],
     "rust-analyzer.rustfmt.overrideCommand": [
-        "./build/host/rustfmt/bin/rustfmt",
+        "${workspaceFolder}/build/host/rustfmt/bin/rustfmt",
         "--edition=2021"
     ],
-    "rust-analyzer.procMacro.server": "./build/host/stage0/libexec/rust-analyzer-proc-macro-srv",
+    "rust-analyzer.procMacro.server": "${workspaceFolder}/build/host/stage0/libexec/rust-analyzer-proc-macro-srv",
     "rust-analyzer.procMacro.enable": true,
     "rust-analyzer.cargo.buildScripts.enable": true,
     "rust-analyzer.cargo.buildScripts.invocationLocation": "root",
@@ -24,5 +31,8 @@
         "--json-output"
     ],
     "rust-analyzer.cargo.sysrootSrc": "./library",
-    "rust-analyzer.rustc.source": "./Cargo.toml"
+    "rust-analyzer.rustc.source": "./Cargo.toml",
+    "rust-analyzer.cargo.extraEnv": {
+        "RUSTC_BOOTSTRAP": "1"
+    }
 }

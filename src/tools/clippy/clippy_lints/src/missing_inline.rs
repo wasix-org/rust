@@ -1,10 +1,9 @@
 use clippy_utils::diagnostics::span_lint;
 use rustc_ast::ast;
 use rustc_hir as hir;
-use rustc_lint::{self, LateContext, LateLintPass, LintContext};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
-use rustc_span::sym;
+use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_session::declare_lint_pass;
+use rustc_span::{sym, Span};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -21,7 +20,7 @@ declare_clippy_lint! {
     /// then opt out for specific methods where this might not make sense.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// pub fn foo() {} // missing #[inline]
     /// fn ok() {} // ok
     /// #[inline] pub fn bar() {} // ok
@@ -74,7 +73,6 @@ fn is_executable_or_proc_macro(cx: &LateContext<'_>) -> bool {
     use rustc_session::config::CrateType;
 
     cx.tcx
-        .sess
         .crate_types()
         .iter()
         .any(|t: &CrateType| matches!(t, CrateType::Executable | CrateType::ProcMacro))
@@ -105,7 +103,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
                     match tit_.kind {
                         hir::TraitItemKind::Const(..) | hir::TraitItemKind::Type(..) => {},
                         hir::TraitItemKind::Fn(..) => {
-                            if cx.tcx.impl_defaultness(tit.id.owner_id).has_value() {
+                            if cx.tcx.defaultness(tit.id.owner_id).has_value() {
                                 // trait method with default body needs inline in case
                                 // an impl is not provided
                                 let desc = "a default trait method";

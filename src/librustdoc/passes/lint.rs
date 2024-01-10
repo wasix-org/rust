@@ -4,6 +4,8 @@
 mod bare_urls;
 mod check_code_block_syntax;
 mod html_tags;
+mod redundant_explicit_links;
+mod unescaped_backticks;
 
 use super::Pass;
 use crate::clean::*;
@@ -27,6 +29,8 @@ impl<'a, 'tcx> DocVisitor for Linter<'a, 'tcx> {
         bare_urls::visit_item(self.cx, item);
         check_code_block_syntax::visit_item(self.cx, item);
         html_tags::visit_item(self.cx, item);
+        unescaped_backticks::visit_item(self.cx, item);
+        redundant_explicit_links::visit_item(self.cx, item);
 
         self.visit_item_recur(item)
     }

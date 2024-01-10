@@ -1,5 +1,5 @@
 // Checking the colors of the search tab headers.
-goto: "file://" + |DOC_PATH| + "/test_docs/fn.foo.html?search=something"
+go-to: "file://" + |DOC_PATH| + "/test_docs/fn.foo.html?search=foo"
 show-text: true
 
 define-function: (
@@ -9,7 +9,7 @@ define-function: (
      border_top_hover),
     block {
         // Setting the theme.
-        local-storage: {"rustdoc-theme": |theme|, "rustdoc-use-system-theme": "false"}
+        set-local-storage: {"rustdoc-theme": |theme|, "rustdoc-use-system-theme": "false"}
         reload:
 
         // These two commands are used to be sure the search will be run.
@@ -40,37 +40,121 @@ define-function: (
 
 call-function: ("check-colors", {
     "theme": "ayu",
-    "background": "rgba(0, 0, 0, 0)",
-    "background_selected": "rgb(20, 25, 32)",
-    "background_hover": "rgba(0, 0, 0, 0)",
-    "border_bottom": "0px none rgb(197, 197, 197)",
-    "border_bottom_selected": "1px solid rgb(255, 180, 76)",
+    "background": "transparent",
+    "background_selected": "#141920",
+    "background_hover": "transparent",
+    "border_bottom": "0px none #c5c5c5",
+    "border_bottom_selected": "1px solid #ffb44c",
     "border_bottom_hover": "1px solid rgba(242, 151, 24, 0.3)",
-    "border_top": "0px none rgb(197, 197, 197)",
-    "border_top_selected": "0px none rgb(197, 197, 197)",
-    "border_top_hover": "0px none rgb(197, 197, 197)",
+    "border_top": "0px none #c5c5c5",
+    "border_top_selected": "0px none #c5c5c5",
+    "border_top_hover": "0px none #c5c5c5",
 })
 call-function: ("check-colors", {
     "theme": "dark",
-    "background": "rgb(37, 37, 37)",
-    "background_selected": "rgb(53, 53, 53)",
-    "background_hover": "rgb(53, 53, 53)",
-    "border_bottom": "0px none rgb(221, 221, 221)",
-    "border_bottom_selected": "0px none rgb(221, 221, 221)",
-    "border_bottom_hover": "0px none rgb(221, 221, 221)",
-    "border_top": "2px solid rgb(37, 37, 37)",
-    "border_top_selected": "2px solid rgb(0, 137, 255)",
-    "border_top_hover": "2px solid rgb(0, 137, 255)",
+    "background": "#252525",
+    "background_selected": "#353535",
+    "background_hover": "#353535",
+    "border_bottom": "0px none #ddd",
+    "border_bottom_selected": "0px none #ddd",
+    "border_bottom_hover": "0px none #ddd",
+    "border_top": "2px solid #252525",
+    "border_top_selected": "2px solid #0089ff",
+    "border_top_hover": "2px solid #0089ff",
 })
 call-function: ("check-colors", {
     "theme": "light",
-    "background": "rgb(230, 230, 230)",
-    "background_selected": "rgb(255, 255, 255)",
-    "background_hover": "rgb(255, 255, 255)",
-    "border_bottom": "0px none rgb(0, 0, 0)",
-    "border_bottom_selected": "0px none rgb(0, 0, 0)",
-    "border_bottom_hover": "0px none rgb(0, 0, 0)",
-    "border_top": "2px solid rgb(230, 230, 230)",
-    "border_top_selected": "2px solid rgb(0, 137, 255)",
-    "border_top_hover": "2px solid rgb(0, 137, 255)",
+    "background": "#e6e6e6",
+    "background_selected": "#fff",
+    "background_hover": "#fff",
+    "border_bottom": "0px none #000",
+    "border_bottom_selected": "0px none #000",
+    "border_bottom_hover": "0px none #000",
+    "border_top": "2px solid #e6e6e6",
+    "border_top_selected": "2px solid #0089ff",
+    "border_top_hover": "2px solid #0089ff",
 })
+
+// set size wide enough that the text is in a single row
+set-window-size: (851, 600)
+
+// Check the size and count in tabs
+assert-text: ("#search-tabs > button:nth-child(1) > .count", " (25) ")
+assert-text: ("#search-tabs > button:nth-child(2) > .count", " (6)  ")
+assert-text: ("#search-tabs > button:nth-child(3) > .count", " (0)  ")
+store-property: ("#search-tabs > button:nth-child(1)", {"offsetWidth": buttonWidth})
+assert-property: ("#search-tabs > button:nth-child(2)", {"offsetWidth": |buttonWidth|})
+assert-property: ("#search-tabs > button:nth-child(3)", {"offsetWidth": |buttonWidth|})
+store-property: ("#search-tabs > button:nth-child(1) > .count", {"offsetWidth": countWidth})
+assert-property: ("#search-tabs > button:nth-child(2) > .count", {"offsetWidth": |countWidth|})
+assert-property: ("#search-tabs > button:nth-child(3) > .count", {"offsetWidth": |countWidth|})
+
+// Check that counts are in a row with each other
+compare-elements-position: (
+    "#search-tabs > button:nth-child(1) > .count",
+    "#search-tabs > button:nth-child(2) > .count",
+    ("y")
+)
+compare-elements-position: (
+    "#search-tabs > button:nth-child(2) > .count",
+    "#search-tabs > button:nth-child(3) > .count",
+    ("y")
+)
+// Check that counts are beside the titles and haven't wrapped
+compare-elements-position-near: (
+    "#search-tabs > button:nth-child(1)",
+    "#search-tabs > button:nth-child(1) > .count",
+    {"y": 8}
+)
+compare-elements-position-near: (
+    "#search-tabs > button:nth-child(2)",
+    "#search-tabs > button:nth-child(2) > .count",
+    {"y": 8}
+)
+compare-elements-position-near: (
+    "#search-tabs > button:nth-child(2)",
+    "#search-tabs > button:nth-child(2) > .count",
+    {"y": 8}
+)
+
+// Set size narrow enough that they wrap.
+// When I tested it, it wrapped at 811px, but I added some fudge factor to ensure it
+// doesn't prematurely wrap with slightly different font kerning or whatever, with a
+// @media query
+set-window-size: (850, 600)
+
+// all counts and buttons still have same size
+store-property: ("#search-tabs > button:nth-child(1)", {"offsetWidth": buttonWidth})
+assert-property: ("#search-tabs > button:nth-child(2)", {"offsetWidth": |buttonWidth|})
+assert-property: ("#search-tabs > button:nth-child(3)", {"offsetWidth": |buttonWidth|})
+store-property: ("#search-tabs > button:nth-child(1) > .count", {"offsetWidth": countWidth})
+assert-property: ("#search-tabs > button:nth-child(2) > .count", {"offsetWidth": |countWidth|})
+assert-property: ("#search-tabs > button:nth-child(3) > .count", {"offsetWidth": |countWidth|})
+
+// Check that counts are still in a row with each other
+compare-elements-position: (
+    "#search-tabs > button:nth-child(1) > .count",
+    "#search-tabs > button:nth-child(2) > .count",
+    ("y")
+)
+compare-elements-position: (
+    "#search-tabs > button:nth-child(2) > .count",
+    "#search-tabs > button:nth-child(3) > .count",
+    ("y")
+)
+// Check that counts are NOT beside the titles; now they have wrapped
+compare-elements-position-near-false: (
+    "#search-tabs > button:nth-child(1)",
+    "#search-tabs > button:nth-child(1) > .count",
+    {"y": 8}
+)
+compare-elements-position-near-false: (
+    "#search-tabs > button:nth-child(2)",
+    "#search-tabs > button:nth-child(2) > .count",
+    {"y": 8}
+)
+compare-elements-position-near-false: (
+    "#search-tabs > button:nth-child(2)",
+    "#search-tabs > button:nth-child(2) > .count",
+    {"y": 8}
+)

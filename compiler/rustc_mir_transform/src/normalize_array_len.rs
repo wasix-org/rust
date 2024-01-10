@@ -2,12 +2,10 @@
 //! is taken using `.len()` method. Handy to preserve information in MIR for const prop
 
 use crate::ssa::SsaLocals;
-use crate::MirPass;
-use rustc_index::vec::IndexVec;
+use rustc_index::IndexVec;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, TyCtxt};
-use rustc_mir_dataflow::impls::borrowed_locals;
 
 pub struct NormalizeArrayLen;
 
@@ -24,9 +22,7 @@ impl<'tcx> MirPass<'tcx> for NormalizeArrayLen {
 }
 
 fn normalize_array_len_calls<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-    let param_env = tcx.param_env_reveal_all_normalized(body.source.def_id());
-    let borrowed_locals = borrowed_locals(body);
-    let ssa = SsaLocals::new(tcx, param_env, body, &borrowed_locals);
+    let ssa = SsaLocals::new(body);
 
     let slice_lengths = compute_slice_length(tcx, &ssa, body);
     debug!(?slice_lengths);
@@ -41,10 +37,10 @@ fn compute_slice_length<'tcx>(
 ) -> IndexVec<Local, Option<ty::Const<'tcx>>> {
     let mut slice_lengths = IndexVec::from_elem(None, &body.local_decls);
 
-    for (local, rvalue) in ssa.assignments(body) {
+    for (local, rvalue, _) in ssa.assignments(body) {
         match rvalue {
             Rvalue::Cast(
-                CastKind::Pointer(ty::adjustment::PointerCast::Unsize),
+                CastKind::PointerCoercion(ty::adjustment::PointerCoercion::Unsize),
                 operand,
                 cast_ty,
             ) => {
@@ -60,7 +56,9 @@ fn compute_slice_length<'tcx>(
             }
             // The length information is stored in the fat pointer, so we treat `operand` as a value.
             Rvalue::Use(operand) => {
-                if let Some(rhs) = operand.place() && let Some(rhs) = rhs.as_local() {
+                if let Some(rhs) = operand.place()
+                    && let Some(rhs) = rhs.as_local()
+                {
                     slice_lengths[local] = slice_lengths[rhs];
                 }
             }
@@ -93,10 +91,10 @@ impl<'tcx> MutVisitor<'tcx> for Replacer<'tcx> {
             && let [PlaceElem::Deref] = &place.projection[..]
             && let Some(len) = self.slice_lengths[place.local]
         {
-            *rvalue = Rvalue::Use(Operand::Constant(Box::new(Constant {
+            *rvalue = Rvalue::Use(Operand::Constant(Box::new(ConstOperand {
                 span: rustc_span::DUMMY_SP,
                 user_ty: None,
-                literal: ConstantKind::from_const(len, self.tcx),
+                const_: Const::from_ty_const(len, self.tcx),
             })));
         }
         self.super_rvalue(rvalue, loc);

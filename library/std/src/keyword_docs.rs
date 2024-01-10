@@ -1678,7 +1678,7 @@ mod super_keyword {}
 /// below `Iterator` is a **supertrait** and `ThreeIterator` is a **subtrait**:
 ///
 /// ```rust
-/// trait ThreeIterator: std::iter::Iterator {
+/// trait ThreeIterator: Iterator {
 ///     fn next_three(&mut self) -> Option<[Self::Item; 3]>;
 /// }
 /// ```
@@ -1820,7 +1820,7 @@ mod true_keyword {}
 
 #[doc(keyword = "type")]
 //
-/// Define an alias for an existing type.
+/// Define an [alias] for an existing type.
 ///
 /// The syntax is `type Name = ExistingType;`.
 ///
@@ -1836,6 +1836,13 @@ mod true_keyword {}
 /// let k: Kilograms = 3;
 ///
 /// assert_eq!(m, k);
+/// ```
+///
+/// A type can be generic:
+///
+/// ```rust
+/// # use std::sync::{Arc, Mutex};
+/// type ArcMutex<T> = Arc<Mutex<T>>;
 /// ```
 ///
 /// In traits, `type` is used to declare an [associated type]:
@@ -1860,6 +1867,7 @@ mod true_keyword {}
 ///
 /// [`trait`]: keyword.trait.html
 /// [associated type]: ../reference/items/associated-items.html#associated-types
+/// [alias]: ../reference/items/type-aliases.html
 mod type_keyword {}
 
 #[doc(keyword = "unsafe")]
@@ -1925,7 +1933,7 @@ mod type_keyword {}
 /// `unsafe_op_in_unsafe_fn` lint can be enabled to warn against that and require explicit unsafe
 /// blocks even inside `unsafe fn`.
 ///
-/// See the [Rustnomicon] and the [Reference] for more information.
+/// See the [Rustonomicon] and the [Reference] for more information.
 ///
 /// # Examples
 ///
@@ -2129,7 +2137,7 @@ mod type_keyword {}
 /// [`impl`]: keyword.impl.html
 /// [raw pointers]: ../reference/types/pointer.html
 /// [memory safety]: ../book/ch19-01-unsafe-rust.html
-/// [Rustnomicon]: ../nomicon/index.html
+/// [Rustonomicon]: ../nomicon/index.html
 /// [nomicon-soundness]: ../nomicon/safe-unsafe-meaning.html
 /// [soundness]: https://rust-lang.github.io/unsafe-code-guidelines/glossary.html#soundness-of-code--of-a-library
 /// [Reference]: ../reference/unsafety.html
@@ -2287,7 +2295,7 @@ mod use_keyword {}
 /// # #![allow(dead_code)]
 /// pub enum Cow<'a, B>
 /// where
-///     B: 'a + ToOwned + ?Sized,
+///     B: ToOwned + ?Sized,
 /// {
 ///     Borrowed(&'a B),
 ///     Owned(<B as ToOwned>::Owned),

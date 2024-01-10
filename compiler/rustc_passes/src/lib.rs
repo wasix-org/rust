@@ -4,24 +4,28 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![allow(rustc::potential_query_instability)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![doc(rust_logo)]
+#![feature(rustdoc_internals)]
+#![allow(internal_features)]
 #![feature(iter_intersperse)]
 #![feature(let_chains)]
 #![feature(map_try_insert)]
 #![feature(min_specialization)]
+#![feature(slice_group_by)]
 #![feature(try_blocks)]
 #![recursion_limit = "256"]
+#![deny(rustc::untranslatable_diagnostic)]
+#![deny(rustc::diagnostic_outside_of_impl)]
 
 #[macro_use]
 extern crate rustc_middle;
 #[macro_use]
 extern crate tracing;
 
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::fluent_messages;
-use rustc_middle::ty::query::Providers;
+use rustc_middle::query::Providers;
 
+pub mod abi_test;
 mod check_attr;
 mod check_const;
 pub mod dead;
@@ -42,7 +46,7 @@ pub mod stability;
 mod upvars;
 mod weak_lang_items;
 
-fluent_messages! { "../locales/en-US.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 pub fn provide(providers: &mut Providers) {
     check_attr::provide(providers);

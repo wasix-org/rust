@@ -27,43 +27,37 @@ impl<T> RangeMap<T> {
     #[inline(always)]
     pub fn new(size: Size, init: T) -> RangeMap<T> {
         let size = size.bytes();
-        let mut map = RangeMap { v: Vec::new() };
-        if size > 0 {
-            map.v.push(Elem { range: 0..size, data: init });
-        }
-        map
+        let v = if size > 0 { vec![Elem { range: 0..size, data: init }] } else { Vec::new() };
+        RangeMap { v }
     }
 
     /// Finds the index containing the given offset.
     fn find_offset(&self, offset: u64) -> usize {
-        // We do a binary search.
-        let mut left = 0usize; // inclusive
-        let mut right = self.v.len(); // exclusive
-        loop {
-            debug_assert!(left < right, "find_offset: offset {offset} is out-of-bounds");
-            let candidate = left.checked_add(right).unwrap() / 2;
-            let elem = &self.v[candidate];
-            if offset < elem.range.start {
-                // We are too far right (offset is further left).
-                debug_assert!(candidate < right); // we are making progress
-                right = candidate;
-            } else if offset >= elem.range.end {
-                // We are too far left (offset is further right).
-                debug_assert!(candidate >= left); // we are making progress
-                left = candidate + 1;
-            } else {
-                // This is it!
-                return candidate;
-            }
-        }
+        self.v
+            .binary_search_by(|elem| -> std::cmp::Ordering {
+                if offset < elem.range.start {
+                    // We are too far right (offset is further left).
+                    // (`Greater` means that `elem` is greater than the desired target.)
+                    std::cmp::Ordering::Greater
+                } else if offset >= elem.range.end {
+                    // We are too far left (offset is further right).
+                    std::cmp::Ordering::Less
+                } else {
+                    // This is it!
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .unwrap()
     }
 
     /// Provides read-only iteration over everything in the given range. This does
     /// *not* split items if they overlap with the edges. Do not use this to mutate
     /// through interior mutability.
     ///
-    /// The iterator also provides the offset of the given element.
-    pub fn iter(&self, offset: Size, len: Size) -> impl Iterator<Item = (Size, &T)> {
+    /// The iterator also provides the range of the given element.
+    /// How exactly the ranges are split can differ even for otherwise identical
+    /// maps, so user-visible behavior should never depend on the exact range.
+    pub fn iter(&self, offset: Size, len: Size) -> impl Iterator<Item = (ops::Range<u64>, &T)> {
         let offset = offset.bytes();
         let len = len.bytes();
         // Compute a slice starting with the elements we care about.
@@ -84,13 +78,21 @@ impl<T> RangeMap<T> {
         slice
             .iter()
             .take_while(move |elem| elem.range.start < end)
-            .map(|elem| (Size::from_bytes(elem.range.start), &elem.data))
+            .map(|elem| (elem.range.clone(), &elem.data))
     }
 
-    pub fn iter_mut_all(&mut self) -> impl Iterator<Item = &mut T> {
-        self.v.iter_mut().map(|elem| &mut elem.data)
+    /// Provides mutable iteration over all elements.
+    /// The iterator also provides the range of the given element.
+    /// How exactly the ranges are split can differ even for otherwise identical
+    /// maps, so user-visible behavior should never depend on the exact range.
+    pub fn iter_mut_all(&mut self) -> impl Iterator<Item = (ops::Range<u64>, &mut T)> {
+        self.v.iter_mut().map(|elem| (elem.range.clone(), &mut elem.data))
     }
 
+    /// Provides iteration over all elements.
+    /// The iterator also provides the range of the given element.
+    /// How exactly the ranges are split can differ even for otherwise identical
+    /// maps, so user-visible behavior should never depend on the exact range.
     pub fn iter_all(&self) -> impl Iterator<Item = (ops::Range<u64>, &T)> {
         self.v.iter().map(|elem| (elem.range.clone(), &elem.data))
     }
@@ -126,8 +128,15 @@ impl<T> RangeMap<T> {
     /// to make sure that when they are mutated, the effect is constrained to the given range.
     /// Moreover, this will opportunistically merge neighbouring equal blocks.
     ///
-    /// The iterator also provides the offset of the given element.
-    pub fn iter_mut(&mut self, offset: Size, len: Size) -> impl Iterator<Item = (Size, &mut T)>
+    /// The iterator also provides the range of the given element.
+    /// How exactly the ranges are split (both prior to and resulting from the execution of this
+    /// function) can differ even for otherwise identical maps,
+    /// so user-visible behavior should never depend on the exact range.
+    pub fn iter_mut(
+        &mut self,
+        offset: Size,
+        len: Size,
+    ) -> impl Iterator<Item = (ops::Range<u64>, &mut T)>
     where
         T: Clone + PartialEq,
     {
@@ -208,7 +217,25 @@ impl<T> RangeMap<T> {
             // Now we yield the slice. `end` is inclusive.
             &mut self.v[first_idx..=end_idx]
         };
-        slice.iter_mut().map(|elem| (Size::from_bytes(elem.range.start), &mut elem.data))
+        slice.iter_mut().map(|elem| (elem.range.clone(), &mut elem.data))
+    }
+
+    /// Remove all adjacent duplicates
+    pub fn merge_adjacent_thorough(&mut self)
+    where
+        T: PartialEq,
+    {
+        let clean = Vec::with_capacity(self.v.len());
+        for elem in std::mem::replace(&mut self.v, clean) {
+            if let Some(prev) = self.v.last_mut() {
+                if prev.data == elem.data {
+                    assert_eq!(prev.range.end, elem.range.start);
+                    prev.range.end = elem.range.end;
+                    continue;
+                }
+            }
+            self.v.push(elem);
+        }
     }
 }
 

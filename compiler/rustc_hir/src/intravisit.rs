@@ -62,7 +62,7 @@
 //! respectively. (This follows from RPO respecting CFG domination).
 //!
 //! This order consistency is required in a few places in rustc, for
-//! example generator inference, and possibly also HIR borrowck.
+//! example coroutine inference, and possibly also HIR borrowck.
 
 use crate::hir::*;
 use rustc_ast::walk_list;
@@ -152,7 +152,7 @@ pub mod nested_filter {
     /// visit fn bodies for fns that it encounters, and closure bodies, but
     /// skip over nested item-like things.
     ///
-    /// See the comments on `ItemLikeVisitor` for more details on the overall
+    /// See the comments at [`rustc_hir::intravisit`] for more details on the overall
     /// visit strategy.
     pub trait NestedFilter<'hir> {
         type Map: Map<'hir>;
@@ -229,8 +229,8 @@ pub trait Visitor<'v>: Sized {
     /// `Self::NestedFilter` is `nested_filter::None`, this method does
     /// nothing. **You probably don't want to override this method** --
     /// instead, override [`Self::NestedFilter`] or use the "shallow" or
-    /// "deep" visit patterns described on
-    /// `itemlikevisit::ItemLikeVisitor`. The only reason to override
+    /// "deep" visit patterns described at
+    /// [`rustc_hir::intravisit`]. The only reason to override
     /// this method is if you want a nested pattern but cannot supply a
     /// [`Map`]; see `nested_visit_map` for advice.
     fn visit_nested_item(&mut self, id: ItemId) {
@@ -334,6 +334,9 @@ pub trait Visitor<'v>: Sized {
     }
     fn visit_anon_const(&mut self, c: &'v AnonConst) {
         walk_anon_const(self, c)
+    }
+    fn visit_inline_const(&mut self, c: &'v ConstBlock) {
+        walk_inline_const(self, c)
     }
     fn visit_expr(&mut self, ex: &'v Expr<'v>) {
         walk_expr(self, ex)
@@ -464,9 +467,15 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) {
         ItemKind::Use(ref path, _) => {
             visitor.visit_use(path, item.hir_id());
         }
-        ItemKind::Static(ref typ, _, body) | ItemKind::Const(ref typ, body) => {
+        ItemKind::Static(ref typ, _, body) => {
             visitor.visit_id(item.hir_id());
             visitor.visit_ty(typ);
+            visitor.visit_nested_body(body);
+        }
+        ItemKind::Const(ref typ, ref generics, body) => {
+            visitor.visit_id(item.hir_id());
+            visitor.visit_ty(typ);
+            visitor.visit_generics(generics);
             visitor.visit_nested_body(body);
         }
         ItemKind::Fn(ref sig, ref generics, body_id) => {
@@ -499,7 +508,7 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) {
             visitor.visit_ty(ty);
             visitor.visit_generics(generics)
         }
-        ItemKind::OpaqueTy(OpaqueTy { ref generics, bounds, .. }) => {
+        ItemKind::OpaqueTy(&OpaqueTy { generics, bounds, .. }) => {
             visitor.visit_id(item.hir_id());
             walk_generics(visitor, generics);
             walk_list!(visitor, visit_param_bound, bounds);
@@ -513,7 +522,6 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) {
             unsafety: _,
             defaultness: _,
             polarity: _,
-            constness: _,
             defaultness_span: _,
             ref generics,
             ref of_trait,
@@ -611,13 +619,8 @@ pub fn walk_stmt<'v, V: Visitor<'v>>(visitor: &mut V, statement: &'v Stmt<'v>) {
 pub fn walk_arm<'v, V: Visitor<'v>>(visitor: &mut V, arm: &'v Arm<'v>) {
     visitor.visit_id(arm.hir_id);
     visitor.visit_pat(arm.pat);
-    if let Some(ref g) = arm.guard {
-        match g {
-            Guard::If(ref e) => visitor.visit_expr(e),
-            Guard::IfLet(ref l) => {
-                visitor.visit_let_expr(l);
-            }
-        }
+    if let Some(ref e) = arm.guard {
+        visitor.visit_expr(e);
     }
     visitor.visit_expr(arm.body);
 }
@@ -652,7 +655,7 @@ pub fn walk_pat<'v, V: Visitor<'v>>(visitor: &mut V, pattern: &'v Pat<'v>) {
             walk_list!(visitor, visit_expr, lower_bound);
             walk_list!(visitor, visit_expr, upper_bound);
         }
-        PatKind::Wild => (),
+        PatKind::Never | PatKind::Wild => (),
         PatKind::Slice(prepatterns, ref slice_pattern, postpatterns) => {
             walk_list!(visitor, visit_pat, prepatterns);
             walk_list!(visitor, visit_pat, slice_pattern);
@@ -679,14 +682,18 @@ pub fn walk_anon_const<'v, V: Visitor<'v>>(visitor: &mut V, constant: &'v AnonCo
     visitor.visit_nested_body(constant.body);
 }
 
+pub fn walk_inline_const<'v, V: Visitor<'v>>(visitor: &mut V, constant: &'v ConstBlock) {
+    visitor.visit_id(constant.hir_id);
+    visitor.visit_nested_body(constant.body);
+}
+
 pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr<'v>) {
     visitor.visit_id(expression.hir_id);
     match expression.kind {
-        ExprKind::Box(ref subexpression) => visitor.visit_expr(subexpression),
         ExprKind::Array(subexpressions) => {
             walk_list!(visitor, visit_expr, subexpressions);
         }
-        ExprKind::ConstBlock(ref anon_const) => visitor.visit_anon_const(anon_const),
+        ExprKind::ConstBlock(ref const_block) => visitor.visit_inline_const(const_block),
         ExprKind::Repeat(ref element, ref count) => {
             visitor.visit_expr(element);
             visitor.visit_array_length(count)
@@ -745,7 +752,7 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr<'v>) 
             capture_clause: _,
             fn_decl_span: _,
             fn_arg_span: _,
-            movability: _,
+            kind: _,
             constness: _,
         }) => {
             walk_list!(visitor, visit_generic_param, bound_generic_params);
@@ -767,7 +774,7 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr<'v>) 
             visitor.visit_expr(subexpression);
             visitor.visit_ident(ident);
         }
-        ExprKind::Index(ref main_expression, ref index_expression) => {
+        ExprKind::Index(ref main_expression, ref index_expression, _) => {
             visitor.visit_expr(main_expression);
             visitor.visit_expr(index_expression)
         }
@@ -784,8 +791,13 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr<'v>) 
         ExprKind::Ret(ref optional_expression) => {
             walk_list!(visitor, visit_expr, optional_expression);
         }
+        ExprKind::Become(ref expr) => visitor.visit_expr(expr),
         ExprKind::InlineAsm(ref asm) => {
             visitor.visit_inline_asm(asm, expression.hir_id);
+        }
+        ExprKind::OffsetOf(ref container, ref fields) => {
+            visitor.visit_ty(container);
+            walk_list!(visitor, visit_ident, fields.iter().copied());
         }
         ExprKind::Yield(ref subexpression, _) => {
             visitor.visit_expr(subexpression);
@@ -857,7 +869,7 @@ pub fn walk_generic_param<'v, V: Visitor<'v>>(visitor: &mut V, param: &'v Generi
     match param.kind {
         GenericParamKind::Lifetime { .. } => {}
         GenericParamKind::Type { ref default, .. } => walk_list!(visitor, visit_ty, default),
-        GenericParamKind::Const { ref ty, ref default } => {
+        GenericParamKind::Const { ref ty, ref default, is_host_effect: _ } => {
             visitor.visit_ty(ty);
             if let Some(ref default) = default {
                 visitor.visit_const_param_default(param.hir_id, default);
@@ -1057,10 +1069,6 @@ pub fn walk_param_bound<'v, V: Visitor<'v>>(visitor: &mut V, bound: &'v GenericB
     match *bound {
         GenericBound::Trait(ref typ, _modifier) => {
             visitor.visit_poly_trait_ref(typ);
-        }
-        GenericBound::LangItemTrait(_, _span, hir_id, args) => {
-            visitor.visit_id(hir_id);
-            visitor.visit_generic_args(args);
         }
         GenericBound::Outlives(ref lifetime) => visitor.visit_lifetime(lifetime),
     }

@@ -20,7 +20,7 @@ use rustc_span::source_map::SourceMap;
 use rustc_span::SourceFile;
 
 /// Generates diagnostics using annotate-snippet
-pub struct AnnotateSnippetEmitterWriter {
+pub struct AnnotateSnippetEmitter {
     source_map: Option<Lrc<SourceMap>>,
     fluent_bundle: Option<Lrc<FluentBundle>>,
     fallback_bundle: LazyFallbackBundle,
@@ -33,7 +33,7 @@ pub struct AnnotateSnippetEmitterWriter {
     macro_backtrace: bool,
 }
 
-impl Translate for AnnotateSnippetEmitterWriter {
+impl Translate for AnnotateSnippetEmitter {
     fn fluent_bundle(&self) -> Option<&Lrc<FluentBundle>> {
         self.fluent_bundle.as_ref()
     }
@@ -43,7 +43,7 @@ impl Translate for AnnotateSnippetEmitterWriter {
     }
 }
 
-impl Emitter for AnnotateSnippetEmitterWriter {
+impl Emitter for AnnotateSnippetEmitter {
     /// The entry point for the diagnostics generation
     fn emit_diagnostic(&mut self, diag: &Diagnostic) {
         let fluent_args = to_fluent_args(diag.args());
@@ -60,7 +60,7 @@ impl Emitter for AnnotateSnippetEmitterWriter {
 
         self.emit_messages_default(
             &diag.level,
-            &diag.message,
+            &diag.messages,
             &fluent_args,
             &diag.code,
             &primary_span,
@@ -86,12 +86,10 @@ fn source_string(file: Lrc<SourceFile>, line: &Line) -> String {
 /// Maps `Diagnostic::Level` to `snippet::AnnotationType`
 fn annotation_type_for_level(level: Level) -> AnnotationType {
     match level {
-        Level::Bug | Level::DelayedBug | Level::Fatal | Level::Error { .. } => {
-            AnnotationType::Error
-        }
+        Level::Bug | Level::DelayedBug | Level::Fatal | Level::Error => AnnotationType::Error,
         Level::Warning(_) => AnnotationType::Warning,
         Level::Note | Level::OnceNote => AnnotationType::Note,
-        Level::Help => AnnotationType::Help,
+        Level::Help | Level::OnceHelp => AnnotationType::Help,
         // FIXME(#59346): Not sure how to map this level
         Level::FailureNote => AnnotationType::Error,
         Level::Allow => panic!("Should not call with Allow"),
@@ -99,7 +97,7 @@ fn annotation_type_for_level(level: Level) -> AnnotationType {
     }
 }
 
-impl AnnotateSnippetEmitterWriter {
+impl AnnotateSnippetEmitter {
     pub fn new(
         source_map: Option<Lrc<SourceMap>>,
         fluent_bundle: Option<Lrc<FluentBundle>>,
@@ -138,7 +136,7 @@ impl AnnotateSnippetEmitterWriter {
         let message = self.translate_messages(messages, args);
         if let Some(source_map) = &self.source_map {
             // Make sure our primary file comes first
-            let primary_lo = if let Some(ref primary_span) = msp.primary_span().as_ref() {
+            let primary_lo = if let Some(primary_span) = msp.primary_span().as_ref() {
                 if primary_span.is_dummy() {
                     // FIXME(#59346): Not sure when this is the case and what
                     // should be done if it happens
@@ -157,10 +155,8 @@ impl AnnotateSnippetEmitterWriter {
             {
                 annotated_files.swap(0, pos);
             }
-            // owned: line source, line index, annotations
-            type Owned = (String, usize, Vec<crate::snippet::Annotation>);
-            let filename = source_map.filename_for_diagnostics(&primary_lo.file.name);
-            let origin = filename.to_string_lossy();
+            // owned: file name, line source, line index, annotations
+            type Owned = (String, String, usize, Vec<crate::snippet::Annotation>);
             let annotated_files: Vec<Owned> = annotated_files
                 .into_iter()
                 .flat_map(|annotated_file| {
@@ -169,7 +165,16 @@ impl AnnotateSnippetEmitterWriter {
                         .lines
                         .into_iter()
                         .map(|line| {
-                            (source_string(file.clone(), &line), line.line_index, line.annotations)
+                            // Ensure the source file is present before we try
+                            // to load a string from it.
+                            // FIXME(#115869): support -Z ignore-directory-in-diagnostics-source-blocks
+                            source_map.ensure_source_file_source_present(&file);
+                            (
+                                format!("{}", source_map.filename_for_diagnostics(&file.name)),
+                                source_string(file.clone(), &line),
+                                line.line_index,
+                                line.annotations,
+                            )
                         })
                         .collect::<Vec<Owned>>()
                 })
@@ -192,17 +197,20 @@ impl AnnotateSnippetEmitterWriter {
                 },
                 slices: annotated_files
                     .iter()
-                    .map(|(source, line_index, annotations)| {
+                    .map(|(file_name, source, line_index, annotations)| {
                         Slice {
                             source,
                             line_start: *line_index,
-                            origin: Some(&origin),
+                            origin: Some(file_name),
                             // FIXME(#59346): Not really sure when `fold` should be true or false
                             fold: false,
                             annotations: annotations
                                 .iter()
                                 .map(|annotation| SourceAnnotation {
-                                    range: (annotation.start_col, annotation.end_col),
+                                    range: (
+                                        annotation.start_col.display,
+                                        annotation.end_col.display,
+                                    ),
                                     label: annotation.label.as_deref().unwrap_or_default(),
                                     annotation_type: annotation_type_for_level(*level),
                                 })

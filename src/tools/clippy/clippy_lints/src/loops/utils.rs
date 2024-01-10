@@ -1,17 +1,14 @@
 use clippy_utils::ty::{has_iter_method, implements_trait};
 use clippy_utils::{get_parent_expr, is_integer_const, path_to_local, path_to_local_id, sugg};
-use if_chain::if_chain;
 use rustc_ast::ast::{LitIntType, LitKind};
 use rustc_errors::Applicability;
 use rustc_hir::intravisit::{walk_expr, walk_local, walk_pat, walk_stmt, Visitor};
 use rustc_hir::{BinOpKind, BorrowKind, Expr, ExprKind, HirId, HirIdMap, Local, Mutability, Pat, PatKind, Stmt};
-use rustc_hir_analysis::hir_ty_to_ty;
 use rustc_lint::LateContext;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::{sym, Symbol};
-use std::iter::Iterator;
 
 #[derive(Debug, PartialEq, Eq)]
 enum IncrementVisitorVarState {
@@ -76,7 +73,7 @@ impl<'a, 'tcx> Visitor<'tcx> for IncrementVisitor<'a, 'tcx> {
                     ExprKind::Assign(lhs, _, _) if lhs.hir_id == expr.hir_id => {
                         *state = IncrementVisitorVarState::DontWarn;
                     },
-                    ExprKind::AddrOf(BorrowKind::Ref, mutability, _) if mutability == Mutability::Mut => {
+                    ExprKind::AddrOf(BorrowKind::Ref, Mutability::Mut, _) => {
                         *state = IncrementVisitorVarState::DontWarn;
                     },
                     _ => (),
@@ -146,20 +143,18 @@ impl<'a, 'tcx> Visitor<'tcx> for InitializeVisitor<'a, 'tcx> {
 
     fn visit_local(&mut self, l: &'tcx Local<'_>) {
         // Look for declarations of the variable
-        if_chain! {
-            if l.pat.hir_id == self.var_id;
-            if let PatKind::Binding(.., ident, _) = l.pat.kind;
-            then {
-                let ty = l.ty.map(|ty| hir_ty_to_ty(self.cx.tcx, ty));
+        if l.pat.hir_id == self.var_id
+            && let PatKind::Binding(.., ident, _) = l.pat.kind
+        {
+            let ty = l.ty.map(|_| self.cx.typeck_results().pat_ty(l.pat));
 
-                self.state = l.init.map_or(InitializeVisitorState::Declared(ident.name, ty), |init| {
-                    InitializeVisitorState::Initialized {
-                        initializer: init,
-                        ty,
-                        name: ident.name,
-                    }
-                })
-            }
+            self.state = l.init.map_or(InitializeVisitorState::Declared(ident.name, ty), |init| {
+                InitializeVisitorState::Initialized {
+                    initializer: init,
+                    ty,
+                    name: ident.name,
+                }
+            });
         }
 
         walk_local(self, l);
@@ -226,7 +221,7 @@ impl<'a, 'tcx> Visitor<'tcx> for InitializeVisitor<'a, 'tcx> {
                             InitializeVisitorState::DontWarn
                         }
                     },
-                    ExprKind::AddrOf(BorrowKind::Ref, mutability, _) if mutability == Mutability::Mut => {
+                    ExprKind::AddrOf(BorrowKind::Ref, Mutability::Mut, _) => {
                         self.state = InitializeVisitorState::DontWarn;
                     },
                     _ => (),

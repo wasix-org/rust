@@ -1,12 +1,13 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
-use clippy_utils::macros::{is_format_macro, root_macro_call_first_node, FormatArg, FormatArgsExpn};
+use clippy_utils::macros::{find_format_arg_expr, find_format_args, is_format_macro, root_macro_call_first_node};
 use clippy_utils::{get_parent_as_impl, is_diag_trait_item, path_to_local, peel_ref_operators};
-use if_chain::if_chain;
+use rustc_ast::{FormatArgsPiece, FormatTrait};
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, Impl, ImplItem, ImplItemKind, QPath};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{sym, symbol::kw, Symbol};
+use rustc_session::impl_lint_pass;
+use rustc_span::symbol::kw;
+use rustc_span::{sym, Span, Symbol};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -19,7 +20,7 @@ declare_clippy_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust
+    /// ```no_run
     /// use std::fmt;
     ///
     /// struct Structure(i32);
@@ -31,7 +32,7 @@ declare_clippy_lint! {
     ///
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// use std::fmt;
     ///
     /// struct Structure(i32);
@@ -49,7 +50,7 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for use of `println`, `print`, `eprintln` or `eprint` in an
+    /// Checks for usage of `println`, `print`, `eprintln` or `eprint` in an
     /// implementation of a formatting trait.
     ///
     /// ### Why is this bad?
@@ -57,7 +58,7 @@ declare_clippy_lint! {
     /// should write to the `Formatter`, not stdout/stderr.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// use std::fmt::{Display, Error, Formatter};
     ///
     /// struct S;
@@ -70,7 +71,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// use std::fmt::{Display, Error, Formatter};
     ///
     /// struct S;
@@ -89,7 +90,7 @@ declare_clippy_lint! {
 }
 
 #[derive(Clone, Copy)]
-struct FormatTrait {
+struct FormatTraitNames {
     /// e.g. `sym::Display`
     name: Symbol,
     /// `f` in `fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {}`
@@ -99,7 +100,7 @@ struct FormatTrait {
 #[derive(Default)]
 pub struct FormatImpl {
     // Whether we are inside Display or Debug trait impl - None for neither
-    format_trait_impl: Option<FormatTrait>,
+    format_trait_impl: Option<FormatTraitNames>,
 }
 
 impl FormatImpl {
@@ -125,7 +126,9 @@ impl<'tcx> LateLintPass<'tcx> for FormatImpl {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        let Some(format_trait_impl) = self.format_trait_impl else { return };
+        let Some(format_trait_impl) = self.format_trait_impl else {
+            return;
+        };
 
         if format_trait_impl.name == sym::Display {
             check_to_string_in_display(cx, expr);
@@ -137,116 +140,125 @@ impl<'tcx> LateLintPass<'tcx> for FormatImpl {
 }
 
 fn check_to_string_in_display(cx: &LateContext<'_>, expr: &Expr<'_>) {
-    if_chain! {
+    if let ExprKind::MethodCall(path, self_arg, ..) = expr.kind
         // Get the hir_id of the object we are calling the method on
-        if let ExprKind::MethodCall(path, self_arg, ..) = expr.kind;
         // Is the method to_string() ?
-        if path.ident.name == sym::to_string;
+        && path.ident.name == sym::to_string
         // Is the method a part of the ToString trait? (i.e. not to_string() implemented
         // separately)
-        if let Some(expr_def_id) = cx.typeck_results().type_dependent_def_id(expr.hir_id);
-        if is_diag_trait_item(cx, expr_def_id, sym::ToString);
+        && let Some(expr_def_id) = cx.typeck_results().type_dependent_def_id(expr.hir_id)
+        && is_diag_trait_item(cx, expr_def_id, sym::ToString)
         // Is the method is called on self
-        if let ExprKind::Path(QPath::Resolved(_, path)) = self_arg.kind;
-        if let [segment] = path.segments;
-        if segment.ident.name == kw::SelfLower;
-        then {
-            span_lint(
-                cx,
-                RECURSIVE_FORMAT_IMPL,
-                expr.span,
-                "using `self.to_string` in `fmt::Display` implementation will cause infinite recursion",
-            );
-        }
+        && let ExprKind::Path(QPath::Resolved(_, path)) = self_arg.kind
+        && let [segment] = path.segments
+        && segment.ident.name == kw::SelfLower
+    {
+        span_lint(
+            cx,
+            RECURSIVE_FORMAT_IMPL,
+            expr.span,
+            "using `self.to_string` in `fmt::Display` implementation will cause infinite recursion",
+        );
     }
 }
 
-fn check_self_in_format_args<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, impl_trait: FormatTrait) {
+fn check_self_in_format_args<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, impl_trait: FormatTraitNames) {
     // Check each arg in format calls - do we ever use Display on self (directly or via deref)?
-    if_chain! {
-        if let Some(outer_macro) = root_macro_call_first_node(cx, expr);
-        if let macro_def_id = outer_macro.def_id;
-        if let Some(format_args) = FormatArgsExpn::find_nested(cx, expr, outer_macro.expn);
-        if is_format_macro(cx, macro_def_id);
-        then {
-            for arg in format_args.args {
-                if arg.format.r#trait != impl_trait.name {
-                    continue;
+    if let Some(outer_macro) = root_macro_call_first_node(cx, expr)
+        && let macro_def_id = outer_macro.def_id
+        && is_format_macro(cx, macro_def_id)
+        && let Some(format_args) = find_format_args(cx, expr, outer_macro.expn)
+    {
+        for piece in &format_args.template {
+            if let FormatArgsPiece::Placeholder(placeholder) = piece
+                && let trait_name = match placeholder.format_trait {
+                    FormatTrait::Display => sym::Display,
+                    FormatTrait::Debug => sym::Debug,
+                    FormatTrait::LowerExp => sym!(LowerExp),
+                    FormatTrait::UpperExp => sym!(UpperExp),
+                    FormatTrait::Octal => sym!(Octal),
+                    FormatTrait::Pointer => sym::Pointer,
+                    FormatTrait::Binary => sym!(Binary),
+                    FormatTrait::LowerHex => sym!(LowerHex),
+                    FormatTrait::UpperHex => sym!(UpperHex),
                 }
-                check_format_arg_self(cx, expr, &arg, impl_trait);
+                && trait_name == impl_trait.name
+                && let Ok(index) = placeholder.argument.index
+                && let Some(arg) = format_args.arguments.all_args().get(index)
+                && let Ok(arg_expr) = find_format_arg_expr(expr, arg)
+            {
+                check_format_arg_self(cx, expr.span, arg_expr, impl_trait);
             }
         }
     }
 }
 
-fn check_format_arg_self(cx: &LateContext<'_>, expr: &Expr<'_>, arg: &FormatArg<'_>, impl_trait: FormatTrait) {
+fn check_format_arg_self(cx: &LateContext<'_>, span: Span, arg: &Expr<'_>, impl_trait: FormatTraitNames) {
     // Handle multiple dereferencing of references e.g. &&self
     // Handle dereference of &self -> self that is equivalent (i.e. via *self in fmt() impl)
     // Since the argument to fmt is itself a reference: &self
-    let reference = peel_ref_operators(cx, arg.param.value);
+    let reference = peel_ref_operators(cx, arg);
     let map = cx.tcx.hir();
     // Is the reference self?
     if path_to_local(reference).map(|x| map.name(x)) == Some(kw::SelfLower) {
-        let FormatTrait { name, .. } = impl_trait;
+        let FormatTraitNames { name, .. } = impl_trait;
         span_lint(
             cx,
             RECURSIVE_FORMAT_IMPL,
-            expr.span,
+            span,
             &format!("using `self` as `{name}` in `impl {name}` will cause infinite recursion"),
         );
     }
 }
 
-fn check_print_in_format_impl(cx: &LateContext<'_>, expr: &Expr<'_>, impl_trait: FormatTrait) {
-    if_chain! {
-        if let Some(macro_call) = root_macro_call_first_node(cx, expr);
-        if let Some(name) = cx.tcx.get_diagnostic_name(macro_call.def_id);
-        then {
-            let replacement = match name {
-                sym::print_macro | sym::eprint_macro => "write",
-                sym::println_macro | sym::eprintln_macro => "writeln",
-                _ => return,
-            };
+fn check_print_in_format_impl(cx: &LateContext<'_>, expr: &Expr<'_>, impl_trait: FormatTraitNames) {
+    if let Some(macro_call) = root_macro_call_first_node(cx, expr)
+        && let Some(name) = cx.tcx.get_diagnostic_name(macro_call.def_id)
+    {
+        let replacement = match name {
+            sym::print_macro | sym::eprint_macro => "write",
+            sym::println_macro | sym::eprintln_macro => "writeln",
+            _ => return,
+        };
 
-            let name = name.as_str().strip_suffix("_macro").unwrap();
+        let name = name.as_str().strip_suffix("_macro").unwrap();
 
-            span_lint_and_sugg(
-                cx,
-                PRINT_IN_FORMAT_IMPL,
-                macro_call.span,
-                &format!("use of `{name}!` in `{}` impl", impl_trait.name),
-                "replace with",
-                if let Some(formatter_name) = impl_trait.formatter_name {
-                    format!("{replacement}!({formatter_name}, ..)")
-                } else {
-                    format!("{replacement}!(..)")
-                },
-                Applicability::HasPlaceholders,
-            );
-        }
+        span_lint_and_sugg(
+            cx,
+            PRINT_IN_FORMAT_IMPL,
+            macro_call.span,
+            &format!("use of `{name}!` in `{}` impl", impl_trait.name),
+            "replace with",
+            if let Some(formatter_name) = impl_trait.formatter_name {
+                format!("{replacement}!({formatter_name}, ..)")
+            } else {
+                format!("{replacement}!(..)")
+            },
+            Applicability::HasPlaceholders,
+        );
     }
 }
 
-fn is_format_trait_impl(cx: &LateContext<'_>, impl_item: &ImplItem<'_>) -> Option<FormatTrait> {
-    if_chain! {
-        if impl_item.ident.name == sym::fmt;
-        if let ImplItemKind::Fn(_, body_id) = impl_item.kind;
-        if let Some(Impl { of_trait: Some(trait_ref),..}) = get_parent_as_impl(cx.tcx, impl_item.hir_id());
-        if let Some(did) = trait_ref.trait_def_id();
-        if let Some(name) = cx.tcx.get_diagnostic_name(did);
-        if matches!(name, sym::Debug | sym::Display);
-        then {
-            let body = cx.tcx.hir().body(body_id);
-            let formatter_name = body.params.get(1)
-                .and_then(|param| param.pat.simple_ident())
-                .map(|ident| ident.name);
+fn is_format_trait_impl(cx: &LateContext<'_>, impl_item: &ImplItem<'_>) -> Option<FormatTraitNames> {
+    if impl_item.ident.name == sym::fmt
+        && let ImplItemKind::Fn(_, body_id) = impl_item.kind
+        && let Some(Impl {
+            of_trait: Some(trait_ref),
+            ..
+        }) = get_parent_as_impl(cx.tcx, impl_item.hir_id())
+        && let Some(did) = trait_ref.trait_def_id()
+        && let Some(name) = cx.tcx.get_diagnostic_name(did)
+        && matches!(name, sym::Debug | sym::Display)
+    {
+        let body = cx.tcx.hir().body(body_id);
+        let formatter_name = body
+            .params
+            .get(1)
+            .and_then(|param| param.pat.simple_ident())
+            .map(|ident| ident.name);
 
-            Some(FormatTrait {
-                name,
-                formatter_name,
-            })
-        } else {
-            None
-        }
+        Some(FormatTraitNames { name, formatter_name })
+    } else {
+        None
     }
 }

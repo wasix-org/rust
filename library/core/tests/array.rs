@@ -1,5 +1,5 @@
-use core::array;
-use core::convert::TryFrom;
+use core::{array, assert_eq};
+use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
@@ -256,19 +256,13 @@ fn iterator_drops() {
     assert_eq!(i.get(), 5);
 }
 
-// This test does not work on targets without panic=unwind support.
-// To work around this problem, test is marked is should_panic, so it will
-// be automagically skipped on unsuitable targets, such as
-// wasm32-unknown-unknown.
-//
-// It means that we use panic for indicating success.
 #[test]
-#[should_panic(expected = "test succeeded")]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn array_default_impl_avoids_leaks_on_panic() {
     use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     #[derive(Debug)]
-    struct Bomb(usize);
+    struct Bomb(#[allow(dead_code)] usize);
 
     impl Default for Bomb {
         fn default() -> Bomb {
@@ -295,7 +289,6 @@ fn array_default_impl_avoids_leaks_on_panic() {
     assert_eq!(*panic_msg, "bomb limit exceeded");
     // check that all bombs are successfully dropped
     assert_eq!(COUNTER.load(Relaxed), 0);
-    panic!("test succeeded")
 }
 
 #[test]
@@ -316,9 +309,8 @@ fn array_map() {
     assert_eq!(b, [1, 2, 3]);
 }
 
-// See note on above test for why `should_panic` is used.
 #[test]
-#[should_panic(expected = "test succeeded")]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn array_map_drop_safety() {
     static DROPPED: AtomicUsize = AtomicUsize::new(0);
     struct DropCounter;
@@ -340,7 +332,6 @@ fn array_map_drop_safety() {
     });
     assert!(success.is_err());
     assert_eq!(DROPPED.load(Ordering::SeqCst), num_to_create);
-    panic!("test succeeded")
 }
 
 #[test]
@@ -557,7 +548,7 @@ fn array_intoiter_advance_by() {
     assert_eq!(counter.get(), 13);
 
     let r = it.advance_by(123456);
-    assert_eq!(r, Err(87));
+    assert_eq!(r, Err(NonZeroUsize::new(123456 - 87).unwrap()));
     assert_eq!(it.len(), 0);
     assert_eq!(counter.get(), 100);
 
@@ -567,7 +558,7 @@ fn array_intoiter_advance_by() {
     assert_eq!(counter.get(), 100);
 
     let r = it.advance_by(10);
-    assert_eq!(r, Err(0));
+    assert_eq!(r, Err(NonZeroUsize::new(10).unwrap()));
     assert_eq!(it.len(), 0);
     assert_eq!(counter.get(), 100);
 }
@@ -610,7 +601,7 @@ fn array_intoiter_advance_back_by() {
     assert_eq!(counter.get(), 13);
 
     let r = it.advance_back_by(123456);
-    assert_eq!(r, Err(87));
+    assert_eq!(r, Err(NonZeroUsize::new(123456 - 87).unwrap()));
     assert_eq!(it.len(), 0);
     assert_eq!(counter.get(), 100);
 
@@ -620,7 +611,7 @@ fn array_intoiter_advance_back_by() {
     assert_eq!(counter.get(), 100);
 
     let r = it.advance_back_by(10);
-    assert_eq!(r, Err(0));
+    assert_eq!(r, Err(NonZeroUsize::new(10).unwrap()));
     assert_eq!(it.len(), 0);
     assert_eq!(counter.get(), 100);
 }
@@ -671,7 +662,7 @@ fn array_mixed_equality_nans() {
 
 #[test]
 fn array_into_iter_fold() {
-    // Strings to help MIRI catch if we double-free or something
+    // Strings to help Miri catch if we double-free or something
     let a = ["Aa".to_string(), "Bb".to_string(), "Cc".to_string()];
     let mut s = "s".to_string();
     a.into_iter().for_each(|b| s += &b);
@@ -679,15 +670,15 @@ fn array_into_iter_fold() {
 
     let a = [1, 2, 3, 4, 5, 6];
     let mut it = a.into_iter();
-    it.advance_by(1).unwrap();
-    it.advance_back_by(2).unwrap();
+    assert_eq!(it.advance_by(1), Ok(()));
+    assert_eq!(it.advance_back_by(2), Ok(()));
     let s = it.fold(10, |a, b| 10 * a + b);
     assert_eq!(s, 10234);
 }
 
 #[test]
 fn array_into_iter_rfold() {
-    // Strings to help MIRI catch if we double-free or something
+    // Strings to help Miri catch if we double-free or something
     let a = ["Aa".to_string(), "Bb".to_string(), "Cc".to_string()];
     let mut s = "s".to_string();
     a.into_iter().rev().for_each(|b| s += &b);
@@ -695,8 +686,8 @@ fn array_into_iter_rfold() {
 
     let a = [1, 2, 3, 4, 5, 6];
     let mut it = a.into_iter();
-    it.advance_by(1).unwrap();
-    it.advance_back_by(2).unwrap();
+    assert_eq!(it.advance_by(1), Ok(()));
+    assert_eq!(it.advance_back_by(2), Ok(()));
     let s = it.rfold(10, |a, b| 10 * a + b);
     assert_eq!(s, 10432);
 }

@@ -6,7 +6,7 @@
 //! * Extracting markup (mainly, `$0` markers) out of fixture strings.
 //! * marks (see the eponymous module).
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
 
 mod assert_linear;
 pub mod bench_fixture;
@@ -27,7 +27,7 @@ pub use rustc_hash::FxHashMap;
 
 pub use crate::{
     assert_linear::AssertLinear,
-    fixture::{Fixture, MiniCore},
+    fixture::{Fixture, FixtureWithProjectMeta, MiniCore},
 };
 
 pub const CURSOR_MARKER: &str = "$0";
@@ -95,7 +95,7 @@ fn try_extract_range(text: &str) -> Option<(TextRange, String)> {
     Some((TextRange::new(start, end), text))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum RangeOrOffset {
     Range(TextRange),
     Offset(TextSize),

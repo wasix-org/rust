@@ -9,7 +9,9 @@
 //! at the index that the match starts at and its tree parent is
 //! resolved to the search element definition, we get a reference.
 
-use hir::{PathResolution, Semantics};
+use std::collections::HashMap;
+
+use hir::{DescendPreference, PathResolution, Semantics};
 use ide_db::{
     base_db::FileId,
     defs::{Definition, NameClass, NameRefClass},
@@ -17,7 +19,7 @@ use ide_db::{
     RootDatabase,
 };
 use itertools::Itertools;
-use stdx::hash::NoHashHashMap;
+use nohash_hasher::IntMap;
 use syntax::{
     algo::find_node_at_offset,
     ast::{self, HasName},
@@ -31,7 +33,7 @@ use crate::{FilePosition, NavigationTarget, TryToNav};
 #[derive(Debug, Clone)]
 pub struct ReferenceSearchResult {
     pub declaration: Option<Declaration>,
-    pub references: NoHashHashMap<FileId, Vec<(TextRange, Option<ReferenceCategory>)>>,
+    pub references: IntMap<FileId, Vec<(TextRange, Option<ReferenceCategory>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,27 +62,14 @@ pub(crate) fn find_all_refs(
     let syntax = sema.parse(position.file_id).syntax().clone();
     let make_searcher = |literal_search: bool| {
         move |def: Definition| {
-            let declaration = match def {
-                Definition::Module(module) => {
-                    Some(NavigationTarget::from_module_to_decl(sema.db, module))
-                }
-                def => def.try_to_nav(sema.db),
-            }
-            .map(|nav| {
-                let decl_range = nav.focus_or_full_range();
-                Declaration {
-                    is_mut: decl_mutability(&def, sema.parse(nav.file_id).syntax(), decl_range),
-                    nav,
-                }
-            });
             let mut usages =
-                def.usages(sema).set_scope(search_scope.clone()).include_self_refs().all();
+                def.usages(sema).set_scope(search_scope.as_ref()).include_self_refs().all();
 
             if literal_search {
                 retain_adt_literal_usages(&mut usages, def, sema);
             }
 
-            let references = usages
+            let mut references = usages
                 .into_iter()
                 .map(|(file_id, refs)| {
                     (
@@ -91,8 +80,30 @@ pub(crate) fn find_all_refs(
                             .collect(),
                     )
                 })
-                .collect();
-
+                .collect::<HashMap<_, Vec<_>, _>>();
+            let declaration = match def {
+                Definition::Module(module) => {
+                    Some(NavigationTarget::from_module_to_decl(sema.db, module))
+                }
+                def => def.try_to_nav(sema.db),
+            }
+            .map(|nav| {
+                let (nav, extra_ref) = match nav.def_site {
+                    Some(call) => (call, Some(nav.call_site)),
+                    None => (nav.call_site, None),
+                };
+                if let Some(extra_ref) = extra_ref {
+                    references
+                        .entry(extra_ref.file_id)
+                        .or_default()
+                        .push((extra_ref.focus_or_full_range(), None));
+                }
+                let decl_range = nav.focus_or_full_range();
+                Declaration {
+                    is_mut: decl_mutability(&def, sema.parse(nav.file_id).syntax(), decl_range),
+                    nav,
+                }
+            });
             ReferenceSearchResult { declaration, references }
         }
     };
@@ -109,7 +120,7 @@ pub(crate) fn find_all_refs(
         }
         None => {
             let search = make_searcher(false);
-            Some(find_defs(sema, &syntax, position.offset)?.map(search).collect())
+            Some(find_defs(sema, &syntax, position.offset)?.into_iter().map(search).collect())
         }
     }
 }
@@ -118,15 +129,27 @@ pub(crate) fn find_defs<'a>(
     sema: &'a Semantics<'_, RootDatabase>,
     syntax: &SyntaxNode,
     offset: TextSize,
-) -> Option<impl Iterator<Item = Definition> + 'a> {
+) -> Option<impl IntoIterator<Item = Definition> + 'a> {
     let token = syntax.token_at_offset(offset).find(|t| {
         matches!(
             t.kind(),
-            IDENT | INT_NUMBER | LIFETIME_IDENT | T![self] | T![super] | T![crate] | T![Self]
+            IDENT
+                | INT_NUMBER
+                | LIFETIME_IDENT
+                | STRING
+                | T![self]
+                | T![super]
+                | T![crate]
+                | T![Self]
         )
-    });
-    token.map(|token| {
-        sema.descend_into_macros_with_same_text(token)
+    })?;
+
+    if let Some((_, resolution)) = sema.check_for_format_args_template(token.clone(), offset) {
+        return resolution.map(Definition::from).map(|it| vec![it]);
+    }
+
+    Some(
+        sema.descend_into_macros(DescendPreference::SameText, token)
             .into_iter()
             .filter_map(|it| ast::NameLike::cast(it.parent()?))
             .filter_map(move |name_like| {
@@ -136,6 +159,9 @@ pub(crate) fn find_defs<'a>(
                             NameRefClass::Definition(def) => def,
                             NameRefClass::FieldShorthand { local_ref, field_ref: _ } => {
                                 Definition::Local(local_ref)
+                            }
+                            NameRefClass::ExternCrateShorthand { decl, .. } => {
+                                Definition::ExternCrateDecl(decl)
                             }
                         }
                     }
@@ -159,7 +185,8 @@ pub(crate) fn find_defs<'a>(
                 };
                 Some(def)
             })
-    })
+            .collect(),
+    )
 }
 
 pub(crate) fn decl_mutability(def: &Definition, syntax: &SyntaxNode, range: TextRange) -> bool {
@@ -681,6 +708,32 @@ enum Foo {
     }
 
     #[test]
+    fn test_self() {
+        check(
+            r#"
+struct S$0<T> {
+    t: PhantomData<T>,
+}
+
+impl<T> S<T> {
+    fn new() -> Self {
+        Self {
+            t: Default::default(),
+        }
+    }
+}
+"#,
+            expect![[r#"
+            S Struct FileId(0) 0..38 7..8
+
+            FileId(0) 48..49
+            FileId(0) 71..75
+            FileId(0) 86..90
+            "#]],
+        )
+    }
+
+    #[test]
     fn test_find_all_refs_two_modules() {
         check(
             r#"
@@ -715,7 +768,7 @@ fn f() {
 }
 "#,
             expect![[r#"
-                Foo Struct FileId(1) 17..51 28..31
+                Foo Struct FileId(1) 17..51 28..31 foo
 
                 FileId(0) 53..56
                 FileId(2) 79..82
@@ -803,7 +856,7 @@ pub(super) struct Foo$0 {
 }
 "#,
             expect![[r#"
-                Foo Struct FileId(2) 0..41 18..21
+                Foo Struct FileId(2) 0..41 18..21 some
 
                 FileId(1) 20..23 Import
                 FileId(1) 47..50
@@ -840,7 +893,7 @@ pub(super) struct Foo$0 {
 
         check_with_scope(
             code,
-            Some(SearchScope::single_file(FileId(2))),
+            Some(SearchScope::single_file(FileId::from_raw(2))),
             expect![[r#"
                 quux Function FileId(0) 19..35 26..30
 
@@ -1139,7 +1192,7 @@ fn foo<'a, 'b: 'a>(x: &'a$0 ()) -> &'a () where &'a (): Foo<'a> {
 }
 "#,
             expect![[r#"
-                'a LifetimeParam FileId(0) 55..57 55..57
+                'a LifetimeParam FileId(0) 55..57
 
                 FileId(0) 63..65
                 FileId(0) 71..73
@@ -1157,7 +1210,7 @@ fn foo<'a, 'b: 'a>(x: &'a$0 ()) -> &'a () where &'a (): Foo<'a> {
 type Foo<'a, T> where T: 'a$0 = &'a T;
 "#,
             expect![[r#"
-                'a LifetimeParam FileId(0) 9..11 9..11
+                'a LifetimeParam FileId(0) 9..11
 
                 FileId(0) 25..27
                 FileId(0) 31..33
@@ -1179,7 +1232,7 @@ impl<'a> Foo<'a> for &'a () {
 }
 "#,
             expect![[r#"
-                'a LifetimeParam FileId(0) 47..49 47..49
+                'a LifetimeParam FileId(0) 47..49
 
                 FileId(0) 55..57
                 FileId(0) 64..66
@@ -1289,7 +1342,7 @@ trait Foo where Self$0 {
 impl Foo for () {}
 "#,
             expect![[r#"
-                Self TypeParam FileId(0) 6..9 6..9
+                Self TypeParam FileId(0) 0..44 6..9
 
                 FileId(0) 16..20
                 FileId(0) 37..41
@@ -1351,6 +1404,38 @@ impl Foo {
                 Bar Variant FileId(0) 11..16 11..14
 
                 FileId(0) 89..92
+            "#]],
+        );
+    }
+
+    #[test]
+    fn test_trait_alias() {
+        check(
+            r#"
+trait Foo {}
+trait Bar$0 = Foo where Self: ;
+fn foo<T: Bar>(_: impl Bar, _: &dyn Bar) {}
+"#,
+            expect![[r#"
+                Bar TraitAlias FileId(0) 13..42 19..22
+
+                FileId(0) 53..56
+                FileId(0) 66..69
+                FileId(0) 79..82
+            "#]],
+        );
+    }
+
+    #[test]
+    fn test_trait_alias_self() {
+        check(
+            r#"
+trait Foo = where Self$0: ;
+"#,
+            expect![[r#"
+                Self TypeParam FileId(0) 0..25 6..9
+
+                FileId(0) 18..22
             "#]],
         );
     }
@@ -1510,7 +1595,7 @@ fn f() {
                 FileId(0) 161..165
 
 
-                func Function FileId(0) 137..146 140..144
+                func Function FileId(0) 137..146 140..144 module
 
                 FileId(0) 181..185
             "#]],
@@ -1549,7 +1634,7 @@ trait Trait {
 }
 "#,
             expect![[r#"
-                func Function FileId(0) 48..87 51..55
+                func Function FileId(0) 48..87 51..55 Trait
 
                 FileId(0) 74..78
             "#]],
@@ -1660,7 +1745,7 @@ fn f<T: Trait>() {
 }
 "#,
             expect![[r#"
-                CONST Const FileId(0) 18..37 24..29
+                CONST Const FileId(0) 18..37 24..29 Trait
 
                 FileId(0) 71..76
                 FileId(0) 125..130
@@ -1689,7 +1774,7 @@ fn f<T: Trait>() {
 }
 "#,
             expect![[r#"
-                TypeAlias TypeAlias FileId(0) 18..33 23..32
+                TypeAlias TypeAlias FileId(0) 18..33 23..32 Trait
 
                 FileId(0) 66..75
                 FileId(0) 117..126
@@ -1718,7 +1803,7 @@ fn f<T: Trait>() {
 }
 "#,
             expect![[r#"
-                function Function FileId(0) 18..34 21..29
+                function Function FileId(0) 18..34 21..29 Trait
 
                 FileId(0) 65..73
                 FileId(0) 112..120
@@ -1862,7 +1947,7 @@ fn f<T: Trait>() {
 }
 "#,
             expect![[r#"
-                TypeAlias TypeAlias FileId(0) 18..33 23..32
+                TypeAlias TypeAlias FileId(0) 18..33 23..32 Trait
 
                 FileId(0) 66..75
                 FileId(0) 117..126
@@ -1918,7 +2003,7 @@ impl Foo for Bar {
 fn method() {}
 "#,
             expect![[r#"
-                method Function FileId(0) 16..39 19..25
+                method Function FileId(0) 16..39 19..25 Foo
 
                 FileId(0) 101..107
             "#]],
@@ -2028,6 +2113,29 @@ fn main() { r#fn(); }
                 r#fn Function FileId(0) 0..12 3..7
 
                 FileId(0) 25..29
+            "#]],
+        );
+    }
+
+    #[test]
+    fn implicit_format_args() {
+        check(
+            r#"
+//- minicore: fmt
+fn test() {
+    let a = "foo";
+    format_args!("hello {a} {a$0} {}", a);
+                      // ^
+                          // ^
+                                   // ^
+}
+"#,
+            expect![[r#"
+                a Local FileId(0) 20..21 20..21
+
+                FileId(0) 56..57 Read
+                FileId(0) 60..61 Read
+                FileId(0) 68..69 Read
             "#]],
         );
     }

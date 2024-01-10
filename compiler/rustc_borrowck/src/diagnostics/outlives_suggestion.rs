@@ -1,7 +1,7 @@
 //! Contains utilities for generating suggestions for borrowck errors related to unsatisfied
 //! outlives constraints.
 
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::FxIndexSet;
 use rustc_errors::Diagnostic;
 use rustc_middle::ty::RegionVid;
 use smallvec::SmallVec;
@@ -50,8 +50,8 @@ impl OutlivesSuggestionBuilder {
     // naming the `'self` lifetime in methods, etc.
     fn region_name_is_suggestable(name: &RegionName) -> bool {
         match name.source {
-            RegionNameSource::NamedEarlyBoundRegion(..)
-            | RegionNameSource::NamedFreeRegion(..)
+            RegionNameSource::NamedEarlyParamRegion(..)
+            | RegionNameSource::NamedLateParamRegion(..)
             | RegionNameSource::Static => true,
 
             // Don't give suggestions for upvars, closure return types, or other unnameable
@@ -87,7 +87,7 @@ impl OutlivesSuggestionBuilder {
 
         // Keep track of variables that we have already suggested unifying so that we don't print
         // out silly duplicate messages.
-        let mut unified_already = FxHashSet::default();
+        let mut unified_already = FxIndexSet::default();
 
         for (fr, outlived) in &self.constraints_to_add {
             let Some(fr_name) = self.region_vid_to_name(mbcx, *fr) else {
@@ -125,8 +125,7 @@ impl OutlivesSuggestionBuilder {
                     |(r, _)| {
                         self.constraints_to_add
                             .get(r)
-                            .map(|r_outlived| r_outlived.as_slice().contains(fr))
-                            .unwrap_or(false)
+                            .is_some_and(|r_outlived| r_outlived.as_slice().contains(fr))
                     },
                 );
 
@@ -171,7 +170,7 @@ impl OutlivesSuggestionBuilder {
         if let (Some(fr_name), Some(outlived_fr_name)) = (fr_name, outlived_fr_name)
             && !matches!(outlived_fr_name.source, RegionNameSource::Static)
         {
-            diag.help(&format!(
+            diag.help(format!(
                 "consider adding the following bound: `{fr_name}: {outlived_fr_name}`",
             ));
         }
@@ -207,7 +206,7 @@ impl OutlivesSuggestionBuilder {
         // If there is exactly one suggestable constraints, then just suggest it. Otherwise, emit a
         // list of diagnostics.
         let mut diag = if suggested.len() == 1 {
-            mbcx.infcx.tcx.sess.diagnostic().struct_help(&match suggested.last().unwrap() {
+            mbcx.dcx().struct_help(match suggested.last().unwrap() {
                 SuggestedConstraint::Outlives(a, bs) => {
                     let bs: SmallVec<[String; 2]> = bs.iter().map(|r| r.to_string()).collect();
                     format!("add bound `{a}: {}`", bs.join(" + "))
@@ -223,8 +222,7 @@ impl OutlivesSuggestionBuilder {
             let mut diag = mbcx
                 .infcx
                 .tcx
-                .sess
-                .diagnostic()
+                .dcx()
                 .struct_help("the following changes may resolve your lifetime errors");
 
             // Add suggestions.
@@ -232,15 +230,15 @@ impl OutlivesSuggestionBuilder {
                 match constraint {
                     SuggestedConstraint::Outlives(a, bs) => {
                         let bs: SmallVec<[String; 2]> = bs.iter().map(|r| r.to_string()).collect();
-                        diag.help(&format!("add bound `{a}: {}`", bs.join(" + ")));
+                        diag.help(format!("add bound `{a}: {}`", bs.join(" + ")));
                     }
                     SuggestedConstraint::Equal(a, b) => {
-                        diag.help(&format!(
+                        diag.help(format!(
                             "`{a}` and `{b}` must be the same: replace one with the other",
                         ));
                     }
                     SuggestedConstraint::Static(a) => {
-                        diag.help(&format!("replace `{a}` with `'static`"));
+                        diag.help(format!("replace `{a}` with `'static`"));
                     }
                 }
             }

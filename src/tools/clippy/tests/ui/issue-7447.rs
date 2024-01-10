@@ -1,4 +1,7 @@
-use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData, sync::Arc};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 fn byte_view<'a>(s: &'a ByteView<'_>) -> BTreeMap<&'a str, ByteView<'a>> {
     panic!()
@@ -21,5 +24,8 @@ pub struct ByteView<'a> {
 
 fn main() {
     byte_view(panic!());
+    //~^ ERROR: sub-expression diverges
+    //~| NOTE: `-D clippy::diverging-sub-expression` implied by `-D warnings`
     group_entries(panic!());
+    //~^ ERROR: sub-expression diverges
 }

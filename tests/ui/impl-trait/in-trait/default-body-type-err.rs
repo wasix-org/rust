@@ -1,6 +1,3 @@
-#![allow(incomplete_features)]
-#![feature(return_position_impl_trait_in_trait)]
-
 use std::ops::Deref;
 
 pub trait Foo {

@@ -35,6 +35,14 @@ pub fn passes_unused_parens_lint() -> &'static (dyn Trait) {
     panic!()
 }
 
+pub fn parens_with_keyword(e: &[()]) -> i32 {
+    if(true) {} //~ ERROR unnecessary parentheses around `if`
+    while(true) {} //~ ERROR unnecessary parentheses around `while`
+    for _ in(e) {} //~ ERROR unnecessary parentheses around `for`
+    match(1) { _ => ()} //~ ERROR unnecessary parentheses around `match`
+    return(1); //~ ERROR unnecessary parentheses around `return` value
+}
+
 macro_rules! baz {
     ($($foo:expr),+) => {
         ($($foo),*)
@@ -75,6 +83,14 @@ fn main() {
     let mut _a = (0); //~ ERROR unnecessary parentheses around assigned value
     _a = (0); //~ ERROR unnecessary parentheses around assigned value
     _a += (1); //~ ERROR unnecessary parentheses around assigned value
+
+    let(mut _a) = 3; //~ ERROR unnecessary parentheses around pattern
+    let (mut _a) = 3; //~ ERROR unnecessary parentheses around pattern
+    let( mut _a) = 3; //~ ERROR unnecessary parentheses around pattern
+
+    let(_a) = 3; //~ ERROR unnecessary parentheses around pattern
+    let (_a) = 3; //~ ERROR unnecessary parentheses around pattern
+    let( _a) = 3; //~ ERROR unnecessary parentheses around pattern
 
     let _a = baz!(3, 4);
     let _b = baz!(3);

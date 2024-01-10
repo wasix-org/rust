@@ -24,7 +24,7 @@ pub enum StrStep<'a> {
     Error { msg: &'a str, pos: usize },
 }
 
-impl<'a> LexedStr<'a> {
+impl LexedStr<'_> {
     pub fn to_input(&self) -> crate::Input {
         let mut res = crate::Input::default();
         let mut was_joint = false;
@@ -32,28 +32,28 @@ impl<'a> LexedStr<'a> {
             let kind = self.kind(i);
             if kind.is_trivia() {
                 was_joint = false
+            } else if kind == SyntaxKind::IDENT {
+                let token_text = self.text(i);
+                let contextual_kw =
+                    SyntaxKind::from_contextual_keyword(token_text).unwrap_or(SyntaxKind::IDENT);
+                res.push_ident(contextual_kw);
             } else {
-                if kind == SyntaxKind::IDENT {
-                    let token_text = self.text(i);
-                    let contextual_kw = SyntaxKind::from_contextual_keyword(token_text)
-                        .unwrap_or(SyntaxKind::IDENT);
-                    res.push_ident(contextual_kw);
-                } else {
-                    if was_joint {
-                        res.was_joint();
-                    }
-                    res.push(kind);
-                    // Tag the token as joint if it is float with a fractional part
-                    // we use this jointness to inform the parser about what token split
-                    // event to emit when we encounter a float literal in a field access
-                    if kind == SyntaxKind::FLOAT_NUMBER {
-                        if !self.text(i).ends_with('.') {
-                            res.was_joint();
-                        }
-                    }
+                if was_joint {
+                    res.was_joint();
                 }
-
-                was_joint = true;
+                res.push(kind);
+                // Tag the token as joint if it is float with a fractional part
+                // we use this jointness to inform the parser about what token split
+                // event to emit when we encounter a float literal in a field access
+                if kind == SyntaxKind::FLOAT_NUMBER {
+                    if !self.text(i).ends_with('.') {
+                        res.was_joint();
+                    } else {
+                        was_joint = false;
+                    }
+                } else {
+                    was_joint = true;
+                }
             }
         }
         res
@@ -206,6 +206,7 @@ impl Builder<'_, '_> {
                     assert!(right.is_empty(), "{left}.{right}");
                     self.state = State::Normal;
                 } else {
+                    assert!(!right.is_empty(), "{left}.{right}");
                     (self.sink)(StrStep::Enter { kind: SyntaxKind::NAME_REF });
                     (self.sink)(StrStep::Token { kind: SyntaxKind::INT_NUMBER, text: right });
                     (self.sink)(StrStep::Exit);
@@ -225,7 +226,8 @@ fn n_attached_trivias<'a>(
 ) -> usize {
     match kind {
         CONST | ENUM | FN | IMPL | MACRO_CALL | MACRO_DEF | MACRO_RULES | MODULE | RECORD_FIELD
-        | STATIC | STRUCT | TRAIT | TUPLE_FIELD | TYPE_ALIAS | UNION | USE | VARIANT => {
+        | STATIC | STRUCT | TRAIT | TUPLE_FIELD | TYPE_ALIAS | UNION | USE | VARIANT
+        | EXTERN_CRATE => {
             let mut res = 0;
             let mut trivias = trivias.enumerate().peekable();
 

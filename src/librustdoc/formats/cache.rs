@@ -1,6 +1,6 @@
 use std::mem;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, DefIdSet};
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::Symbol;
@@ -50,8 +50,8 @@ pub(crate) struct Cache {
     /// Unlike 'paths', this mapping ignores any renames that occur
     /// due to 'use' statements.
     ///
-    /// This map is used when writing out the special 'implementors'
-    /// javascript file. By using the exact path that the type
+    /// This map is used when writing out the `impl.trait` and `impl.type`
+    /// javascript files. By using the exact path that the type
     /// is declared with, we ensure that each path will be identical
     /// to the path used if the corresponding type is inlined. By
     /// doing this, we can detect duplicate impls on a trait page, and only display
@@ -86,6 +86,9 @@ pub(crate) struct Cache {
     /// Whether to document private items.
     /// This is stored in `Cache` so it doesn't need to be passed through all rustdoc functions.
     pub(crate) document_private: bool,
+    /// Whether to document hidden items.
+    /// This is stored in `Cache` so it doesn't need to be passed through all rustdoc functions.
+    pub(crate) document_hidden: bool,
 
     /// Crates marked with [`#[doc(masked)]`][doc_masked].
     ///
@@ -118,9 +121,14 @@ pub(crate) struct Cache {
     /// All intra-doc links resolved so far.
     ///
     /// Links are indexed by the DefId of the item they document.
-    pub(crate) intra_doc_links: FxHashMap<ItemId, Vec<clean::ItemLink>>,
+    pub(crate) intra_doc_links: FxHashMap<ItemId, FxIndexSet<clean::ItemLink>>,
     /// Cfg that have been hidden via #![doc(cfg_hide(...))]
     pub(crate) hidden_cfg: FxHashSet<clean::cfg::Cfg>,
+
+    /// Contains the list of `DefId`s which have been inlined. It is used when generating files
+    /// to check if a stripped item should get its file generated or not: if it's inside a
+    /// `#[doc(hidden)]` item or a private one and not inlined, it shouldn't get a file.
+    pub(crate) inlined_items: DefIdSet,
 }
 
 /// This struct is used to wrap the `cache` and `tcx` in order to run `DocFolder`.
@@ -132,8 +140,8 @@ struct CacheBuilder<'a, 'tcx> {
 }
 
 impl Cache {
-    pub(crate) fn new(document_private: bool) -> Self {
-        Cache { document_private, ..Cache::default() }
+    pub(crate) fn new(document_private: bool, document_hidden: bool) -> Self {
+        Cache { document_private, document_hidden, ..Cache::default() }
     }
 
     /// Populates the `Cache` with more data. The returned `Crate` will be missing some data that was
@@ -147,7 +155,7 @@ impl Cache {
 
         // Cache where all our extern crates are located
         // FIXME: this part is specific to HTML so it'd be nice to remove it from the common code
-        for &crate_num in cx.tcx.crates(()) {
+        for &crate_num in tcx.crates(()) {
             let e = ExternalCrate { crate_num };
 
             let name = e.name(tcx);
@@ -195,7 +203,13 @@ impl Cache {
 impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
     fn fold_item(&mut self, item: clean::Item) -> Option<clean::Item> {
         if item.item_id.is_local() {
-            debug!("folding {} \"{:?}\", id {:?}", item.type_(), item.name, item.item_id);
+            let is_stripped = matches!(*item.kind, clean::ItemKind::StrippedItem(..));
+            debug!(
+                "folding {} (stripped: {is_stripped:?}) \"{:?}\", id {:?}",
+                item.type_(),
+                item.name,
+                item.item_id
+            );
         }
 
         // If this is a stripped module,
@@ -207,19 +221,25 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
             _ => self.cache.stripped_mod,
         };
 
+        #[inline]
+        fn is_from_private_dep(tcx: TyCtxt<'_>, cache: &Cache, def_id: DefId) -> bool {
+            let krate = def_id.krate;
+
+            cache.masked_crates.contains(&krate) || tcx.is_private_dep(krate)
+        }
+
         // If the impl is from a masked crate or references something from a
         // masked crate then remove it completely.
-        if let clean::ImplItem(ref i) = *item.kind {
-            if self.cache.masked_crates.contains(&item.item_id.krate())
+        if let clean::ImplItem(ref i) = *item.kind
+            && (self.cache.masked_crates.contains(&item.item_id.krate())
                 || i.trait_
                     .as_ref()
-                    .map_or(false, |t| self.cache.masked_crates.contains(&t.def_id().krate))
+                    .is_some_and(|t| is_from_private_dep(self.tcx, self.cache, t.def_id()))
                 || i.for_
                     .def_id(self.cache)
-                    .map_or(false, |d| self.cache.masked_crates.contains(&d.krate))
-            {
-                return None;
-            }
+                    .is_some_and(|d| is_from_private_dep(self.tcx, self.cache, d)))
+        {
+            return None;
         }
 
         // Propagate a trait method's documentation to all implementors of the
@@ -229,9 +249,9 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
         }
 
         // Collect all the implementors of traits.
-        if let clean::ImplItem(ref i) = *item.kind &&
-            let Some(trait_) = &i.trait_ &&
-            !i.kind.is_blanket()
+        if let clean::ImplItem(ref i) = *item.kind
+            && let Some(trait_) = &i.trait_
+            && !i.kind.is_blanket()
         {
             self.cache
                 .implementors
@@ -244,8 +264,9 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
         if let Some(s) = item.name.or_else(|| {
             if item.is_stripped() {
                 None
-            } else if let clean::ImportItem(ref i) = *item.kind &&
-                let clean::ImportKind::Simple(s) = i.kind {
+            } else if let clean::ImportItem(ref i) = *item.kind
+                && let clean::ImportKind::Simple(s) = i.kind
+            {
                 Some(s)
             } else {
                 None
@@ -258,7 +279,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                         .cache
                         .parent_stack
                         .last()
-                        .map_or(false, |parent| parent.is_trait_impl()) =>
+                        .is_some_and(|parent| parent.is_trait_impl()) =>
                 {
                     // skip associated items in trait impls
                     ((None, None), false)
@@ -300,14 +321,13 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                             ParentStackItem::Impl { for_, .. } => for_.def_id(&self.cache),
                             ParentStackItem::Type(item_id) => item_id.as_def_id(),
                         };
-                        let path = match did.and_then(|did| self.cache.paths.get(&did)) {
+                        let path = did
+                            .and_then(|did| self.cache.paths.get(&did))
                             // The current stack not necessarily has correlation
                             // for where the type was defined. On the other
                             // hand, `paths` always has the right
                             // information if present.
-                            Some((fqp, _)) => Some(&fqp[..fqp.len() - 1]),
-                            None => None,
-                        };
+                            .map(|(fqp, _)| &fqp[..fqp.len() - 1]);
                         ((did, path), true)
                     }
                 }
@@ -321,33 +341,40 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                     // A crate has a module at its root, containing all items,
                     // which should not be indexed. The crate-item itself is
                     // inserted later on when serializing the search-index.
-                    if item.item_id.as_def_id().map_or(false, |idx| !idx.is_crate_root()) {
-                        let desc = item.doc_value().map_or_else(String::new, |x| {
-                            short_markdown_summary(x.as_str(), &item.link_names(self.cache))
-                        });
-                        let ty = item.type_();
-                        if ty != ItemType::StructField
-                            || u16::from_str_radix(s.as_str(), 10).is_err()
-                        {
-                            // In case this is a field from a tuple struct, we don't add it into
-                            // the search index because its name is something like "0", which is
-                            // not useful for rustdoc search.
-                            self.cache.search_index.push(IndexItem {
-                                ty,
-                                name: s,
-                                path: join_with_double_colon(path),
-                                desc,
+                    if item.item_id.as_def_id().is_some_and(|idx| !idx.is_crate_root())
+                        && let ty = item.type_()
+                        && (ty != ItemType::StructField
+                            || u16::from_str_radix(s.as_str(), 10).is_err())
+                    {
+                        let desc =
+                            short_markdown_summary(&item.doc_value(), &item.link_names(self.cache));
+                        // In case this is a field from a tuple struct, we don't add it into
+                        // the search index because its name is something like "0", which is
+                        // not useful for rustdoc search.
+                        self.cache.search_index.push(IndexItem {
+                            ty,
+                            name: s,
+                            path: join_with_double_colon(path),
+                            desc,
+                            parent,
+                            parent_idx: None,
+                            impl_id: if let Some(ParentStackItem::Impl { item_id, .. }) =
+                                self.cache.parent_stack.last()
+                            {
+                                item_id.as_def_id()
+                            } else {
+                                None
+                            },
+                            search_type: get_function_type_for_search(
+                                &item,
+                                self.tcx,
+                                clean_impl_generics(self.cache.parent_stack.last()).as_ref(),
                                 parent,
-                                parent_idx: None,
-                                search_type: get_function_type_for_search(
-                                    &item,
-                                    self.tcx,
-                                    clean_impl_generics(self.cache.parent_stack.last()).as_ref(),
-                                    self.cache,
-                                ),
-                                aliases: item.attrs.get_doc_aliases(),
-                            });
-                        }
+                                self.cache,
+                            ),
+                            aliases: item.attrs.get_doc_aliases(),
+                            deprecation: item.deprecation(self.tcx),
+                        });
                     }
                 }
                 (Some(parent), None) if is_inherent_impl_item => {
@@ -358,6 +385,13 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                         parent,
                         item: item.clone(),
                         impl_generics,
+                        impl_id: if let Some(ParentStackItem::Impl { item_id, .. }) =
+                            self.cache.parent_stack.last()
+                        {
+                            item_id.as_def_id()
+                        } else {
+                            None
+                        },
                     });
                 }
                 _ => {}
@@ -376,7 +410,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
         match *item.kind {
             clean::StructItem(..)
             | clean::EnumItem(..)
-            | clean::TypedefItem(..)
+            | clean::TypeAliasItem(..)
             | clean::TraitItem(..)
             | clean::TraitAliasItem(..)
             | clean::FunctionItem(..)
@@ -444,6 +478,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
             | clean::StructItem(..)
             | clean::UnionItem(..)
             | clean::VariantItem(..)
+            | clean::TypeAliasItem(..)
             | clean::ImplItem(..) => {
                 self.cache.parent_stack.push(ParentStackItem::new(&item));
                 (self.fold_item_recur(item), true)
@@ -462,9 +497,11 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                 clean::Type::Path { ref path }
                 | clean::BorrowedRef { type_: box clean::Type::Path { ref path }, .. } => {
                     dids.insert(path.def_id());
-                    if let Some(generics) = path.generics() &&
-                        let ty::Adt(adt, _) = self.tcx.type_of(path.def_id()).subst_identity().kind() &&
-                        adt.is_fundamental() {
+                    if let Some(generics) = path.generics()
+                        && let ty::Adt(adt, _) =
+                            self.tcx.type_of(path.def_id()).instantiate_identity().kind()
+                        && adt.is_fundamental()
+                    {
                         for ty in generics {
                             if let Some(did) = ty.def_id(self.cache) {
                                 dids.insert(did);
@@ -527,6 +564,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
 
 pub(crate) struct OrphanImplItem {
     pub(crate) parent: DefId,
+    pub(crate) impl_id: Option<DefId>,
     pub(crate) item: clean::Item,
     pub(crate) impl_generics: Option<(clean::Type, clean::Generics)>,
 }

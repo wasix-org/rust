@@ -4,7 +4,7 @@ use rustc_ast::{self as ast, AttrVec, BlockCheckMode, Expr, LocalKind, PatKind, 
 use rustc_ast::{attr, token, util::literal};
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::Span;
+use rustc_span::{Span, DUMMY_SP};
 use thin_vec::{thin_vec, ThinVec};
 
 impl<'a> ExtCtxt<'a> {
@@ -36,7 +36,7 @@ impl<'a> ExtCtxt<'a> {
         );
         let args = if !args.is_empty() {
             let args = args.into_iter().map(ast::AngleBracketedArg::Arg).collect();
-            ast::AngleBracketedArgs { args, span }.into()
+            Some(ast::AngleBracketedArgs { args, span }.into())
         } else {
             None
         };
@@ -134,10 +134,13 @@ impl<'a> ExtCtxt<'a> {
     pub fn trait_bound(&self, path: ast::Path, is_const: bool) -> ast::GenericBound {
         ast::GenericBound::Trait(
             self.poly_trait_ref(path.span, path),
-            if is_const {
-                ast::TraitBoundModifier::MaybeConst
-            } else {
-                ast::TraitBoundModifier::None
+            ast::TraitBoundModifiers {
+                polarity: ast::BoundPolarity::Positive,
+                constness: if is_const {
+                    ast::BoundConstness::Maybe(DUMMY_SP)
+                } else {
+                    ast::BoundConstness::Never
+                },
             },
         )
     }
@@ -488,7 +491,7 @@ impl<'a> ExtCtxt<'a> {
         path: ast::Path,
         field_pats: ThinVec<ast::PatField>,
     ) -> P<ast::Pat> {
-        self.pat(span, PatKind::Struct(None, path, field_pats, false))
+        self.pat(span, PatKind::Struct(None, path, field_pats, ast::PatFieldsRest::None))
     }
     pub fn pat_tuple(&self, span: Span, pats: ThinVec<P<ast::Pat>>) -> P<ast::Pat> {
         self.pat(span, PatKind::Tuple(pats))
@@ -505,7 +508,7 @@ impl<'a> ExtCtxt<'a> {
             attrs: AttrVec::new(),
             pat,
             guard: None,
-            body: expr,
+            body: Some(expr),
             span,
             id: ast::DUMMY_NODE_ID,
             is_placeholder: false,
@@ -547,7 +550,7 @@ impl<'a> ExtCtxt<'a> {
                 binder: ast::ClosureBinder::NotPresent,
                 capture_clause: ast::CaptureBy::Ref,
                 constness: ast::Const::No,
-                asyncness: ast::Async::No,
+                coroutine_kind: None,
                 movability: ast::Movability::Movable,
                 fn_decl,
                 body,
@@ -620,10 +623,15 @@ impl<'a> ExtCtxt<'a> {
         span: Span,
         name: Ident,
         ty: P<ast::Ty>,
-        mutbl: ast::Mutability,
+        mutability: ast::Mutability,
         expr: P<ast::Expr>,
     ) -> P<ast::Item> {
-        self.item(span, name, AttrVec::new(), ast::ItemKind::Static(ty, mutbl, Some(expr)))
+        self.item(
+            span,
+            name,
+            AttrVec::new(),
+            ast::ItemKind::Static(ast::StaticItem { ty, mutability, expr: Some(expr) }.into()),
+        )
     }
 
     pub fn item_const(
@@ -633,8 +641,22 @@ impl<'a> ExtCtxt<'a> {
         ty: P<ast::Ty>,
         expr: P<ast::Expr>,
     ) -> P<ast::Item> {
-        let def = ast::Defaultness::Final;
-        self.item(span, name, AttrVec::new(), ast::ItemKind::Const(def, ty, Some(expr)))
+        let defaultness = ast::Defaultness::Final;
+        self.item(
+            span,
+            name,
+            AttrVec::new(),
+            ast::ItemKind::Const(
+                ast::ConstItem {
+                    defaultness,
+                    // FIXME(generic_const_items): Pass the generics as a parameter.
+                    generics: ast::Generics::default(),
+                    ty,
+                    expr: Some(expr),
+                }
+                .into(),
+            ),
+        )
     }
 
     // Builds `#[name]`.

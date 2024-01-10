@@ -1,7 +1,4 @@
-//@compile-flags: -Zmir-opt-level=0 -Zmiri-disable-weak-memory-emulation -Zmiri-preemption-rate=0 -Zmiri-disable-stacked-borrows
-
-// Note: mir-opt-level set to 0 to prevent the read of stack_var in thread 1
-// from being optimized away and preventing the detection of the data-race.
+//@compile-flags: -Zmiri-disable-weak-memory-emulation -Zmiri-preemption-rate=0 -Zmiri-disable-stacked-borrows
 
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -31,6 +28,7 @@ pub fn main() {
     //  5. read-value
     unsafe {
         let j1 = spawn(move || {
+            let ptr = ptr; // avoid field capturing
             // Concurrent allocate the memory.
             // Uses relaxed semantics to not generate
             // a release sequence.
@@ -42,10 +40,11 @@ pub fn main() {
 
             sleep(Duration::from_millis(200));
 
-            stack_var //~ ERROR: Data race detected between (1) Write on thread `<unnamed>` and (2) Read on thread `<unnamed>`
+            stack_var //~ ERROR: Data race detected between (1) non-atomic write on thread `<unnamed>` and (2) non-atomic read on thread `<unnamed>`
         });
 
         let j2 = spawn(move || {
+            let ptr = ptr; // avoid field capturing
             let pointer = &*ptr.0;
             *pointer.load(Ordering::Acquire) = 3;
         });

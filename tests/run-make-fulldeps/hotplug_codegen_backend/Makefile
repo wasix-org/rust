@@ -1,4 +1,4 @@
-include ../tools.mk
+include ../../run-make/tools.mk
 
 # ignore-stage1
 
@@ -7,7 +7,6 @@ include ../tools.mk
 # -Zbinary-dep-depinfo is used.
 
 all:
-	/bin/echo || exit 0 # This test requires /bin/echo to exist
 	$(RUSTC) the_backend.rs --crate-name the_backend --crate-type dylib \
 		-o $(TMPDIR)/the_backend.dylib
 

@@ -12,24 +12,67 @@
 //!     will still not cause any further changes.
 //!
 
-use rustc_index::bit_set::BitSet;
+use crate::util::is_within_packed;
+use rustc_middle::mir::visit::Visitor;
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
-use rustc_mir_dataflow::impls::{borrowed_locals, MaybeTransitiveLiveLocals};
+use rustc_mir_dataflow::debuginfo::debuginfo_locals;
+use rustc_mir_dataflow::impls::{
+    borrowed_locals, LivenessTransferFunction, MaybeTransitiveLiveLocals,
+};
 use rustc_mir_dataflow::Analysis;
 
 /// Performs the optimization on the body
 ///
 /// The `borrowed` set must be a `BitSet` of all the locals that are ever borrowed in this body. It
 /// can be generated via the [`borrowed_locals`] function.
-pub fn eliminate<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, borrowed: &BitSet<Local>) {
-    let mut live = MaybeTransitiveLiveLocals::new(borrowed)
+pub fn eliminate<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+    let borrowed_locals = borrowed_locals(body);
+
+    // If the user requests complete debuginfo, mark the locals that appear in it as live, so
+    // we don't remove assignements to them.
+    let mut always_live = debuginfo_locals(body);
+    always_live.union(&borrowed_locals);
+
+    let mut live = MaybeTransitiveLiveLocals::new(&always_live)
         .into_engine(tcx, body)
         .iterate_to_fixpoint()
         .into_results_cursor(body);
 
+    // For blocks with a call terminator, if an argument copy can be turned into a move,
+    // record it as (block, argument index).
+    let mut call_operands_to_move = Vec::new();
     let mut patch = Vec::new();
+
     for (bb, bb_data) in traversal::preorder(body) {
+        if let TerminatorKind::Call { ref args, .. } = bb_data.terminator().kind {
+            let loc = Location { block: bb, statement_index: bb_data.statements.len() };
+
+            // Position ourselves between the evaluation of `args` and the write to `destination`.
+            live.seek_to_block_end(bb);
+            let mut state = live.get().clone();
+
+            for (index, arg) in args.iter().enumerate().rev() {
+                if let Operand::Copy(place) = *arg
+                    && !place.is_indirect()
+                    // Do not skip the transformation if the local is in debuginfo, as we do
+                    // not really lose any information for this purpose.
+                    && !borrowed_locals.contains(place.local)
+                    && !state.contains(place.local)
+                    // If `place` is a projection of a disaligned field in a packed ADT,
+                    // the move may be codegened as a pointer to that field.
+                    // Using that disaligned pointer may trigger UB in the callee,
+                    // so do nothing.
+                    && is_within_packed(tcx, body, place).is_none()
+                {
+                    call_operands_to_move.push((bb, index));
+                }
+
+                // Account that `arg` is read from, so we don't promote another argument to a move.
+                LivenessTransferFunction(&mut state).visit_operand(arg, loc);
+            }
+        }
+
         for (statement_index, statement) in bb_data.statements.iter().enumerate().rev() {
             let loc = Location { block: bb, statement_index };
             if let StatementKind::Assign(assign) = &statement.kind {
@@ -41,7 +84,7 @@ pub fn eliminate<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, borrowed: &BitS
                 StatementKind::Assign(box (place, _))
                 | StatementKind::SetDiscriminant { place: box place, .. }
                 | StatementKind::Deinit(box place) => {
-                    if !place.is_indirect() && !borrowed.contains(place.local) {
+                    if !place.is_indirect() && !always_live.contains(place.local) {
                         live.seek_before_primary_effect(loc);
                         if !live.get().contains(place.local) {
                             patch.push(loc);
@@ -54,6 +97,7 @@ pub fn eliminate<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, borrowed: &BitS
                 | StatementKind::Coverage(_)
                 | StatementKind::Intrinsic(_)
                 | StatementKind::ConstEvalCounter
+                | StatementKind::PlaceMention(_)
                 | StatementKind::Nop => (),
 
                 StatementKind::FakeRead(_) | StatementKind::AscribeUserType(_, _) => {
@@ -63,13 +107,21 @@ pub fn eliminate<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, borrowed: &BitS
         }
     }
 
-    if patch.is_empty() {
+    if patch.is_empty() && call_operands_to_move.is_empty() {
         return;
     }
 
     let bbs = body.basic_blocks.as_mut_preserves_cfg();
     for Location { block, statement_index } in patch {
         bbs[block].statements[statement_index].make_nop();
+    }
+    for (block, argument_index) in call_operands_to_move {
+        let TerminatorKind::Call { ref mut args, .. } = bbs[block].terminator_mut().kind else {
+            bug!()
+        };
+        let arg = &mut args[argument_index];
+        let Operand::Copy(place) = *arg else { bug!() };
+        *arg = Operand::Move(place);
     }
 
     crate::simplify::simplify_locals(body, tcx)
@@ -83,7 +135,6 @@ impl<'tcx> MirPass<'tcx> for DeadStoreElimination {
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        let borrowed = borrowed_locals(body);
-        eliminate(tcx, body, &borrowed);
+        eliminate(tcx, body);
     }
 }

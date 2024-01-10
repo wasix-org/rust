@@ -1,4 +1,6 @@
-// unit-test: ConstProp
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
+// unit-test: GVN
 // compile-flags: -Zmir-opt-level=1
 
 trait NeedsDrop: Sized {
@@ -7,7 +9,7 @@ trait NeedsDrop: Sized {
 
 impl<This> NeedsDrop for This {}
 
-// EMIT_MIR control_flow_simplification.hello.ConstProp.diff
+// EMIT_MIR control_flow_simplification.hello.GVN.diff
 // EMIT_MIR control_flow_simplification.hello.PreCodegen.before.mir
 fn hello<T>(){
     if <bool>::NEEDS {

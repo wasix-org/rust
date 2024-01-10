@@ -1,5 +1,5 @@
-use crate::structured_errors::StructuredDiagnostic;
-use rustc_errors::{DiagnosticBuilder, DiagnosticId, ErrorGuaranteed};
+use crate::{errors, structured_errors::StructuredDiagnostic};
+use rustc_errors::{DiagnosticBuilder, DiagnosticId};
 use rustc_middle::ty::{Ty, TypeVisitableExt};
 use rustc_session::Session;
 use rustc_span::Span;
@@ -20,15 +20,12 @@ impl<'tcx> StructuredDiagnostic<'tcx> for SizedUnsizedCast<'tcx> {
         rustc_errors::error_code!(E0607)
     }
 
-    fn diagnostic_common(&self) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
-        let mut err = self.sess.struct_span_err_with_code(
-            self.span,
-            &format!(
-                "cannot cast thin pointer `{}` to fat pointer `{}`",
-                self.expr_ty, self.cast_ty
-            ),
-            self.code(),
-        );
+    fn diagnostic_common(&self) -> DiagnosticBuilder<'tcx> {
+        let mut err = self.sess.dcx().create_err(errors::CastThinPointerToFatPointer {
+            span: self.span,
+            expr_ty: self.expr_ty,
+            cast_ty: self.cast_ty.to_owned(),
+        });
 
         if self.expr_ty.references_error() {
             err.downgrade_to_delayed_bug();
@@ -37,10 +34,7 @@ impl<'tcx> StructuredDiagnostic<'tcx> for SizedUnsizedCast<'tcx> {
         err
     }
 
-    fn diagnostic_extended(
-        &self,
-        mut err: DiagnosticBuilder<'tcx, ErrorGuaranteed>,
-    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
+    fn diagnostic_extended(&self, mut err: DiagnosticBuilder<'tcx>) -> DiagnosticBuilder<'tcx> {
         err.help(
             "Thin pointers are \"simple\" pointers: they are purely a reference to a
 memory address.

@@ -4,20 +4,20 @@
 //! green/native threading. This is just a bare-bones enough solution for
 //! librustdoc, it is not production quality at all.
 
-#![allow(non_camel_case_types)]
-#![allow(nonstandard_style)]
-
-cfg_if! {
-    if #[cfg(target_os = "linux")] {
+cfg_match! {
+    cfg(target_os = "linux") => {
         mod linux;
         use linux as imp;
-    } else if #[cfg(unix)] {
+    }
+    cfg(unix) => {
         mod unix;
         use unix as imp;
-    } else if #[cfg(windows)] {
+    }
+    cfg(windows) => {
         mod windows;
-        use windows as imp;
-    } else {
+        use self::windows as imp;
+    }
+    _ => {
         mod unsupported;
         use unsupported as imp;
     }

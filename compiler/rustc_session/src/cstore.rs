@@ -6,16 +6,16 @@ use crate::search_paths::PathKind;
 use crate::utils::NativeLibKind;
 use crate::Session;
 use rustc_ast as ast;
-use rustc_data_structures::sync::{self, AppendOnlyVec, MetadataRef, RwLock};
+use rustc_data_structures::sync::{self, AppendOnlyIndexVec, FreezeLock};
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, StableCrateId, LOCAL_CRATE};
 use rustc_hir::definitions::{DefKey, DefPath, DefPathHash, Definitions};
 use rustc_span::hygiene::{ExpnHash, ExpnId};
 use rustc_span::symbol::Symbol;
 use rustc_span::Span;
-use rustc_target::spec::Target;
+use rustc_target::spec::abi::Abi;
 
 use std::any::Any;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // lonely orphan structs and enums looking for a better home
 
@@ -67,12 +67,11 @@ pub enum LinkagePreference {
 #[derive(Debug, Encodable, Decodable, HashStable_Generic)]
 pub struct NativeLib {
     pub kind: NativeLibKind,
-    pub name: Option<Symbol>,
+    pub name: Symbol,
     /// If packed_bundled_libs enabled, actual filename of library is stored.
     pub filename: Option<Symbol>,
     pub cfg: Option<ast::MetaItem>,
     pub foreign_module: Option<DefId>,
-    pub wasm_import_module: Option<Symbol>,
     pub verbatim: Option<bool>,
     pub dll_imports: Vec<DllImport>,
 }
@@ -80,6 +79,10 @@ pub struct NativeLib {
 impl NativeLib {
     pub fn has_modifiers(&self) -> bool {
         self.verbatim.is_some() || self.kind.has_modifiers()
+    }
+
+    pub fn wasm_import_module(&self) -> Option<Symbol> {
+        if self.kind == NativeLibKind::WasmImportModule { Some(self.name) } else { None }
     }
 }
 
@@ -143,6 +146,7 @@ pub enum DllCallingConvention {
 pub struct ForeignModule {
     pub foreign_items: Vec<DefId>,
     pub def_id: DefId,
+    pub abi: Abi,
 }
 
 #[derive(Copy, Clone, Debug, HashStable_Generic)]
@@ -191,21 +195,6 @@ pub enum ExternCrateSource {
     Path,
 }
 
-/// The backend's way to give the crate store access to the metadata in a library.
-/// Note that it returns the raw metadata bytes stored in the library file, whether
-/// it is compressed, uncompressed, some weird mix, etc.
-/// rmeta files are backend independent and not handled here.
-///
-/// At the time of this writing, there is only one backend and one way to store
-/// metadata in library -- this trait just serves to decouple rustc_metadata from
-/// the archive reader, which depends on LLVM.
-pub trait MetadataLoader: std::fmt::Debug {
-    fn get_rlib_metadata(&self, target: &Target, filename: &Path) -> Result<MetadataRef, String>;
-    fn get_dylib_metadata(&self, target: &Target, filename: &Path) -> Result<MetadataRef, String>;
-}
-
-pub type MetadataLoaderDyn = dyn MetadataLoader + Send + Sync;
-
 /// A store of Rust crates, through which their metadata can be accessed.
 ///
 /// Note that this trait should probably not be expanding today. All new
@@ -249,11 +238,11 @@ pub trait CrateStore: std::fmt::Debug {
     fn import_source_files(&self, sess: &Session, cnum: CrateNum);
 }
 
-pub type CrateStoreDyn = dyn CrateStore + sync::Sync + sync::Send;
+pub type CrateStoreDyn = dyn CrateStore + sync::DynSync + sync::DynSend;
 
 pub struct Untracked {
-    pub cstore: RwLock<Box<CrateStoreDyn>>,
+    pub cstore: FreezeLock<Box<CrateStoreDyn>>,
     /// Reference span for definitions.
-    pub source_span: AppendOnlyVec<LocalDefId, Span>,
-    pub definitions: RwLock<Definitions>,
+    pub source_span: AppendOnlyIndexVec<LocalDefId, Span>,
+    pub definitions: FreezeLock<Definitions>,
 }

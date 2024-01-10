@@ -85,15 +85,12 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for OpportunisticRegionResolver<'a, 'tcx
 
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
         match *r {
-            ty::ReVar(rid) => {
-                let resolved = self
-                    .infcx
-                    .inner
-                    .borrow_mut()
-                    .unwrap_region_constraints()
-                    .opportunistic_resolve_var(rid);
-                TypeFolder::interner(self).mk_re_var(resolved)
-            }
+            ty::ReVar(vid) => self
+                .infcx
+                .inner
+                .borrow_mut()
+                .unwrap_region_constraints()
+                .opportunistic_resolve_var(TypeFolder::interner(self), vid),
             _ => r,
         }
     }
@@ -137,7 +134,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for UnresolvedTypeOrConstFinder<'a, 'tc
                 if let TypeVariableOrigin {
                     kind: TypeVariableOriginKind::TypeParameterDefinition(_, _),
                     span,
-                } = *ty_vars.var_origin(ty_vid)
+                } = ty_vars.var_origin(ty_vid)
                 {
                     Some(span)
                 } else {
@@ -195,7 +192,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for UnresolvedTypeOrConstFinder<'a, 'tc
 /// Full type resolution replaces all type and region variables with
 /// their concrete results. If any variable cannot be replaced (never unified, etc)
 /// then an `Err` result is returned.
-pub fn fully_resolve<'tcx, T>(infcx: &InferCtxt<'tcx>, value: T) -> FixupResult<'tcx, T>
+pub fn fully_resolve<'tcx, T>(infcx: &InferCtxt<'tcx>, value: T) -> FixupResult<T>
 where
     T: TypeFoldable<TyCtxt<'tcx>>,
 {
@@ -209,14 +206,14 @@ struct FullTypeResolver<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for FullTypeResolver<'a, 'tcx> {
-    type Error = FixupError<'tcx>;
+    type Error = FixupError;
 
     fn interner(&self) -> TyCtxt<'tcx> {
         self.infcx.tcx
     }
 
     fn try_fold_ty(&mut self, t: Ty<'tcx>) -> Result<Ty<'tcx>, Self::Error> {
-        if !t.needs_infer() {
+        if !t.has_infer() {
             Ok(t) // micro-optimize -- if there is nothing in this type that this fold affects...
         } else {
             let t = self.infcx.shallow_resolve(t);
@@ -246,7 +243,7 @@ impl<'a, 'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for FullTypeResolver<'a, 'tcx> {
     }
 
     fn try_fold_const(&mut self, c: ty::Const<'tcx>) -> Result<ty::Const<'tcx>, Self::Error> {
-        if !c.needs_infer() {
+        if !c.has_infer() {
             Ok(c) // micro-optimize -- if there is nothing in this const that this fold affects...
         } else {
             let c = self.infcx.shallow_resolve(c);
@@ -260,6 +257,88 @@ impl<'a, 'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for FullTypeResolver<'a, 'tcx> {
                 _ => {}
             }
             c.try_super_fold_with(self)
+        }
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////
+// EAGER RESOLUTION
+
+/// Resolves ty, region, and const vars to their inferred values or their root vars.
+pub struct EagerResolver<'a, 'tcx> {
+    infcx: &'a InferCtxt<'tcx>,
+}
+
+impl<'a, 'tcx> EagerResolver<'a, 'tcx> {
+    pub fn new(infcx: &'a InferCtxt<'tcx>) -> Self {
+        EagerResolver { infcx }
+    }
+}
+
+impl<'tcx> TypeFolder<TyCtxt<'tcx>> for EagerResolver<'_, 'tcx> {
+    fn interner(&self) -> TyCtxt<'tcx> {
+        self.infcx.tcx
+    }
+
+    fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
+        match *t.kind() {
+            ty::Infer(ty::TyVar(vid)) => match self.infcx.probe_ty_var(vid) {
+                Ok(t) => t.fold_with(self),
+                Err(_) => Ty::new_var(self.infcx.tcx, self.infcx.root_var(vid)),
+            },
+            ty::Infer(ty::IntVar(vid)) => self.infcx.opportunistic_resolve_int_var(vid),
+            ty::Infer(ty::FloatVar(vid)) => self.infcx.opportunistic_resolve_float_var(vid),
+            _ => {
+                if t.has_infer() {
+                    t.super_fold_with(self)
+                } else {
+                    t
+                }
+            }
+        }
+    }
+
+    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
+        match *r {
+            ty::ReVar(vid) => self
+                .infcx
+                .inner
+                .borrow_mut()
+                .unwrap_region_constraints()
+                .opportunistic_resolve_var(self.infcx.tcx, vid),
+            _ => r,
+        }
+    }
+
+    fn fold_const(&mut self, c: ty::Const<'tcx>) -> ty::Const<'tcx> {
+        match c.kind() {
+            ty::ConstKind::Infer(ty::InferConst::Var(vid)) => {
+                // FIXME: we need to fold the ty too, I think.
+                match self.infcx.probe_const_var(vid) {
+                    Ok(c) => c.fold_with(self),
+                    Err(_) => {
+                        ty::Const::new_var(self.infcx.tcx, self.infcx.root_const_var(vid), c.ty())
+                    }
+                }
+            }
+            ty::ConstKind::Infer(ty::InferConst::EffectVar(vid)) => {
+                debug_assert_eq!(c.ty(), self.infcx.tcx.types.bool);
+                match self.infcx.probe_effect_var(vid) {
+                    Some(c) => c.as_const(self.infcx.tcx),
+                    None => ty::Const::new_infer(
+                        self.infcx.tcx,
+                        ty::InferConst::EffectVar(self.infcx.root_effect_var(vid)),
+                        self.infcx.tcx.types.bool,
+                    ),
+                }
+            }
+            _ => {
+                if c.has_infer() {
+                    c.super_fold_with(self)
+                } else {
+                    c
+                }
+            }
         }
     }
 }

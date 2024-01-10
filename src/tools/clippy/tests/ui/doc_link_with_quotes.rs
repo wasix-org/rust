@@ -5,7 +5,15 @@ fn main() {
 }
 
 /// Calls ['bar'] uselessly
+//~^ ERROR: possible intra-doc link using quotes instead of backticks
+//~| NOTE: `-D clippy::doc-link-with-quotes` implied by `-D warnings`
 pub fn foo() {
+    bar()
+}
+
+/// Calls ["bar"] uselessly
+//~^ ERROR: possible intra-doc link using quotes instead of backticks
+pub fn foo2() {
     bar()
 }
 

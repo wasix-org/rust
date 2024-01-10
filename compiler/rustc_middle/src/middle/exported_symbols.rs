@@ -1,4 +1,4 @@
-use crate::ty::subst::SubstsRef;
+use crate::ty::GenericArgsRef;
 use crate::ty::{self, Ty, TyCtxt};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_macros::HashStable;
@@ -35,14 +35,20 @@ pub enum SymbolExportKind {
 pub struct SymbolExportInfo {
     pub level: SymbolExportLevel,
     pub kind: SymbolExportKind,
+    /// Used to mark these symbols not to be internalized by LTO. These symbols
+    /// are also added to `symbols.o` to avoid circular dependencies when linking.
     pub used: bool,
+    /// Also used to mark these symbols not to be internalized by LTO. But will
+    /// not be added to `symbols.o`. Currently there are only builtin functions.
+    pub used_compiler: bool,
 }
 
 #[derive(Eq, PartialEq, Debug, Copy, Clone, TyEncodable, TyDecodable, HashStable)]
 pub enum ExportedSymbol<'tcx> {
     NonGeneric(DefId),
-    Generic(DefId, SubstsRef<'tcx>),
+    Generic(DefId, GenericArgsRef<'tcx>),
     DropGlue(Ty<'tcx>),
+    ThreadLocalShim(DefId),
     NoDefId(ty::SymbolName<'tcx>),
 }
 
@@ -52,12 +58,16 @@ impl<'tcx> ExportedSymbol<'tcx> {
     pub fn symbol_name_for_local_instance(&self, tcx: TyCtxt<'tcx>) -> ty::SymbolName<'tcx> {
         match *self {
             ExportedSymbol::NonGeneric(def_id) => tcx.symbol_name(ty::Instance::mono(tcx, def_id)),
-            ExportedSymbol::Generic(def_id, substs) => {
-                tcx.symbol_name(ty::Instance::new(def_id, substs))
+            ExportedSymbol::Generic(def_id, args) => {
+                tcx.symbol_name(ty::Instance::new(def_id, args))
             }
             ExportedSymbol::DropGlue(ty) => {
                 tcx.symbol_name(ty::Instance::resolve_drop_in_place(tcx, ty))
             }
+            ExportedSymbol::ThreadLocalShim(def_id) => tcx.symbol_name(ty::Instance {
+                def: ty::InstanceDef::ThreadLocalShim(def_id),
+                args: ty::GenericArgs::empty(),
+            }),
             ExportedSymbol::NoDefId(symbol_name) => symbol_name,
         }
     }
@@ -67,6 +77,6 @@ pub fn metadata_symbol_name(tcx: TyCtxt<'_>) -> String {
     format!(
         "rust_metadata_{}_{:08x}",
         tcx.crate_name(LOCAL_CRATE),
-        tcx.sess.local_stable_crate_id().to_u64(),
+        tcx.stable_crate_id(LOCAL_CRATE),
     )
 }

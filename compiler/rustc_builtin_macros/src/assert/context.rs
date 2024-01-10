@@ -1,9 +1,10 @@
 use rustc_ast::{
     ptr::P,
     token,
+    token::Delimiter,
     tokenstream::{DelimSpan, TokenStream, TokenTree},
-    BinOpKind, BorrowKind, DelimArgs, Expr, ExprKind, ItemKind, MacCall, MacDelimiter, MethodCall,
-    Mutability, Path, PathSegment, Stmt, StructRest, UnOp, UseTree, UseTreeKind, DUMMY_NODE_ID,
+    BinOpKind, BorrowKind, DelimArgs, Expr, ExprKind, ItemKind, MacCall, MethodCall, Mutability,
+    Path, PathSegment, Stmt, StructRest, UnOp, UseTree, UseTreeKind, DUMMY_NODE_ID,
 };
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashSet;
@@ -150,7 +151,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
     fn build_panic(&self, expr_str: &str, panic_path: Path) -> P<Expr> {
         let escaped_expr_str = escape_to_fmt(expr_str);
         let initial = [
-            TokenTree::token_alone(
+            TokenTree::token_joint_hidden(
                 token::Literal(token::Lit {
                     kind: token::LitKind::Str,
                     symbol: Symbol::intern(&if self.fmt_string.is_empty() {
@@ -169,7 +170,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
         ];
         let captures = self.capture_decls.iter().flat_map(|cap| {
             [
-                TokenTree::token_alone(token::Ident(cap.ident.name, false), cap.ident.span),
+                TokenTree::token_joint_hidden(token::Ident(cap.ident.name, false), cap.ident.span),
                 TokenTree::token_alone(token::Comma, self.span),
             ]
         });
@@ -179,10 +180,9 @@ impl<'cx, 'a> Context<'cx, 'a> {
                 path: panic_path,
                 args: P(DelimArgs {
                     dspan: DelimSpan::from_single(self.span),
-                    delim: MacDelimiter::Parenthesis,
+                    delim: Delimiter::Parenthesis,
                     tokens: initial.into_iter().chain(captures).collect::<TokenStream>(),
                 }),
-                prior_type_ascription: None,
             })),
         )
     }
@@ -193,10 +193,9 @@ impl<'cx, 'a> Context<'cx, 'a> {
     fn manage_cond_expr(&mut self, expr: &mut P<Expr>) {
         match &mut expr.kind {
             ExprKind::AddrOf(_, mutability, local_expr) => {
-                self.with_is_consumed_management(
-                    matches!(mutability, Mutability::Mut),
-                    |this| this.manage_cond_expr(local_expr)
-                );
+                self.with_is_consumed_management(matches!(mutability, Mutability::Mut), |this| {
+                    this.manage_cond_expr(local_expr)
+                });
             }
             ExprKind::Array(local_exprs) => {
                 for local_expr in local_exprs {
@@ -223,7 +222,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
                     |this| {
                         this.manage_cond_expr(lhs);
                         this.manage_cond_expr(rhs);
-                    }
+                    },
                 );
             }
             ExprKind::Call(_, local_exprs) => {
@@ -234,9 +233,18 @@ impl<'cx, 'a> Context<'cx, 'a> {
             ExprKind::Cast(local_expr, _) => {
                 self.manage_cond_expr(local_expr);
             }
-            ExprKind::Index(prefix, suffix) => {
+            ExprKind::If(local_expr, _, _) => {
+                self.manage_cond_expr(local_expr);
+            }
+            ExprKind::Index(prefix, suffix, _) => {
                 self.manage_cond_expr(prefix);
                 self.manage_cond_expr(suffix);
+            }
+            ExprKind::Let(_, local_expr, _, _) => {
+                self.manage_cond_expr(local_expr);
+            }
+            ExprKind::Match(local_expr, _) => {
+                self.manage_cond_expr(local_expr);
             }
             ExprKind::MethodCall(call) => {
                 for arg in &mut call.args {
@@ -276,10 +284,9 @@ impl<'cx, 'a> Context<'cx, 'a> {
                 }
             }
             ExprKind::Unary(un_op, local_expr) => {
-                self.with_is_consumed_management(
-                    matches!(un_op, UnOp::Neg | UnOp::Not),
-                    |this| this.manage_cond_expr(local_expr)
-                );
+                self.with_is_consumed_management(matches!(un_op, UnOp::Neg | UnOp::Not), |this| {
+                    this.manage_cond_expr(local_expr)
+                });
             }
             // Expressions that are not worth or can not be captured.
             //
@@ -287,26 +294,23 @@ impl<'cx, 'a> Context<'cx, 'a> {
             // sync with the `rfc-2011-nicer-assert-messages/all-expr-kinds.rs` test.
             ExprKind::Assign(_, _, _)
             | ExprKind::AssignOp(_, _, _)
-            | ExprKind::Async(_, _, _)
-            | ExprKind::Await(_)
+            | ExprKind::Gen(_, _, _)
+            | ExprKind::Await(_, _)
             | ExprKind::Block(_, _)
-            | ExprKind::Box(_)
             | ExprKind::Break(_, _)
             | ExprKind::Closure(_)
             | ExprKind::ConstBlock(_)
             | ExprKind::Continue(_)
             | ExprKind::Err
             | ExprKind::Field(_, _)
+            | ExprKind::ForLoop { .. }
             | ExprKind::FormatArgs(_)
-            | ExprKind::ForLoop(_, _, _, _)
-            | ExprKind::If(_, _, _)
             | ExprKind::IncludedBytes(..)
             | ExprKind::InlineAsm(_)
-            | ExprKind::Let(_, _, _)
             | ExprKind::Lit(_)
             | ExprKind::Loop(_, _, _)
             | ExprKind::MacCall(_)
-            | ExprKind::Match(_, _)
+            | ExprKind::OffsetOf(_, _)
             | ExprKind::Path(_, _)
             | ExprKind::Ret(_)
             | ExprKind::Try(_)
@@ -315,6 +319,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
             | ExprKind::Underscore
             | ExprKind::While(_, _, _)
             | ExprKind::Yeet(_)
+            | ExprKind::Become(_)
             | ExprKind::Yield(_) => {}
         }
     }

@@ -36,7 +36,6 @@ pub enum Target {
     GlobalAsm,
     TyAlias,
     OpaqueTy,
-    ImplTraitPlaceholder,
     Enum,
     Variant,
     Struct,
@@ -68,6 +67,42 @@ impl Display for Target {
 }
 
 impl Target {
+    pub fn is_associated_item(self) -> bool {
+        match self {
+            Target::AssocConst | Target::AssocTy | Target::Method(_) => true,
+            Target::ExternCrate
+            | Target::Use
+            | Target::Static
+            | Target::Const
+            | Target::Fn
+            | Target::Closure
+            | Target::Mod
+            | Target::ForeignMod
+            | Target::GlobalAsm
+            | Target::TyAlias
+            | Target::OpaqueTy
+            | Target::Enum
+            | Target::Variant
+            | Target::Struct
+            | Target::Field
+            | Target::Union
+            | Target::Trait
+            | Target::TraitAlias
+            | Target::Impl
+            | Target::Expression
+            | Target::Statement
+            | Target::Arm
+            | Target::ForeignFn
+            | Target::ForeignStatic
+            | Target::ForeignTy
+            | Target::GenericParam(_)
+            | Target::MacroDef
+            | Target::Param
+            | Target::PatField
+            | Target::ExprField => false,
+        }
+    }
+
     pub fn from_item(item: &Item<'_>) -> Target {
         match item.kind {
             ItemKind::ExternCrate(..) => Target::ExternCrate,
@@ -80,13 +115,7 @@ impl Target {
             ItemKind::ForeignMod { .. } => Target::ForeignMod,
             ItemKind::GlobalAsm(..) => Target::GlobalAsm,
             ItemKind::TyAlias(..) => Target::TyAlias,
-            ItemKind::OpaqueTy(ref opaque) => {
-                if opaque.in_trait {
-                    Target::ImplTraitPlaceholder
-                } else {
-                    Target::OpaqueTy
-                }
-            }
+            ItemKind::OpaqueTy(..) => Target::OpaqueTy,
             ItemKind::Enum(..) => Target::Enum,
             ItemKind::Struct(..) => Target::Struct,
             ItemKind::Union(..) => Target::Union,
@@ -110,7 +139,6 @@ impl Target {
             DefKind::GlobalAsm => Target::GlobalAsm,
             DefKind::TyAlias => Target::TyAlias,
             DefKind::OpaqueTy => Target::OpaqueTy,
-            DefKind::ImplTraitPlaceholder => Target::ImplTraitPlaceholder,
             DefKind::Enum => Target::Enum,
             DefKind::Struct => Target::Struct,
             DefKind::Union => Target::Union,
@@ -165,7 +193,6 @@ impl Target {
             Target::GlobalAsm => "global asm",
             Target::TyAlias => "type alias",
             Target::OpaqueTy => "opaque type",
-            Target::ImplTraitPlaceholder => "opaque type in trait",
             Target::Enum => "enum",
             Target::Variant => "enum variant",
             Target::Struct => "struct",

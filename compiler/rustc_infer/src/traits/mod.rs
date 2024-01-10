@@ -8,6 +8,9 @@ mod project;
 mod structural_impls;
 pub mod util;
 
+use std::cmp;
+use std::hash::{Hash, Hasher};
+
 use hir::def_id::LocalDefId;
 use rustc_hir as hir;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
@@ -16,7 +19,6 @@ use rustc_span::Span;
 
 pub use self::FulfillmentErrorCode::*;
 pub use self::ImplSource::*;
-pub use self::ObligationCauseCode::*;
 pub use self::SelectionError::*;
 
 pub use self::engine::{TraitEngine, TraitEngineExt};
@@ -34,7 +36,7 @@ pub use rustc_middle::traits::*;
 /// either identifying an `impl` (e.g., `impl Eq for i32`) that
 /// satisfies the obligation, or else finding a bound that is in
 /// scope. The eventual result is usually a `Selection` (defined below).
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub struct Obligation<'tcx, T> {
     /// The reason we have to prove this thing.
     pub cause: ObligationCause<'tcx>,
@@ -53,8 +55,36 @@ pub struct Obligation<'tcx, T> {
     pub recursion_depth: usize,
 }
 
+impl<'tcx, T: PartialEq> PartialEq<Obligation<'tcx, T>> for Obligation<'tcx, T> {
+    #[inline]
+    fn eq(&self, other: &Obligation<'tcx, T>) -> bool {
+        // Ignore `cause` and `recursion_depth`. This is a small performance
+        // win for a few crates, and a huge performance win for the crate in
+        // https://github.com/rust-lang/rustc-perf/pull/1680, which greatly
+        // stresses the trait system.
+        self.param_env == other.param_env && self.predicate == other.predicate
+    }
+}
+
+impl<T: Eq> Eq for Obligation<'_, T> {}
+
+impl<T: Hash> Hash for Obligation<'_, T> {
+    fn hash<H: Hasher>(&self, state: &mut H) -> () {
+        // See the comment on `Obligation::eq`.
+        self.param_env.hash(state);
+        self.predicate.hash(state);
+    }
+}
+
+impl<'tcx, P> From<Obligation<'tcx, P>> for solve::Goal<'tcx, P> {
+    fn from(value: Obligation<'tcx, P>) -> Self {
+        solve::Goal { param_env: value.param_env, predicate: value.predicate }
+    }
+}
+
 pub type PredicateObligation<'tcx> = Obligation<'tcx, ty::Predicate<'tcx>>;
-pub type TraitObligation<'tcx> = Obligation<'tcx, ty::PolyTraitPredicate<'tcx>>;
+pub type TraitObligation<'tcx> = Obligation<'tcx, ty::TraitPredicate<'tcx>>;
+pub type PolyTraitObligation<'tcx> = Obligation<'tcx, ty::PolyTraitPredicate<'tcx>>;
 
 impl<'tcx> PredicateObligation<'tcx> {
     /// Flips the polarity of the inner predicate.
@@ -68,25 +98,9 @@ impl<'tcx> PredicateObligation<'tcx> {
             recursion_depth: self.recursion_depth,
         })
     }
-
-    pub fn without_const(mut self, tcx: TyCtxt<'tcx>) -> PredicateObligation<'tcx> {
-        self.param_env = self.param_env.without_const();
-        if let ty::PredicateKind::Clause(ty::Clause::Trait(trait_pred)) = self.predicate.kind().skip_binder() && trait_pred.is_const_if_const() {
-            self.predicate = tcx.mk_predicate(self.predicate.kind().map_bound(|_| ty::PredicateKind::Clause(ty::Clause::Trait(trait_pred.without_const()))));
-        }
-        self
-    }
 }
 
-impl<'tcx> TraitObligation<'tcx> {
-    /// Returns `true` if the trait predicate is considered `const` in its ParamEnv.
-    pub fn is_const(&self) -> bool {
-        match (self.predicate.skip_binder().constness, self.param_env.constness()) {
-            (ty::BoundConstness::ConstIfConst, hir::Constness::Const) => true,
-            _ => false,
-        }
-    }
-
+impl<'tcx> PolyTraitObligation<'tcx> {
     pub fn derived_cause(
         &self,
         variant: impl FnOnce(DerivedObligationCause<'tcx>) -> ObligationCauseCode<'tcx>,
@@ -115,12 +129,16 @@ pub struct FulfillmentError<'tcx> {
 #[derive(Clone)]
 pub enum FulfillmentErrorCode<'tcx> {
     /// Inherently impossible to fulfill; this trait is implemented if and only if it is already implemented.
-    CodeCycle(Vec<Obligation<'tcx, ty::Predicate<'tcx>>>),
+    CodeCycle(Vec<PredicateObligation<'tcx>>),
     CodeSelectionError(SelectionError<'tcx>),
     CodeProjectionError(MismatchedProjectionTypes<'tcx>),
     CodeSubtypeError(ExpectedFound<Ty<'tcx>>, TypeError<'tcx>), // always comes from a SubtypePredicate
     CodeConstEquateError(ExpectedFound<Const<'tcx>>, TypeError<'tcx>),
-    CodeAmbiguity,
+    CodeAmbiguity {
+        /// Overflow reported from the new solver `-Znext-solver`, which will
+        /// be reported as an regular error as opposed to a fatal error.
+        overflow: bool,
+    },
 }
 
 impl<'tcx, O> Obligation<'tcx, O> {
@@ -131,6 +149,14 @@ impl<'tcx, O> Obligation<'tcx, O> {
         predicate: impl ToPredicate<'tcx, O>,
     ) -> Obligation<'tcx, O> {
         Self::with_depth(tcx, cause, 0, param_env, predicate)
+    }
+
+    /// We often create nested obligations without setting the correct depth.
+    ///
+    /// To deal with this evaluate and fulfill explicitly update the depth
+    /// of nested obligations using this function.
+    pub fn set_depth_from_parent(&mut self, parent_depth: usize) {
+        self.recursion_depth = cmp::max(parent_depth + 1, self.recursion_depth);
     }
 
     pub fn with_depth(
@@ -173,7 +199,7 @@ impl<'tcx> FulfillmentError<'tcx> {
     }
 }
 
-impl<'tcx> TraitObligation<'tcx> {
+impl<'tcx> PolyTraitObligation<'tcx> {
     pub fn polarity(&self) -> ty::ImplPolarity {
         self.predicate.skip_binder().polarity
     }

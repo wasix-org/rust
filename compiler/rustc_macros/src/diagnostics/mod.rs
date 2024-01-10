@@ -1,14 +1,11 @@
 mod diagnostic;
 mod diagnostic_builder;
 mod error;
-mod fluent;
 mod subdiagnostic;
 mod utils;
 
 use diagnostic::{DiagnosticDerive, LintDiagnosticDerive};
-pub(crate) use fluent::fluent_messages;
 use proc_macro2::TokenStream;
-use quote::format_ident;
 use subdiagnostic::SubdiagnosticDeriveBuilder;
 use synstructure::Structure;
 
@@ -59,7 +56,7 @@ use synstructure::Structure;
 /// See rustc dev guide for more examples on using the `#[derive(Diagnostic)]`:
 /// <https://rustc-dev-guide.rust-lang.org/diagnostics/diagnostic-structs.html>
 pub fn session_diagnostic_derive(s: Structure<'_>) -> TokenStream {
-    DiagnosticDerive::new(format_ident!("diag"), format_ident!("handler"), s).into_tokens()
+    DiagnosticDerive::new(s).into_tokens()
 }
 
 /// Implements `#[derive(LintDiagnostic)]`, which allows for lints to be specified as a struct,
@@ -105,7 +102,7 @@ pub fn session_diagnostic_derive(s: Structure<'_>) -> TokenStream {
 /// See rustc dev guide for more examples on using the `#[derive(LintDiagnostic)]`:
 /// <https://rustc-dev-guide.rust-lang.org/diagnostics/diagnostic-structs.html#reference>
 pub fn lint_diagnostic_derive(s: Structure<'_>) -> TokenStream {
-    LintDiagnosticDerive::new(format_ident!("diag"), s).into_tokens()
+    LintDiagnosticDerive::new(s).into_tokens()
 }
 
 /// Implements `#[derive(Subdiagnostic)]`, which allows for labels, notes, helps and
@@ -142,7 +139,7 @@ pub fn lint_diagnostic_derive(s: Structure<'_>) -> TokenStream {
 /// ```fluent
 /// parser_expected_identifier = expected identifier
 ///
-/// parser_expected_identifier-found = expected identifier, found {$found}
+/// parser_expected_identifier_found = expected identifier, found {$found}
 ///
 /// parser_raw_identifier = escape `{$ident}` to use it as an identifier
 /// ```

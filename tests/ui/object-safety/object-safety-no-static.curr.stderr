@@ -11,6 +11,7 @@ LL | trait Foo {
    |       --- this trait cannot be made into an object...
 LL |     fn foo() {}
    |        ^^^ ...because associated function `foo` has no `self` parameter
+   = help: only type `Bar` implements the trait, consider using it directly instead
 help: consider turning `foo` into a method by giving it a `&self` argument
    |
 LL |     fn foo(&self) {}
@@ -20,6 +21,6 @@ help: alternatively, consider constraining `foo` so it does not apply to trait o
 LL |     fn foo() where Self: Sized {}
    |              +++++++++++++++++
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0038`.

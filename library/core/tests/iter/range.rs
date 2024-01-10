@@ -1,4 +1,6 @@
 use super::*;
+use core::ascii::Char as AsciiChar;
+use core::num::NonZeroUsize;
 
 #[test]
 fn test_range() {
@@ -36,6 +38,21 @@ fn test_char_range() {
     assert_eq!(('\u{D7FF}'..='\u{E000}').size_hint(), (2, Some(2)));
     assert_eq!(('\u{D7FF}'..'\u{E000}').count(), 1);
     assert_eq!(('\u{D7FF}'..'\u{E000}').size_hint(), (1, Some(1)));
+}
+
+#[test]
+fn test_ascii_char_range() {
+    let from = AsciiChar::Null;
+    let to = AsciiChar::Delete;
+    assert!((from..=to).eq((from as u8..=to as u8).filter_map(AsciiChar::from_u8)));
+    assert!((from..=to).rev().eq((from as u8..=to as u8).filter_map(AsciiChar::from_u8).rev()));
+
+    assert_eq!((AsciiChar::CapitalA..=AsciiChar::CapitalZ).count(), 26);
+    assert_eq!((AsciiChar::CapitalA..=AsciiChar::CapitalZ).size_hint(), (26, Some(26)));
+    assert_eq!((AsciiChar::SmallA..=AsciiChar::SmallZ).count(), 26);
+    assert_eq!((AsciiChar::SmallA..=AsciiChar::SmallZ).size_hint(), (26, Some(26)));
+    assert_eq!((AsciiChar::Digit0..=AsciiChar::Digit9).count(), 10);
+    assert_eq!((AsciiChar::Digit0..=AsciiChar::Digit9).size_hint(), (10, Some(10)));
 }
 
 #[test]
@@ -287,25 +304,25 @@ fn test_range_step() {
 #[test]
 fn test_range_advance_by() {
     let mut r = 0..usize::MAX;
-    r.advance_by(0).unwrap();
-    r.advance_back_by(0).unwrap();
+    assert_eq!(Ok(()), r.advance_by(0));
+    assert_eq!(Ok(()), r.advance_back_by(0));
 
     assert_eq!(r.len(), usize::MAX);
 
-    r.advance_by(1).unwrap();
-    r.advance_back_by(1).unwrap();
+    assert_eq!(Ok(()), r.advance_by(1));
+    assert_eq!(Ok(()), r.advance_back_by(1));
 
     assert_eq!((r.start, r.end), (1, usize::MAX - 1));
 
-    assert_eq!(r.advance_by(usize::MAX), Err(usize::MAX - 2));
+    assert_eq!(Err(NonZeroUsize::new(2).unwrap()), r.advance_by(usize::MAX));
 
-    r.advance_by(0).unwrap();
-    r.advance_back_by(0).unwrap();
+    assert_eq!(Ok(()), r.advance_by(0));
+    assert_eq!(Ok(()), r.advance_back_by(0));
 
     let mut r = 0u128..u128::MAX;
 
-    r.advance_by(usize::MAX).unwrap();
-    r.advance_back_by(usize::MAX).unwrap();
+    assert_eq!(Ok(()), r.advance_by(usize::MAX));
+    assert_eq!(Ok(()), r.advance_back_by(usize::MAX));
 
     assert_eq!((r.start, r.end), (0u128 + usize::MAX as u128, u128::MAX - usize::MAX as u128));
 }

@@ -1,7 +1,10 @@
-// run-rustfix
+//@aux-build:proc_macros.rs
 #![warn(clippy::all)]
 #![allow(unused)]
 #![allow(clippy::uninlined_format_args)]
+
+#[macro_use]
+extern crate proc_macros;
 
 fn main() {
     let v = Some(true);
@@ -33,5 +36,12 @@ fn main() {
     match mutv {
         ref x @ _ => println!("vec: {:?}", x),
         ref y if y == &vec![0] => (),
+    }
+    external! {
+        let v = Some(true);
+        match v {
+            Some(x) => (),
+            y @ _ => (),
+        }
     }
 }

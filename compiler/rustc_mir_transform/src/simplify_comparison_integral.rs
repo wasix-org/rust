@@ -37,7 +37,7 @@ impl<'tcx> MirPass<'tcx> for SimplifyComparisonIntegral {
         let opts = helper.find_optimizations();
         let mut storage_deads_to_insert = vec![];
         let mut storage_deads_to_remove: Vec<(usize, BasicBlock)> = vec![];
-        let param_env = tcx.param_env(body.source.def_id());
+        let param_env = tcx.param_env_reveal_all_normalized(body.source.def_id());
         for opt in opts {
             trace!("SUCCESS: Applying {:?}", opt);
             // replace terminator with a switchInt that switches on the integer directly
@@ -206,12 +206,12 @@ fn find_branch_value_info<'tcx>(
     match (left, right) {
         (Constant(branch_value), Copy(to_switch_on) | Move(to_switch_on))
         | (Copy(to_switch_on) | Move(to_switch_on), Constant(branch_value)) => {
-            let branch_value_ty = branch_value.literal.ty();
+            let branch_value_ty = branch_value.const_.ty();
             // we only want to apply this optimization if we are matching on integrals (and chars), as it is not possible to switch on floats
             if !branch_value_ty.is_integral() && !branch_value_ty.is_char() {
                 return None;
             };
-            let branch_value_scalar = branch_value.literal.try_to_scalar()?;
+            let branch_value_scalar = branch_value.const_.try_to_scalar()?;
             Some((branch_value_scalar, branch_value_ty, *to_switch_on))
         }
         _ => None,

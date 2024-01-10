@@ -1,13 +1,10 @@
-// revisions: no_drop_tracking drop_tracking drop_tracking_mir
-// [drop_tracking] compile-flags: -Zdrop-tracking
-// [drop_tracking_mir] compile-flags: -Zdrop-tracking-mir
 // build-pass
 // edition:2018
 
-#![feature(generators)]
+#![feature(coroutines)]
 
 fn main() {
-    let _ = foo();
+    foo();
 }
 
 fn foo() {

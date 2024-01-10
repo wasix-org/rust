@@ -1,4 +1,5 @@
-// ignore-wasm32-bare compiled with panic=abort by default
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // Test that StorageDead and Drops are generated properly for bindings in
 // matches:
 // * The MIR should only contain a single drop of `s` and `t`: at the end

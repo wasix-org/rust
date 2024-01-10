@@ -66,8 +66,7 @@ use rustc_session::cstore::CrateDepKind;
 use rustc_session::cstore::LinkagePreference::{self, RequireDynamic, RequireStatic};
 
 pub(crate) fn calculate(tcx: TyCtxt<'_>) -> Dependencies {
-    tcx.sess
-        .crate_types()
+    tcx.crate_types()
         .iter()
         .map(|&ty| {
             let linkage = calculate_type(tcx, ty);
@@ -89,11 +88,25 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
         // to try to eagerly statically link all dependencies. This is normally
         // done for end-product dylibs, not intermediate products.
         //
-        // Treat cdylibs similarly. If `-C prefer-dynamic` is set, the caller may
-        // be code-size conscious, but without it, it makes sense to statically
-        // link a cdylib.
-        CrateType::Dylib | CrateType::Cdylib if !sess.opts.cg.prefer_dynamic => Linkage::Static,
-        CrateType::Dylib | CrateType::Cdylib => Linkage::Dynamic,
+        // Treat cdylibs and staticlibs similarly. If `-C prefer-dynamic` is set,
+        // the caller may be code-size conscious, but without it, it makes sense
+        // to statically link a cdylib or staticlib. For staticlibs we use
+        // `-Z staticlib-prefer-dynamic` for now. This may be merged into
+        // `-C prefer-dynamic` in the future.
+        CrateType::Dylib | CrateType::Cdylib => {
+            if sess.opts.cg.prefer_dynamic {
+                Linkage::Dynamic
+            } else {
+                Linkage::Static
+            }
+        }
+        CrateType::Staticlib => {
+            if sess.opts.unstable_opts.staticlib_prefer_dynamic {
+                Linkage::Dynamic
+            } else {
+                Linkage::Static
+            }
+        }
 
         // If the global prefer_dynamic switch is turned off, or the final
         // executable will be statically linked, prefer static crate linkage.
@@ -108,9 +121,6 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
         // No linkage happens with rlibs, we just needed the metadata (which we
         // got long ago), so don't bother with anything.
         CrateType::Rlib => Linkage::NotLinked,
-
-        // staticlibs must have all static dependencies.
-        CrateType::Staticlib => Linkage::Static,
     };
 
     match preferred_linkage {
@@ -123,9 +133,9 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
                 return v;
             }
 
-            // Staticlibs and static executables must have all static dependencies.
+            // Static executables must have all static dependencies.
             // If any are not found, generate some nice pretty errors.
-            if ty == CrateType::Staticlib
+            if (ty == CrateType::Staticlib && !sess.opts.unstable_opts.staticlib_allow_rdylib_deps)
                 || (ty == CrateType::Executable
                     && sess.crt_static(Some(ty))
                     && !sess.target.crt_static_allows_dylibs)
@@ -138,7 +148,7 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
                     if src.rlib.is_some() {
                         continue;
                     }
-                    sess.emit_err(RlibRequired { crate_name: tcx.crate_name(cnum) });
+                    sess.dcx().emit_err(RlibRequired { crate_name: tcx.crate_name(cnum) });
                 }
                 return Vec::new();
             }
@@ -226,9 +236,9 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
                 };
                 let crate_name = tcx.crate_name(cnum);
                 if crate_name.as_str().starts_with("rustc_") {
-                    sess.emit_err(RustcLibRequired { crate_name, kind });
+                    sess.dcx().emit_err(RustcLibRequired { crate_name, kind });
                 } else {
-                    sess.emit_err(LibRequired { crate_name, kind });
+                    sess.dcx().emit_err(LibRequired { crate_name, kind });
                 }
             }
         }
@@ -253,7 +263,7 @@ fn add_library(
             // This error is probably a little obscure, but I imagine that it
             // can be refined over time.
             if link2 != link || link == RequireStatic {
-                tcx.sess.emit_err(CrateDepMultiple { crate_name: tcx.crate_name(cnum) });
+                tcx.dcx().emit_err(CrateDepMultiple { crate_name: tcx.crate_name(cnum) });
             }
         }
         None => {
@@ -347,7 +357,7 @@ fn verify_ok(tcx: TyCtxt<'_>, list: &[Linkage]) {
             if let Some((prev, _)) = panic_runtime {
                 let prev_name = tcx.crate_name(prev);
                 let cur_name = tcx.crate_name(cnum);
-                sess.emit_err(TwoPanicRuntimes { prev_name, cur_name });
+                sess.dcx().emit_err(TwoPanicRuntimes { prev_name, cur_name });
             }
             panic_runtime = Some((
                 cnum,
@@ -367,7 +377,7 @@ fn verify_ok(tcx: TyCtxt<'_>, list: &[Linkage]) {
         // First up, validate that our selected panic runtime is indeed exactly
         // our same strategy.
         if found_strategy != desired_strategy {
-            sess.emit_err(BadPanicStrategy {
+            sess.dcx().emit_err(BadPanicStrategy {
                 runtime: tcx.crate_name(runtime_cnum),
                 strategy: desired_strategy,
             });
@@ -386,16 +396,19 @@ fn verify_ok(tcx: TyCtxt<'_>, list: &[Linkage]) {
                 continue;
             }
 
-            if let Some(found_strategy) = tcx.required_panic_strategy(cnum) && desired_strategy != found_strategy {
-                sess.emit_err(RequiredPanicStrategy {
+            if let Some(found_strategy) = tcx.required_panic_strategy(cnum)
+                && desired_strategy != found_strategy
+            {
+                sess.dcx().emit_err(RequiredPanicStrategy {
                     crate_name: tcx.crate_name(cnum),
                     found_strategy,
-                    desired_strategy});
+                    desired_strategy,
+                });
             }
 
             let found_drop_strategy = tcx.panic_in_drop_strategy(cnum);
             if tcx.sess.opts.unstable_opts.panic_in_drop != found_drop_strategy {
-                sess.emit_err(IncompatiblePanicInDropStrategy {
+                sess.dcx().emit_err(IncompatiblePanicInDropStrategy {
                     crate_name: tcx.crate_name(cnum),
                     found_strategy: found_drop_strategy,
                     desired_strategy: tcx.sess.opts.unstable_opts.panic_in_drop,

@@ -1,23 +1,23 @@
-use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg, span_lint_hir_and_then};
-use clippy_utils::source::{snippet, snippet_opt};
-use if_chain::if_chain;
-use rustc_errors::Applicability;
-use rustc_hir::intravisit::FnKind;
-use rustc_hir::{
-    self as hir, def, BinOpKind, BindingAnnotation, Body, ByRef, Expr, ExprKind, FnDecl, Mutability, PatKind, Stmt,
-    StmtKind, TyKind,
-};
-use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::def_id::LocalDefId;
-use rustc_span::hygiene::DesugaringKind;
-use rustc_span::source_map::{ExpnKind, Span};
-
+use clippy_utils::diagnostics::{span_lint, span_lint_and_then, span_lint_hir_and_then};
+use clippy_utils::source::{snippet, snippet_with_context};
 use clippy_utils::sugg::Sugg;
 use clippy_utils::{
-    get_parent_expr, in_constant, is_integer_literal, is_no_std_crate, iter_input_pats, last_path_segment, SpanlessEq,
+    any_parent_is_automatically_derived, fulfill_or_allowed, get_parent_expr, is_lint_allowed, iter_input_pats,
+    last_path_segment, SpanlessEq,
 };
+use rustc_errors::Applicability;
+use rustc_hir::def::Res;
+use rustc_hir::intravisit::FnKind;
+use rustc_hir::{
+    BinOpKind, BindingAnnotation, Body, ByRef, Expr, ExprKind, FnDecl, Mutability, PatKind, QPath, Stmt, StmtKind,
+};
+use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_middle::lint::in_external_macro;
+use rustc_session::declare_lint_pass;
+use rustc_span::def_id::LocalDefId;
+use rustc_span::Span;
+
+use crate::ref_patterns::REF_PATTERNS;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -40,12 +40,12 @@ declare_clippy_lint! {
     /// dereferences, e.g., changing `*x` to `x` within the function.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn foo(ref _x: u8) {}
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// fn foo(_x: &u8) {}
     /// ```
     #[clippy::version = "pre 1.29.0"]
@@ -53,6 +53,7 @@ declare_clippy_lint! {
     style,
     "an entire binding declared as `ref`, in a function argument or a `let` statement"
 }
+
 declare_clippy_lint! {
     /// ### What it does
     /// Checks for the use of bindings with a single leading
@@ -68,7 +69,7 @@ declare_clippy_lint! {
     /// macro, it has been allowed in the mean time.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let _x = 0;
     /// let y = _x + 1; // Here we are using `_x`, even though it has a leading
     ///                 // underscore. We should rename `_x` to `x`
@@ -100,51 +101,13 @@ declare_clippy_lint! {
     "using a short circuit boolean condition as a statement"
 }
 
-declare_clippy_lint! {
-    /// ### What it does
-    /// Catch casts from `0` to some pointer type
-    ///
-    /// ### Why is this bad?
-    /// This generally means `null` and is better expressed as
-    /// {`std`, `core`}`::ptr::`{`null`, `null_mut`}.
-    ///
-    /// ### Example
-    /// ```rust
-    /// let a = 0 as *const u32;
-    /// ```
-    ///
-    /// Use instead:
-    /// ```rust
-    /// let a = std::ptr::null::<u32>();
-    /// ```
-    #[clippy::version = "pre 1.29.0"]
-    pub ZERO_PTR,
-    style,
-    "using `0 as *{const, mut} T`"
-}
-
-pub struct LintPass {
-    std_or_core: &'static str,
-}
-impl Default for LintPass {
-    fn default() -> Self {
-        Self { std_or_core: "std" }
-    }
-}
-impl_lint_pass!(LintPass => [
+declare_lint_pass!(LintPass => [
     TOPLEVEL_REF_ARG,
     USED_UNDERSCORE_BINDING,
     SHORT_CIRCUIT_STATEMENT,
-    ZERO_PTR,
 ]);
 
 impl<'tcx> LateLintPass<'tcx> for LintPass {
-    fn check_crate(&mut self, cx: &LateContext<'_>) {
-        if is_no_std_crate(cx) {
-            self.std_or_core = "core";
-        }
-    }
-
     fn check_fn(
         &mut self,
         cx: &LateContext<'tcx>,
@@ -162,6 +125,10 @@ impl<'tcx> LateLintPass<'tcx> for LintPass {
             return;
         }
         for arg in iter_input_pats(decl, body) {
+            // Do not emit if clippy::ref_patterns is not allowed to avoid having two lints for the same issue.
+            if !is_lint_allowed(cx, REF_PATTERNS, arg.pat.hir_id) {
+                return;
+            }
             if let PatKind::Binding(BindingAnnotation(ByRef::Yes, _), ..) = arg.pat.kind {
                 span_lint(
                     cx,
@@ -175,122 +142,118 @@ impl<'tcx> LateLintPass<'tcx> for LintPass {
     }
 
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'_>) {
-        if_chain! {
-            if !in_external_macro(cx.tcx.sess, stmt.span);
-            if let StmtKind::Local(local) = stmt.kind;
-            if let PatKind::Binding(BindingAnnotation(ByRef::Yes, mutabl), .., name, None) = local.pat.kind;
-            if let Some(init) = local.init;
-            then {
-                // use the macro callsite when the init span (but not the whole local span)
-                // comes from an expansion like `vec![1, 2, 3]` in `let ref _ = vec![1, 2, 3];`
-                let sugg_init = if init.span.from_expansion() && !local.span.from_expansion() {
-                    Sugg::hir_with_macro_callsite(cx, init, "..")
-                } else {
-                    Sugg::hir(cx, init, "..")
-                };
-                let (mutopt, initref) = if mutabl == Mutability::Mut {
-                    ("mut ", sugg_init.mut_addr())
-                } else {
-                    ("", sugg_init.addr())
-                };
-                let tyopt = if let Some(ty) = local.ty {
-                    format!(": &{mutopt}{ty}", ty=snippet(cx, ty.span, ".."))
-                } else {
-                    String::new()
-                };
-                span_lint_hir_and_then(
-                    cx,
-                    TOPLEVEL_REF_ARG,
-                    init.hir_id,
-                    local.pat.span,
-                    "`ref` on an entire `let` pattern is discouraged, take a reference with `&` instead",
-                    |diag| {
-                        diag.span_suggestion(
-                            stmt.span,
-                            "try",
-                            format!(
-                                "let {name}{tyopt} = {initref};",
-                                name=snippet(cx, name.span, ".."),
-                            ),
-                            Applicability::MachineApplicable,
-                        );
-                    }
-                );
-            }
+        if !in_external_macro(cx.tcx.sess, stmt.span)
+            && let StmtKind::Local(local) = stmt.kind
+            && let PatKind::Binding(BindingAnnotation(ByRef::Yes, mutabl), .., name, None) = local.pat.kind
+            && let Some(init) = local.init
+            // Do not emit if clippy::ref_patterns is not allowed to avoid having two lints for the same issue.
+            && is_lint_allowed(cx, REF_PATTERNS, local.pat.hir_id)
+        {
+            let ctxt = local.span.ctxt();
+            let mut app = Applicability::MachineApplicable;
+            let sugg_init = Sugg::hir_with_context(cx, init, ctxt, "..", &mut app);
+            let (mutopt, initref) = if mutabl == Mutability::Mut {
+                ("mut ", sugg_init.mut_addr())
+            } else {
+                ("", sugg_init.addr())
+            };
+            let tyopt = if let Some(ty) = local.ty {
+                let ty_snip = snippet_with_context(cx, ty.span, ctxt, "_", &mut app).0;
+                format!(": &{mutopt}{ty_snip}")
+            } else {
+                String::new()
+            };
+            span_lint_hir_and_then(
+                cx,
+                TOPLEVEL_REF_ARG,
+                init.hir_id,
+                local.pat.span,
+                "`ref` on an entire `let` pattern is discouraged, take a reference with `&` instead",
+                |diag| {
+                    diag.span_suggestion(
+                        stmt.span,
+                        "try",
+                        format!("let {name}{tyopt} = {initref};", name = snippet(cx, name.span, ".."),),
+                        app,
+                    );
+                },
+            );
         };
-        if_chain! {
-            if let StmtKind::Semi(expr) = stmt.kind;
-            if let ExprKind::Binary(ref binop, a, b) = expr.kind;
-            if binop.node == BinOpKind::And || binop.node == BinOpKind::Or;
-            if let Some(sugg) = Sugg::hir_opt(cx, a);
-            then {
-                span_lint_hir_and_then(
-                    cx,
-                    SHORT_CIRCUIT_STATEMENT,
-                    expr.hir_id,
-                    stmt.span,
-                    "boolean short circuit operator in statement may be clearer using an explicit test",
-                    |diag| {
-                        let sugg = if binop.node == BinOpKind::Or { !sugg } else { sugg };
-                        diag.span_suggestion(
-                            stmt.span,
-                            "replace it with",
-                            format!(
-                                "if {sugg} {{ {}; }}",
-                                &snippet(cx, b.span, ".."),
-                            ),
-                            Applicability::MachineApplicable, // snippet
-                        );
-                    });
-            }
+        if let StmtKind::Semi(expr) = stmt.kind
+            && let ExprKind::Binary(ref binop, a, b) = expr.kind
+            && (binop.node == BinOpKind::And || binop.node == BinOpKind::Or)
+            && let Some(sugg) = Sugg::hir_opt(cx, a)
+        {
+            span_lint_hir_and_then(
+                cx,
+                SHORT_CIRCUIT_STATEMENT,
+                expr.hir_id,
+                stmt.span,
+                "boolean short circuit operator in statement may be clearer using an explicit test",
+                |diag| {
+                    let sugg = if binop.node == BinOpKind::Or { !sugg } else { sugg };
+                    diag.span_suggestion(
+                        stmt.span,
+                        "replace it with",
+                        format!("if {sugg} {{ {}; }}", &snippet(cx, b.span, ".."),),
+                        Applicability::MachineApplicable, // snippet
+                    );
+                },
+            );
         };
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        if let ExprKind::Cast(e, ty) = expr.kind {
-            self.check_cast(cx, expr.span, e, ty);
+        if in_external_macro(cx.sess(), expr.span)
+            || expr.span.desugaring_kind().is_some()
+            || any_parent_is_automatically_derived(cx.tcx, expr.hir_id)
+        {
             return;
         }
-        if in_attributes_expansion(expr) || expr.span.is_desugaring(DesugaringKind::Await) {
-            // Don't lint things expanded by #[derive(...)], etc or `await` desugaring
-            return;
-        }
-        let sym;
-        let binding = match expr.kind {
-            ExprKind::Path(ref qpath) if !matches!(qpath, hir::QPath::LangItem(..)) => {
-                let binding = last_path_segment(qpath).ident.as_str();
-                if binding.starts_with('_') &&
-                    !binding.starts_with("__") &&
-                    binding != "_result" && // FIXME: #944
-                    is_used(cx, expr) &&
-                    // don't lint if the declaration is in a macro
-                    non_macro_local(cx, cx.qpath_res(qpath, expr.hir_id))
+        let (definition_hir_id, ident) = match expr.kind {
+            ExprKind::Path(ref qpath) => {
+                if let QPath::Resolved(None, path) = qpath
+                    && let Res::Local(id) = path.res
+                    && is_used(cx, expr)
                 {
-                    Some(binding)
+                    (id, last_path_segment(qpath).ident)
                 } else {
-                    None
+                    return;
                 }
             },
-            ExprKind::Field(_, ident) => {
-                sym = ident.name;
-                let name = sym.as_str();
-                if name.starts_with('_') && !name.starts_with("__") {
-                    Some(name)
+            ExprKind::Field(recv, ident) => {
+                if let Some(adt_def) = cx.typeck_results().expr_ty_adjusted(recv).ty_adt_def()
+                    && let Some(field) = adt_def.all_fields().find(|field| field.name == ident.name)
+                    && let Some(local_did) = field.did.as_local()
+                    && let Some(hir_id) = cx.tcx.opt_local_def_id_to_hir_id(local_did)
+                    && !cx.tcx.type_of(field.did).skip_binder().is_phantom_data()
+                {
+                    (hir_id, ident)
                 } else {
-                    None
+                    return;
                 }
             },
-            _ => None,
+            _ => return,
         };
-        if let Some(binding) = binding {
-            span_lint(
+
+        let name = ident.name.as_str();
+        if name.starts_with('_')
+            && !name.starts_with("__")
+            && let definition_span = cx.tcx.hir().span(definition_hir_id)
+            && !definition_span.from_expansion()
+            && !fulfill_or_allowed(cx, USED_UNDERSCORE_BINDING, [expr.hir_id, definition_hir_id])
+        {
+            span_lint_and_then(
                 cx,
                 USED_UNDERSCORE_BINDING,
                 expr.span,
                 &format!(
-                    "used binding `{binding}` which is prefixed with an underscore. A leading \
+                    "used binding `{name}` which is prefixed with an underscore. A leading \
                      underscore signals that a binding will not be used"
                 ),
+                |diag| {
+                    diag.span_note(definition_span, format!("`{name}` is defined here"));
+                },
             );
         }
     }
@@ -304,51 +267,4 @@ fn is_used(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
         ExprKind::Assign(_, rhs, _) | ExprKind::AssignOp(_, _, rhs) => SpanlessEq::new(cx).eq_expr(rhs, expr),
         _ => is_used(cx, parent),
     })
-}
-
-/// Tests whether an expression is in a macro expansion (e.g., something
-/// generated by `#[derive(...)]` or the like).
-fn in_attributes_expansion(expr: &Expr<'_>) -> bool {
-    use rustc_span::hygiene::MacroKind;
-    if expr.span.from_expansion() {
-        let data = expr.span.ctxt().outer_expn_data();
-        matches!(data.kind, ExpnKind::Macro(MacroKind::Attr | MacroKind::Derive, _))
-    } else {
-        false
-    }
-}
-
-/// Tests whether `res` is a variable defined outside a macro.
-fn non_macro_local(cx: &LateContext<'_>, res: def::Res) -> bool {
-    if let def::Res::Local(id) = res {
-        !cx.tcx.hir().span(id).from_expansion()
-    } else {
-        false
-    }
-}
-
-impl LintPass {
-    fn check_cast(&self, cx: &LateContext<'_>, span: Span, e: &Expr<'_>, ty: &hir::Ty<'_>) {
-        if_chain! {
-            if let TyKind::Ptr(ref mut_ty) = ty.kind;
-            if is_integer_literal(e, 0);
-            if !in_constant(cx, e.hir_id);
-            then {
-                let (msg, sugg_fn) = match mut_ty.mutbl {
-                    Mutability::Mut => ("`0 as *mut _` detected", "ptr::null_mut"),
-                    Mutability::Not => ("`0 as *const _` detected", "ptr::null"),
-                };
-
-                let (sugg, appl) = if let TyKind::Infer = mut_ty.ty.kind {
-                    (format!("{}::{sugg_fn}()", self.std_or_core), Applicability::MachineApplicable)
-                } else if let Some(mut_ty_snip) = snippet_opt(cx, mut_ty.ty.span) {
-                    (format!("{}::{sugg_fn}::<{mut_ty_snip}>()", self.std_or_core), Applicability::MachineApplicable)
-                } else {
-                    // `MaybeIncorrect` as type inference may not work with the suggested code
-                    (format!("{}::{sugg_fn}()", self.std_or_core), Applicability::MaybeIncorrect)
-                };
-                span_lint_and_sugg(cx, ZERO_PTR, span, msg, "try", sugg, appl);
-            }
-        }
-    }
 }

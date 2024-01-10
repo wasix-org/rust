@@ -1,6 +1,6 @@
 //! cfg defines conditional compiling options, `cfg` attribute parser and evaluator
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
 
 mod cfg_expr;
 mod dnf;
@@ -58,6 +58,13 @@ impl CfgOptions {
         self.enabled.insert(CfgAtom::KeyValue { key, value });
     }
 
+    pub fn difference<'a>(
+        &'a self,
+        other: &'a CfgOptions,
+    ) -> impl Iterator<Item = &'a CfgAtom> + 'a {
+        self.enabled.difference(&other.enabled)
+    }
+
     pub fn apply_diff(&mut self, diff: CfgDiff) {
         for atom in diff.enable {
             self.enabled.insert(atom);
@@ -69,7 +76,7 @@ impl CfgOptions {
     }
 
     pub fn get_cfg_keys(&self) -> impl Iterator<Item = &SmolStr> {
-        self.enabled.iter().map(|x| match x {
+        self.enabled.iter().map(|it| match it {
             CfgAtom::Flag(key) => key,
             CfgAtom::KeyValue { key, .. } => key,
         })
@@ -79,14 +86,40 @@ impl CfgOptions {
         &'a self,
         cfg_key: &'a str,
     ) -> impl Iterator<Item = &'a SmolStr> + 'a {
-        self.enabled.iter().filter_map(move |x| match x {
+        self.enabled.iter().filter_map(move |it| match it {
             CfgAtom::KeyValue { key, value } if cfg_key == key => Some(value),
             _ => None,
         })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl Extend<CfgAtom> for CfgOptions {
+    fn extend<T: IntoIterator<Item = CfgAtom>>(&mut self, iter: T) {
+        iter.into_iter().for_each(|cfg_flag| _ = self.enabled.insert(cfg_flag));
+    }
+}
+
+impl IntoIterator for CfgOptions {
+    type Item = <FxHashSet<CfgAtom> as IntoIterator>::Item;
+
+    type IntoIter = <FxHashSet<CfgAtom> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        <FxHashSet<CfgAtom> as IntoIterator>::into_iter(self.enabled)
+    }
+}
+
+impl<'a> IntoIterator for &'a CfgOptions {
+    type Item = <&'a FxHashSet<CfgAtom> as IntoIterator>::Item;
+
+    type IntoIter = <&'a FxHashSet<CfgAtom> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        <&FxHashSet<CfgAtom> as IntoIterator>::into_iter(&self.enabled)
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct CfgDiff {
     // Invariants: No duplicates, no atom that's both in `enable` and `disable`.
     enable: Vec<CfgAtom>,

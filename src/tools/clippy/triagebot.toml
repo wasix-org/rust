@@ -9,16 +9,23 @@ allow-unauthenticated = [
 # See https://github.com/rust-lang/triagebot/wiki/Shortcuts
 [shortcut]
 
+# Have rustbot inform users about the *No Merge Policy*
+[no-merges]
+exclude_titles = ["Rustup"] # exclude syncs from rust-lang/rust
+labels = ["has-merge-commits", "S-waiting-on-author"]
+
 [autolabel."S-waiting-on-review"]
 new_pr = true
 
 [assign]
 contributing_url = "https://github.com/rust-lang/rust-clippy/blob/master/CONTRIBUTING.md"
+users_on_vacation = ["blyxyas"]
 
 [assign.owners]
 "/.github" = ["@flip1995"]
+"/book" = ["@flip1995"]
+"/util/gh-pages" = ["@xFrednet"]
 "*" = [
-    "@flip1995",
     "@Manishearth",
     "@llogiq",
     "@giraffate",
@@ -26,4 +33,5 @@ contributing_url = "https://github.com/rust-lang/rust-clippy/blob/master/CONTRIB
     "@Alexendoo",
     "@dswij",
     "@Jarcho",
+    "@blyxyas",
 ]

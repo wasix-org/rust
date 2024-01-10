@@ -1,12 +1,8 @@
-// FIXME(compiler-errors): This really should suggest `let` on the RHS of the
-// `&&` operator, but that's kinda hard to do because of precedence.
-// Instead, for now we just make sure not to suggest `if let let`.
 fn a() {
     if let x = 1 && i = 2 {}
     //~^ ERROR cannot find value `i` in this scope
-    //~| ERROR `let` expressions in this position are unstable
     //~| ERROR mismatched types
-    //~| ERROR `let` expressions are not supported here
+    //~| ERROR expected expression, found `let` statement
 }
 
 fn b() {

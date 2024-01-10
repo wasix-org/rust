@@ -70,7 +70,9 @@ impl DoubleEndedIterator for Args {
     target_os = "redox",
     target_os = "vxworks",
     target_os = "horizon",
+    target_os = "aix",
     target_os = "nto",
+    target_os = "hurd",
 ))]
 mod imp {
     use super::Args;
@@ -168,7 +170,7 @@ mod imp {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"))]
 mod imp {
     use super::Args;
     use crate::ffi::CStr;
@@ -209,7 +211,7 @@ mod imp {
     // for i in (0..[args count])
     //      res.push([args objectAtIndex:i])
     // res
-    #[cfg(any(target_os = "ios", target_os = "watchos"))]
+    #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "watchos"))]
     pub fn args() -> Args {
         use crate::ffi::OsString;
         use crate::mem;
@@ -242,13 +244,15 @@ mod imp {
         let mut res = Vec::new();
 
         unsafe {
-            let process_info_sel = sel_registerName("processInfo\0".as_ptr());
-            let arguments_sel = sel_registerName("arguments\0".as_ptr());
-            let utf8_sel = sel_registerName("UTF8String\0".as_ptr());
-            let count_sel = sel_registerName("count\0".as_ptr());
-            let object_at_sel = sel_registerName("objectAtIndex:\0".as_ptr());
+            let process_info_sel =
+                sel_registerName(c"processInfo".as_ptr() as *const libc::c_uchar);
+            let arguments_sel = sel_registerName(c"arguments".as_ptr() as *const libc::c_uchar);
+            let utf8_sel = sel_registerName(c"UTF8String".as_ptr() as *const libc::c_uchar);
+            let count_sel = sel_registerName(c"count".as_ptr() as *const libc::c_uchar);
+            let object_at_sel =
+                sel_registerName(c"objectAtIndex:".as_ptr() as *const libc::c_uchar);
 
-            let klass = objc_getClass("NSProcessInfo\0".as_ptr());
+            let klass = objc_getClass(c"NSProcessInfo".as_ptr() as *const libc::c_uchar);
             let info = objc_msgSend(klass, process_info_sel);
             let args = objc_msgSend(info, arguments_sel);
 
@@ -265,7 +269,7 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "espidf")]
+#[cfg(any(target_os = "espidf", target_os = "vita"))]
 mod imp {
     use super::Args;
 

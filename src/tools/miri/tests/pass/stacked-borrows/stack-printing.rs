@@ -1,4 +1,7 @@
-//@compile-flags: -Zmiri-permissive-provenance
+// We disable the GC for this test because it would change what is printed. We are testing the
+// printing, not how it interacts with the GC.
+//@compile-flags: -Zmiri-permissive-provenance -Zmiri-provenance-gc=0
+
 #![feature(strict_provenance)]
 use std::{
     alloc::{self, Layout},
@@ -7,7 +10,7 @@ use std::{
 
 extern "Rust" {
     fn miri_get_alloc_id(ptr: *const u8) -> u64;
-    fn miri_print_borrow_stacks(alloc_id: u64);
+    fn miri_print_borrow_state(alloc_id: u64, show_unnamed: bool);
 }
 
 fn get_alloc_id(ptr: *const u8) -> u64 {
@@ -15,7 +18,9 @@ fn get_alloc_id(ptr: *const u8) -> u64 {
 }
 
 fn print_borrow_stacks(alloc_id: u64) {
-    unsafe { miri_print_borrow_stacks(alloc_id) }
+    unsafe {
+        miri_print_borrow_state(alloc_id, /* ignored: show_unnamed */ false)
+    }
 }
 
 fn main() {

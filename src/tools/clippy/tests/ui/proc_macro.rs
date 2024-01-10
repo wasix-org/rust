@@ -1,5 +1,4 @@
 //! Check that we correctly lint procedural macros.
-#![crate_type = "proc-macro"]
 
 extern crate proc_macro;
 
@@ -8,6 +7,7 @@ use proc_macro::TokenStream;
 #[allow(dead_code)]
 fn f() {
     let _x = 3.14;
+    //~^ ERROR: approximate value of `f{32, 64}::consts::PI` found
 }
 
 #[proc_macro]

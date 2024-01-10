@@ -11,8 +11,10 @@ use rowan::{GreenNodeData, GreenTokenData};
 
 use crate::{
     ast::{self, support, AstNode, AstToken, HasAttrs, HasGenericParams, HasName, SyntaxNode},
-    NodeOrToken, SmolStr, SyntaxElement, SyntaxToken, TokenText, T,
+    ted, NodeOrToken, SmolStr, SyntaxElement, SyntaxToken, TokenText, T,
 };
+
+use super::{RangeItem, RangeOp};
 
 impl ast::Lifetime {
     pub fn text(&self) -> TokenText<'_> {
@@ -60,6 +62,14 @@ impl ast::BlockExpr {
     }
     pub fn tail_expr(&self) -> Option<ast::Expr> {
         self.stmt_list()?.tail_expr()
+    }
+    /// Block expressions accept outer and inner attributes, but only when they are the outer
+    /// expression of an expression statement or the final expression of another block expression.
+    pub fn may_carry_attributes(&self) -> bool {
+        matches!(
+            self.syntax().parent().map(|it| it.kind()),
+            Some(SyntaxKind::BLOCK_EXPR | SyntaxKind::EXPR_STMT)
+        )
     }
 }
 
@@ -267,8 +277,17 @@ impl ast::Path {
         successors(Some(self.clone()), ast::Path::qualifier).last().unwrap()
     }
 
+    pub fn first_qualifier(&self) -> Option<ast::Path> {
+        successors(self.qualifier(), ast::Path::qualifier).last()
+    }
+
     pub fn first_segment(&self) -> Option<ast::PathSegment> {
         self.first_qualifier_or_self().segment()
+    }
+
+    // FIXME: Check usages of Self::segments, they might be wrong because of the logic of the bloew function
+    pub fn segments_of_this_path_only_rev(&self) -> impl Iterator<Item = ast::PathSegment> + Clone {
+        self.qualifiers_and_self().filter_map(|it| it.segment())
     }
 
     pub fn segments(&self) -> impl Iterator<Item = ast::PathSegment> + Clone {
@@ -279,6 +298,10 @@ impl ast::Path {
 
     pub fn qualifiers(&self) -> impl Iterator<Item = ast::Path> + Clone {
         successors(self.qualifier(), |p| p.qualifier())
+    }
+
+    pub fn qualifiers_and_self(&self) -> impl Iterator<Item = ast::Path> + Clone {
+        successors(Some(self.clone()), |p| p.qualifier())
     }
 
     pub fn top_path(&self) -> ast::Path {
@@ -302,6 +325,10 @@ impl ast::UseTree {
     pub fn is_simple_path(&self) -> bool {
         self.use_tree_list().is_none() && self.star_token().is_none()
     }
+
+    pub fn parent_use_tree_list(&self) -> Option<ast::UseTreeList> {
+        self.syntax().parent().and_then(ast::UseTreeList::cast)
+    }
 }
 
 impl ast::UseTreeList {
@@ -318,6 +345,34 @@ impl ast::UseTreeList {
             .filter_map(|it| it.into_token())
             .find_map(ast::Comment::cast)
             .is_some()
+    }
+
+    pub fn comma(&self) -> impl Iterator<Item = SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|it| it.into_token().filter(|it| it.kind() == T![,]))
+    }
+
+    /// Remove the unnecessary braces in current `UseTreeList`
+    pub fn remove_unnecessary_braces(mut self) {
+        let remove_brace_in_use_tree_list = |u: &ast::UseTreeList| {
+            let use_tree_count = u.use_trees().count();
+            if use_tree_count == 1 {
+                u.l_curly_token().map(ted::remove);
+                u.r_curly_token().map(ted::remove);
+                u.comma().for_each(ted::remove);
+            }
+        };
+
+        // take `use crate::{{{{A}}}}` for example
+        // the below remove the innermost {}, got `use crate::{{{A}}}`
+        remove_brace_in_use_tree_list(&self);
+
+        // the below remove othe unnecessary {}, got `use crate::A`
+        while let Some(parent_use_tree_list) = self.parent_use_tree().parent_use_tree_list() {
+            remove_brace_in_use_tree_list(&parent_use_tree_list);
+            self = parent_use_tree_list;
+        }
     }
 }
 
@@ -350,6 +405,15 @@ impl ast::Impl {
         } else {
             None
         }
+    }
+}
+
+// [#15778](https://github.com/rust-lang/rust-analyzer/issues/15778)
+impl ast::PathSegment {
+    pub fn qualifying_trait(&self) -> Option<ast::PathType> {
+        let mut path_types = support::children(self.syntax());
+        let first = path_types.next()?;
+        path_types.next().or(Some(first))
     }
 }
 
@@ -555,6 +619,16 @@ impl ast::Item {
     }
 }
 
+impl ast::Type {
+    pub fn generic_arg_list(&self) -> Option<ast::GenericArgList> {
+        if let ast::Type::PathType(path_type) = self {
+            path_type.path()?.segment()?.generic_arg_list()
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldKind {
     Name(ast::NameRef),
@@ -680,6 +754,81 @@ impl TypeOrConstParam {
     }
 }
 
+impl AstNode for TypeOrConstParam {
+    fn can_cast(kind: SyntaxKind) -> bool
+    where
+        Self: Sized,
+    {
+        matches!(kind, SyntaxKind::TYPE_PARAM | SyntaxKind::CONST_PARAM)
+    }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        let res = match syntax.kind() {
+            SyntaxKind::TYPE_PARAM => TypeOrConstParam::Type(ast::TypeParam { syntax }),
+            SyntaxKind::CONST_PARAM => TypeOrConstParam::Const(ast::ConstParam { syntax }),
+            _ => return None,
+        };
+        Some(res)
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            TypeOrConstParam::Type(it) => it.syntax(),
+            TypeOrConstParam::Const(it) => it.syntax(),
+        }
+    }
+}
+
+impl HasAttrs for TypeOrConstParam {}
+
+#[derive(Debug, Clone)]
+pub enum TraitOrAlias {
+    Trait(ast::Trait),
+    TraitAlias(ast::TraitAlias),
+}
+
+impl TraitOrAlias {
+    pub fn name(&self) -> Option<ast::Name> {
+        match self {
+            TraitOrAlias::Trait(x) => x.name(),
+            TraitOrAlias::TraitAlias(x) => x.name(),
+        }
+    }
+}
+
+impl AstNode for TraitOrAlias {
+    fn can_cast(kind: SyntaxKind) -> bool
+    where
+        Self: Sized,
+    {
+        matches!(kind, SyntaxKind::TRAIT | SyntaxKind::TRAIT_ALIAS)
+    }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        let res = match syntax.kind() {
+            SyntaxKind::TRAIT => TraitOrAlias::Trait(ast::Trait { syntax }),
+            SyntaxKind::TRAIT_ALIAS => TraitOrAlias::TraitAlias(ast::TraitAlias { syntax }),
+            _ => return None,
+        };
+        Some(res)
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            TraitOrAlias::Trait(it) => it.syntax(),
+            TraitOrAlias::TraitAlias(it) => it.syntax(),
+        }
+    }
+}
+
+impl HasAttrs for TraitOrAlias {}
+
 pub enum VisibilityKind {
     In(ast::Path),
     PubCrate,
@@ -728,8 +877,10 @@ impl ast::Module {
     }
 }
 
-impl ast::RangePat {
-    pub fn start(&self) -> Option<ast::Pat> {
+impl RangeItem for ast::RangePat {
+    type Bound = ast::Pat;
+
+    fn start(&self) -> Option<ast::Pat> {
         self.syntax()
             .children_with_tokens()
             .take_while(|it| !(it.kind() == T![..] || it.kind() == T![..=]))
@@ -737,12 +888,36 @@ impl ast::RangePat {
             .find_map(ast::Pat::cast)
     }
 
-    pub fn end(&self) -> Option<ast::Pat> {
+    fn end(&self) -> Option<ast::Pat> {
         self.syntax()
             .children_with_tokens()
             .skip_while(|it| !(it.kind() == T![..] || it.kind() == T![..=]))
             .filter_map(|it| it.into_node())
             .find_map(ast::Pat::cast)
+    }
+
+    fn op_token(&self) -> Option<SyntaxToken> {
+        self.syntax().children_with_tokens().find_map(|it| {
+            let token = it.into_token()?;
+
+            match token.kind() {
+                T![..] => Some(token),
+                T![..=] => Some(token),
+                _ => None,
+            }
+        })
+    }
+
+    fn op_kind(&self) -> Option<RangeOp> {
+        self.syntax().children_with_tokens().find_map(|it| {
+            let token = it.into_token()?;
+
+            match token.kind() {
+                T![..] => Some(RangeOp::Exclusive),
+                T![..=] => Some(RangeOp::Inclusive),
+                _ => None,
+            }
+        })
     }
 }
 
@@ -859,12 +1034,6 @@ impl From<ast::Adt> for ast::Item {
             ast::Adt::Struct(it) => ast::Item::Struct(it),
             ast::Adt::Union(it) => ast::Item::Union(it),
         }
-    }
-}
-
-impl ast::IfExpr {
-    pub fn condition(&self) -> Option<ast::Expr> {
-        support::child(&self.syntax)
     }
 }
 

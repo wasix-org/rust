@@ -65,7 +65,7 @@ use self::{foo::*, bar$0};
 "#,
         expect![[r#"
             md foo
-            st S
+            st S   S
         "#]],
     );
 }
@@ -82,7 +82,7 @@ mod foo {
 use foo::{bar::$0}
 "#,
         expect![[r#"
-            st FooBar
+            st FooBar FooBar
         "#]],
     );
     check(
@@ -115,7 +115,7 @@ mod foo {
 use foo::{bar::{baz::$0}}
 "#,
         expect![[r#"
-            st FooBarBaz
+            st FooBarBaz FooBarBaz
         "#]],
     );
     check(
@@ -152,7 +152,7 @@ struct Bar;
 "#,
         expect![[r#"
             ma foo macro_rules! foo_
-            st Foo
+            st Foo Foo
         "#]],
     );
 }
@@ -193,7 +193,7 @@ struct Bar;
 "#,
         expect![[r#"
             md foo
-            st Bar
+            st Bar Bar
         "#]],
     );
 }
@@ -212,7 +212,7 @@ struct Bar;
         expect![[r#"
             md bar
             md foo
-            st Bar
+            st Bar Bar
         "#]],
     );
 }
@@ -230,7 +230,7 @@ mod a {
 }
 "#,
         expect![[r#"
-            ct A
+            ct A       usize
             md b
             kw super::
         "#]],
@@ -248,7 +248,7 @@ struct Bar;
 "#,
         expect![[r#"
             md foo
-            st Bar
+            st Bar Bar
         "#]],
     );
 }
@@ -265,7 +265,7 @@ pub mod foo {}
 "#,
         expect![[r#"
             md foo
-            st Foo
+            st Foo Foo
         "#]],
     );
 }
@@ -379,6 +379,53 @@ use self::foo::impl$0
 "#,
         expect![[r#"
             fn bar fn(u32)
+        "#]],
+    );
+}
+
+#[test]
+fn use_tree_no_unstable_items_on_stable() {
+    check(
+        r#"
+//- /lib.rs crate:main deps:std
+use std::$0
+//- /std.rs crate:std
+#[unstable]
+pub mod simd {}
+#[unstable]
+pub struct S;
+#[unstable]
+pub fn foo() {}
+#[unstable]
+#[macro_export]
+marco_rules! m { () => {} }
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn use_tree_unstable_items_on_nightly() {
+    check(
+        r#"
+//- toolchain:nightly
+//- /lib.rs crate:main deps:std
+use std::$0
+//- /std.rs crate:std
+#[unstable]
+pub mod simd {}
+#[unstable]
+pub struct S;
+#[unstable]
+pub fn foo() {}
+#[unstable]
+#[macro_export]
+marco_rules! m { () => {} }
+"#,
+        expect![[r#"
+            fn foo  fn()
+            md simd
+            st S    S
         "#]],
     );
 }

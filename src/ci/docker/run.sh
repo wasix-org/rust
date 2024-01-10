@@ -36,6 +36,11 @@ root_dir="`dirname $src_dir`"
 objdir=$root_dir/obj
 dist=$objdir/build/dist
 
+
+if [ -d "$root_dir/.git" ]; then
+    IS_GIT_SOURCE=1
+fi
+
 source "$ci_dir/shared.sh"
 
 CACHE_DOMAIN="${CACHE_DOMAIN:-ci-caches.rust-lang.org}"
@@ -63,6 +68,10 @@ if [ -f "$docker_dir/$image/Dockerfile" ]; then
       uname -m >> $hash_key
 
       docker --version >> $hash_key
+
+      # Include cache version. Can be used to manually bust the Docker cache.
+      echo "2" >> $hash_key
+
       cksum=$(sha512sum $hash_key | \
         awk '{print $1}')
 
@@ -73,13 +82,17 @@ if [ -f "$docker_dir/$image/Dockerfile" ]; then
       set +e
       retry curl --max-time 600 -y 30 -Y 10 --connect-timeout 30 -f -L -C - \
         -o /tmp/rustci_docker_cache "$url"
+
+      docker_archive_hash=$(sha512sum /tmp/rustci_docker_cache | awk '{print $1}')
+      echo "Downloaded archive hash: ${docker_archive_hash}"
+
       echo "Loading images into docker"
       # docker load sometimes hangs in the CI, so time out after 10 minutes with TERM,
       # KILL after 12 minutes
       loaded_images=$(/usr/bin/timeout -k 720 600 docker load -i /tmp/rustci_docker_cache \
         | sed 's/.* sha/sha/')
       set -e
-      echo "Downloaded containers:\n$loaded_images"
+      printf "Downloaded containers:\n$loaded_images\n"
     fi
 
     dockerfile="$docker_dir/$image/Dockerfile"
@@ -89,12 +102,20 @@ if [ -f "$docker_dir/$image/Dockerfile" ]; then
     else
         context="$script_dir"
     fi
+    echo "::group::Building docker image for $image"
+
+    # As of August 2023, Github Actions have updated Docker to 23.X,
+    # which uses the BuildKit by default. It currently throws aways all
+    # intermediate layers, which breaks our usage of S3 layer caching.
+    # Therefore we opt-in to the old build backend for now.
+    export DOCKER_BUILDKIT=0
     retry docker \
       build \
       --rm \
       -t rust-ci \
       -f "$dockerfile" \
       "$context"
+    echo "::endgroup::"
 
     if [ "$CI" != "" ]; then
       s3url="s3://$SCCACHE_BUCKET/docker/$cksum"
@@ -102,8 +123,10 @@ if [ -f "$docker_dir/$image/Dockerfile" ]; then
       digest=$(docker inspect rust-ci --format '{{.Id}}')
       echo "Built container $digest"
       if ! grep -q "$digest" <(echo "$loaded_images"); then
-        echo "Uploading finished image to $url"
+        echo "Uploading finished image $digest to $url"
         set +e
+        # Print image history for easier debugging of layer SHAs
+        docker history rust-ci
         docker history -q rust-ci | \
           grep -v missing | \
           xargs docker save | \
@@ -118,6 +141,7 @@ if [ -f "$docker_dir/$image/Dockerfile" ]; then
       mkdir -p "$dist"
       echo "$url" >"$info"
       echo "$digest" >>"$info"
+      cat "$info"
     fi
 elif [ -f "$docker_dir/disabled/$image/Dockerfile" ]; then
     if isCI; then
@@ -169,9 +193,18 @@ if [ "$SCCACHE_BUCKET" != "" ]; then
     args="$args --env SCCACHE_REGION"
     args="$args --env AWS_ACCESS_KEY_ID"
     args="$args --env AWS_SECRET_ACCESS_KEY"
+    args="$args --env AWS_REGION"
 else
     mkdir -p $HOME/.cache/sccache
     args="$args --env SCCACHE_DIR=/sccache --volume $HOME/.cache/sccache:/sccache"
+fi
+
+# By default, container volumes are bound as read-only; therefore doing experimental work
+# or debugging within the container environment (such as fetching submodules and
+# building them) is not possible. Setting READ_ONLY_SRC to 0 enables this capability by
+# binding the volumes in read-write mode.
+if [ "$READ_ONLY_SRC" != "0" ]; then
+    SRC_MOUNT_OPTION=":ro"
 fi
 
 # Run containers as privileged as it should give them access to some more
@@ -208,14 +241,14 @@ if [ -f /.dockerenv ]; then
   docker cp . checkout:/checkout
   args="$args --volumes-from checkout"
 else
-  args="$args --volume $root_dir:/checkout:ro"
+  args="$args --volume $root_dir:/checkout$SRC_MOUNT_OPTION"
   args="$args --volume $objdir:/checkout/obj"
   args="$args --volume $HOME/.cargo:/cargo"
   args="$args --volume $HOME/rustsrc:$HOME/rustsrc"
   args="$args --volume /tmp/toolstate:/tmp/toolstate"
 
   id=$(id -u)
-  if [[ "$id" != 0 && "$(docker -v)" =~ ^podman ]]; then
+  if [[ "$id" != 0 && "$(docker version)" =~ Podman ]]; then
     # Rootless podman creates a separate user namespace, where an inner
     # LOCAL_USER_ID will map to a different subuid range on the host.
     # The "keep-id" mode maps the current UID directly into the container.
@@ -229,9 +262,13 @@ if [ "$dev" = "1" ]
 then
   # Interactive + TTY
   args="$args -it"
-  command="/bin/bash"
+  if [ $IS_GIT_SOURCE -eq 1 ]; then
+    command=(/bin/bash -c 'git config --global --add safe.directory /checkout;bash')
+  else
+    command=(/bin/bash)
+  fi
 else
-  command="/checkout/src/ci/run.sh"
+  command=(/checkout/src/ci/run.sh)
 fi
 
 if [ "$CI" != "" ]; then
@@ -244,29 +281,46 @@ else
   BASE_COMMIT=""
 fi
 
+SUMMARY_FILE=github-summary.md
+touch $objdir/${SUMMARY_FILE}
+
+extra_env=""
+if [ "$ENABLE_GCC_CODEGEN" = "1" ]; then
+  extra_env="$extra_env --env ENABLE_GCC_CODEGEN=1"
+  # Fix rustc_codegen_gcc lto issues.
+  extra_env="$extra_env --env GCC_EXEC_PREFIX=/usr/lib/gcc/"
+  echo "Setting extra environment values for docker: $extra_env"
+fi
+
 docker \
   run \
   --workdir /checkout/obj \
   --env SRC=/checkout \
+  $extra_env \
   $args \
   --env CARGO_HOME=/cargo \
   --env DEPLOY \
   --env DEPLOY_ALT \
   --env CI \
-  --env TF_BUILD \
-  --env BUILD_SOURCEBRANCHNAME \
   --env GITHUB_ACTIONS \
   --env GITHUB_REF \
+  --env GITHUB_STEP_SUMMARY="/checkout/obj/${SUMMARY_FILE}" \
   --env TOOLSTATE_REPO_ACCESS_TOKEN \
   --env TOOLSTATE_REPO \
   --env TOOLSTATE_PUBLISH \
   --env RUST_CI_OVERRIDE_RELEASE_CHANNEL \
   --env CI_JOB_NAME="${CI_JOB_NAME-$IMAGE}" \
   --env BASE_COMMIT="$BASE_COMMIT" \
+  --env DIST_TRY_BUILD \
+  --env PR_CI_JOB \
+  --env OBJDIR_ON_HOST="$objdir" \
+  --env CODEGEN_BACKENDS \
   --init \
   --rm \
   rust-ci \
-  $command
+  "${command[@]}"
+
+cat $objdir/${SUMMARY_FILE} >> "${GITHUB_STEP_SUMMARY}"
 
 if [ -f /.dockerenv ]; then
   rm -rf $objdir

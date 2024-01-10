@@ -1,10 +1,9 @@
-// We test the `align_offset` panic below, make sure we test the interpreter impl and not the "real" one.
-//@compile-flags: -Zmiri-symbolic-alignment-check -Zmiri-permissive-provenance
 #![feature(never_type)]
 #![allow(unconditional_panic, non_fmt_panics)]
 
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process;
 
 thread_local! {
     static MY_COUNTER: Cell<usize> = Cell::new(0);
@@ -48,39 +47,41 @@ fn main() {
     }));
 
     // Std panics
-    test(None, |_old_val| std::panic!("Hello from panic: std"));
-    test(None, |old_val| std::panic!(format!("Hello from panic: {:?}", old_val)));
-    test(None, |old_val| std::panic!("Hello from panic: {:?}", old_val));
-    test(None, |_old_val| std::panic!(1337));
+    test(None, |_old_val| std::panic!("Hello from std::panic"));
+    test(None, |old_val| std::panic!("Hello from std::panic: {:?}", old_val));
+    test(None, |old_val| {
+        std::panic::panic_any(format!("Hello from std::panic_any: {:?}", old_val))
+    });
+    test(None, |_old_val| std::panic::panic_any(1337));
 
     // Core panics
-    test(None, |_old_val| core::panic!("Hello from panic: core"));
-    test(None, |old_val| core::panic!(&format!("Hello from panic: {:?}", old_val)));
-    test(None, |old_val| core::panic!("Hello from panic: {:?}", old_val));
+    test(None, |_old_val| core::panic!("Hello from core::panic"));
+    test(None, |old_val| core::panic!("Hello from core::panic: {:?}", old_val));
 
     // Built-in panics; also make sure the message is right.
     test(Some("index out of bounds: the len is 3 but the index is 4"), |_old_val| {
         let _val = [0, 1, 2][4];
-        loop {}
+        process::abort()
     });
     test(Some("attempt to divide by zero"), |_old_val| {
         let _val = 1 / 0;
-        loop {}
+        process::abort()
     });
 
+    // Panic somewhere in the standard library.
     test(Some("align_offset: align is not a power-of-two"), |_old_val| {
-        let _ = (0usize as *const u8).align_offset(3);
-        loop {}
+        let _ = std::ptr::null::<u8>().align_offset(3);
+        process::abort()
     });
 
     // Assertion and debug assertion
     test(None, |_old_val| {
         assert!(false);
-        loop {}
+        process::abort()
     });
     test(None, |_old_val| {
         debug_assert!(false);
-        loop {}
+        process::abort()
     });
 
     eprintln!("Success!"); // Make sure we get this in stderr

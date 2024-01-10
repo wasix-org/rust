@@ -71,19 +71,12 @@ and you can (cross-)run the entire test suite using:
 MIRI_TEST_TARGET=i686-unknown-linux-gnu ./miri test
 ```
 
-If your target doesn't support libstd, you can run miri with
+If your target doesn't support libstd that should usually just work. However, if you are using a
+custom target file, you might have to set `MIRI_NO_STD=1`.
 
-```
-MIRI_NO_STD=1 MIRI_TEST_TARGET=thumbv7em-none-eabihf ./miri test tests/fail/alloc/no_global_allocator.rs
-MIRI_NO_STD=1 ./miri run tests/pass/no_std.rs --target thumbv7em-none-eabihf
-```
-
-to avoid attempting (and failing) to build libstd. Note that almost no tests will pass
-this way, but you can run individual tests.
-
-`./miri test FILTER` only runs those tests that contain `FILTER` in their
-filename (including the base directory, e.g. `./miri test fail` will run all
-compile-fail tests).
+`./miri test FILTER` only runs those tests that contain `FILTER` in their filename (including the
+base directory, e.g. `./miri test fail` will run all compile-fail tests). These filters are passed
+to `cargo test`, so for multiple filers you need to use `./miri test -- FILTER1 FILTER2`.
 
 You can get a trace of which MIR statements are being executed by setting the
 `MIRI_LOG` environment variable.  For example:
@@ -107,7 +100,7 @@ evaluation error was originally raised.
 ### UI testing
 
 We use ui-testing in Miri, meaning we generate `.stderr` and `.stdout` files for the output
-produced by Miri. You can use `./miri bless` to automatically (re)generate these files when
+produced by Miri. You can use `./miri test --bless` to automatically (re)generate these files when
 you add new tests or change how Miri presents certain output.
 
 Note that when you also use `MIRIFLAGS` to change optimizations and similar, the ui output
@@ -116,7 +109,7 @@ to run the other checks while ignoring the ui output, use `MIRI_SKIP_UI_CHECKS=1
 
 For more info on how to configure ui tests see [the documentation on the ui test crate][ui_test]
 
-[ui_test]: ui_test/README.md
+[ui_test]: https://github.com/oli-obk/ui_test/blob/main/README.md
 
 ### Testing `cargo miri`
 
@@ -129,17 +122,14 @@ development version of Miri using
 ./miri install
 ```
 
-and then you can use it as if it was installed by `rustup`.  Make sure you use
-the same toolchain when calling `cargo miri` that you used when installing Miri!
-Usually this means you have to write `cargo +miri miri ...` to select the `miri`
-toolchain that was installed by `./miri toolchain`.
+and then you can use it as if it was installed by `rustup` as a component of the
+`miri` toolchain. Note that the `miri` and `cargo-miri` executables are placed
+in the `miri` toolchain's sysroot to prevent conflicts with other toolchains.
+The Miri binaries in the `cargo` bin directory (usually `~/.cargo/bin`) are managed by rustup.
 
 There's a test for the cargo wrapper in the `test-cargo-miri` directory; run
 `./run-test.py` in there to execute it. Like `./miri test`, this respects the
 `MIRI_TEST_TARGET` environment variable to execute the test for another target.
-
-Note that installing Miri like this will "take away" Miri management from `rustup`.
-If you want to later go back to a rustup-installed Miri, run `rustup update`.
 
 ### Using a modified standard library
 
@@ -168,16 +158,17 @@ to `.vscode/settings.json` in your local Miri clone:
 {
     "rust-analyzer.rustc.source": "discover",
     "rust-analyzer.linkedProjects": [
-        "./Cargo.toml",
-        "./cargo-miri/Cargo.toml"
+        "Cargo.toml",
+        "cargo-miri/Cargo.toml",
+        "miri-script/Cargo.toml",
     ],
-    "rust-analyzer.checkOnSave.overrideCommand": [
+    "rust-analyzer.check.overrideCommand": [
         "env",
         "MIRI_AUTO_OPS=no",
         "./miri",
         "cargo",
         "clippy", // make this `check` when working with a locally built rustc
-        "--message-format=json"
+        "--message-format=json",
     ],
     // Contrary to what the name suggests, this also affects proc macros.
     "rust-analyzer.cargo.buildScripts.overrideCommand": [
@@ -233,25 +224,16 @@ You can also directly run Miri on a Rust source file:
 ## Advanced topic: Syncing with the rustc repo
 
 We use the [`josh` proxy](https://github.com/josh-project/josh) to transmit changes between the
-rustc and Miri repositories.
+rustc and Miri repositories. You can install it as follows:
 
 ```sh
 cargo +stable install josh-proxy --git https://github.com/josh-project/josh --tag r22.12.06
-josh-proxy --local=$HOME/.cache/josh --remote=https://github.com --no-background
 ```
 
-This uses a directory `$HOME/.cache/josh` as a cache, to speed up repeated pulling/pushing.
-
-To make josh push via ssh instead of https, you can add the following to your `.gitconfig`:
-
-```toml
-[url "git@github.com:"]
-    pushInsteadOf = https://github.com/
-```
+Josh will automatically be started and stopped by `./miri`.
 
 ### Importing changes from the rustc repo
 
-Josh needs to be running, as described above.
 We assume we start on an up-to-date master branch in the Miri repo.
 
 ```sh
@@ -270,16 +252,14 @@ needed.
 
 ### Exporting changes to the rustc repo
 
-Keep in mind that pushing is the most complicated job that josh has to do --
-pulling just filters the rustc history, but pushing needs to construct a new
-rustc history that would filter to the given Miri history! To avoid problems, it
-is a good idea to always pull immediately before you push. In particular, you
-should never do two josh pushes without an intermediate pull; that can lead to
-duplicated commits.
+Keep in mind that pushing is the most complicated job that josh has to do -- pulling just filters
+the rustc history, but pushing needs to construct a new rustc history that would filter to the given
+Miri history! To avoid problems, it is a good idea to always pull immediately before you push. If
+you are getting strange errors, chances are you are running into [this josh
+bug](https://github.com/josh-project/josh/issues/998). In that case, please get in touch on Zulip.
 
-Josh needs to be running, as described above. We will use the josh proxy to push
-to your fork of rustc. Run the following in the Miri repo, assuming we are on an
-up-to-date master branch:
+We will use the josh proxy to push to your fork of rustc. Run the following in the Miri repo,
+assuming we are on an up-to-date master branch:
 
 ```sh
 # Push the Miri changes to your rustc fork (substitute your github handle for YOUR_NAME).
@@ -289,3 +269,11 @@ up-to-date master branch:
 This will create a new branch called 'miri' in your fork, and the output should
 include a link to create a rustc PR that will integrate those changes into the
 main repository.
+
+If this fails due to authentication problems, it can help to make josh push via ssh instead of
+https. Add the following to your `.gitconfig`:
+
+```toml
+[url "git@github.com:"]
+    pushInsteadOf = https://github.com/
+```

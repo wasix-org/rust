@@ -1,10 +1,8 @@
 // check-pass
 // edition: 2021
 
-#![feature(async_fn_in_trait)]
-#![allow(incomplete_features)]
-
 trait MyTrait<'a, 'b, T> {
+    #[allow(async_fn_in_trait)]
     async fn foo(&'a self, key: &'b T) -> (&'a Self, &'b T);
 }
 

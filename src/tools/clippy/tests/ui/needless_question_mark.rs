@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![warn(clippy::needless_question_mark)]
 #![allow(
     clippy::needless_return,
@@ -136,4 +134,8 @@ async fn async_deref_ref(s: Option<&String>) -> Option<&str> {
 
 async fn async_result_bad(s: TR) -> Result<usize, bool> {
     Ok(s.magic?)
+}
+
+async fn async_wrapped<T>(a: Option<T>) -> Option<T> {
+    { Some(a?) }
 }

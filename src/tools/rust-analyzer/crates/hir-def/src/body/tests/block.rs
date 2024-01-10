@@ -38,9 +38,9 @@ fn outer() {
 "#,
         expect![[r#"
             block scope
-            CrateStruct: t
-            PlainStruct: t v
-            SelfStruct: t
+            CrateStruct: ti
+            PlainStruct: ti vi
+            SelfStruct: ti
             Struct: v
             SuperStruct: _
 
@@ -66,7 +66,7 @@ fn outer() {
 "#,
         expect![[r#"
             block scope
-            imported: t v
+            imported: ti vi
             name: v
 
             crate
@@ -92,9 +92,9 @@ fn outer() {
 "#,
         expect![[r#"
             block scope
-            inner1: t
+            inner1: ti
             inner2: v
-            outer: v
+            outer: vi
 
             block scope
             inner: v
@@ -121,7 +121,7 @@ struct Struct {}
 "#,
         expect![[r#"
             block scope
-            Struct: t
+            Struct: ti
 
             crate
             Struct: t
@@ -129,6 +129,47 @@ struct Struct {}
 
             crate::module
             f: v
+        "#]],
+    );
+}
+
+#[test]
+fn super_imports_2() {
+    check_at(
+        r#"
+fn outer() {
+    mod m {
+        struct ResolveMe {}
+        fn middle() {
+            mod m2 {
+                fn inner() {
+                    use super::ResolveMe;
+                    $0
+                }
+            }
+        }
+    }
+}
+"#,
+        expect![[r#"
+            block scope
+            ResolveMe: ti
+
+            block scope
+            m2: t
+
+            block scope::m2
+            inner: v
+
+            block scope
+            m: t
+
+            block scope::m
+            ResolveMe: t
+            middle: v
+
+            crate
+            outer: v
         "#]],
     );
 }
@@ -148,9 +189,45 @@ fn f() {
 }
     "#,
         expect![[r#"
-            BlockId(1) in ModuleId { krate: CrateId(0), block: Some(BlockId(0)), local_id: Idx::<ModuleData>(1) }
-            BlockId(0) in ModuleId { krate: CrateId(0), block: None, local_id: Idx::<ModuleData>(0) }
+            BlockId(1) in BlockRelativeModuleId { block: Some(BlockId(0)), local_id: Idx::<ModuleData>(1) }
+            BlockId(0) in BlockRelativeModuleId { block: None, local_id: Idx::<ModuleData>(0) }
             crate scope
+        "#]],
+    );
+}
+
+#[test]
+fn self_imports() {
+    check_at(
+        r#"
+fn f() {
+    mod m {
+        struct ResolveMe {}
+        fn g() {
+            fn h() {
+                use self::ResolveMe;
+                $0
+            }
+        }
+    }
+}
+"#,
+        expect![[r#"
+            block scope
+            ResolveMe: ti
+
+            block scope
+            h: v
+
+            block scope
+            m: t
+
+            block scope::m
+            ResolveMe: t
+            g: v
+
+            crate
+            f: v
         "#]],
     );
 }
@@ -215,7 +292,7 @@ pub mod cov_mark {
             nested: v
 
             crate
-            cov_mark: t
+            cov_mark: ti
             f: v
         "#]],
     );
@@ -392,6 +469,28 @@ fn foo() {
 
             crate
             foo: v
+        "#]],
+    )
+}
+
+#[test]
+fn trailing_expr_macro_expands_stmts() {
+    check_at(
+        r#"
+macro_rules! foo {
+    () => { const FOO: u32 = 0;const BAR: u32 = 0; };
+}
+fn f() {$0
+    foo!{}
+};
+        "#,
+        expect![[r#"
+            block scope
+            BAR: v
+            FOO: v
+
+            crate
+            f: v
         "#]],
     )
 }

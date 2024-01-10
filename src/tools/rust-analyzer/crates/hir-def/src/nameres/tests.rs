@@ -4,14 +4,12 @@ mod macros;
 mod mod_resolution;
 mod primitives;
 
-use std::sync::Arc;
-
-use base_db::{fixture::WithFixture, SourceDatabase};
+use base_db::SourceDatabase;
 use expect_test::{expect, Expect};
+use test_fixture::WithFixture;
+use triomphe::Arc;
 
-use crate::{db::DefDatabase, test_db::TestDB};
-
-use super::DefMap;
+use crate::{db::DefDatabase, nameres::DefMap, test_db::TestDB};
 
 fn compute_crate_def_map(ra_fixture: &str) -> Arc<DefMap> {
     let db = TestDB::with_files(ra_fixture);
@@ -169,7 +167,7 @@ pub struct Baz;
 "#,
         expect![[r#"
             crate
-            Foo: t v
+            Foo: ti vi
             foo: t
 
             crate::foo
@@ -195,8 +193,8 @@ pub enum Quux {};
 "#,
         expect![[r#"
             crate
-            Baz: t v
-            Quux: t
+            Baz: ti vi
+            Quux: ti
             foo: t
 
             crate::foo
@@ -226,11 +224,11 @@ pub struct Baz;
 "#,
         expect![[r#"
             crate
-            Baz: t v
+            Baz: ti vi
             foo: t
 
             crate::foo
-            Baz: t v
+            Baz: ti vi
             bar: t
 
             crate::foo::bar
@@ -275,7 +273,7 @@ use self::E::V;
         expect![[r#"
             crate
             E: t
-            V: t v
+            V: ti vi
         "#]],
     );
 }
@@ -308,7 +306,7 @@ pub struct FromLib;
 
             crate::foo
             Bar: _
-            FromLib: t v
+            FromLib: ti vi
         "#]],
     );
 }
@@ -329,7 +327,7 @@ pub struct Baz;
 "#,
         expect![[r#"
             crate
-            Baz: t
+            Baz: ti
             foo: t
 
             crate::foo
@@ -353,7 +351,7 @@ pub struct Baz;
 "#,
         expect![[r#"
             crate
-            Baz: t v
+            Baz: ti vi
         "#]],
     );
 }
@@ -376,13 +374,13 @@ pub struct Arc;
         expect![[r#"
             crate
             alloc: t
-            alloc_crate: t
+            alloc_crate: te
             sync: t
 
             crate::alloc
 
             crate::sync
-            Arc: t v
+            Arc: ti vi
         "#]],
     );
 }
@@ -405,13 +403,13 @@ pub struct Arc;
         expect![[r#"
             crate
             alloc: t
-            alloc_crate: t
+            alloc_crate: te
             sync: t
 
             crate::alloc
 
             crate::sync
-            Arc: t v
+            Arc: ti vi
         "#]],
     );
 }
@@ -427,7 +425,7 @@ extern crate self as bla;
 "#,
         expect![[r#"
             crate
-            bla: t
+            bla: te
         "#]],
     );
 }
@@ -448,7 +446,7 @@ pub struct Baz;
 "#,
         expect![[r#"
             crate
-            Baz: t v
+            Baz: ti vi
         "#]],
     );
 }
@@ -466,7 +464,7 @@ pub struct Bar;
 "#,
         expect![[r#"
             crate
-            Bar: t v
+            Bar: ti vi
             foo: v
         "#]],
     );
@@ -493,9 +491,9 @@ fn no_std_prelude() {
         }
     "#,
         expect![[r#"
-        crate
-        Rust: t v
-    "#]],
+            crate
+            Rust: ti vi
+        "#]],
     );
 }
 
@@ -517,9 +515,9 @@ fn edition_specific_preludes() {
         }
     "#,
         expect![[r#"
-        crate
-        Rust2018: t v
-    "#]],
+            crate
+            Rust2018: ti vi
+        "#]],
     );
     check(
         r#"
@@ -534,9 +532,9 @@ fn edition_specific_preludes() {
         }
     "#,
         expect![[r#"
-        crate
-        Rust2021: t v
-    "#]],
+            crate
+            Rust2021: ti vi
+        "#]],
     );
 }
 
@@ -564,8 +562,8 @@ pub mod prelude {
 "#,
         expect![[r#"
             crate
-            Bar: t v
-            Foo: t v
+            Bar: ti vi
+            Foo: ti vi
         "#]],
     );
 }
@@ -591,7 +589,7 @@ pub mod prelude {
 "#,
         expect![[r#"
             crate
-            Bar: t v
+            Bar: ti vi
             Baz: _
             Foo: _
         "#]],
@@ -620,8 +618,8 @@ pub mod prelude {
         expect![[r#"
             crate
             Bar: _
-            Baz: t v
-            Foo: t v
+            Baz: ti vi
+            Foo: ti vi
         "#]],
     );
 }
@@ -644,7 +642,7 @@ mod b {
 "#,
         expect![[r#"
             crate
-            T: t v
+            T: ti vi
             a: t
             b: t
 
@@ -817,8 +815,8 @@ fn bar() {}
         expect![[r#"
             crate
             bar: v
-            baz: v
-            foo: t
+            baz: vi
+            foo: ti
         "#]],
     );
 }
@@ -837,7 +835,7 @@ use self::m::S::{self};
     "#,
         expect![[r#"
             crate
-            S: t
+            S: ti
             m: t
 
             crate::m
@@ -861,8 +859,8 @@ pub const settings: () = ();
         "#,
         expect![[r#"
             crate
-            Settings: t v
-            settings: v
+            Settings: ti vi
+            settings: vi
         "#]],
     )
 }
@@ -891,8 +889,8 @@ pub struct Struct;
         "#,
         expect![[r#"
             crate
-            Struct: t v
-            dep: t
+            Struct: ti vi
+            dep: te
         "#]],
     );
 }
@@ -918,13 +916,13 @@ use some_module::unknown_func;
             crate
             other_module: t
             some_module: t
-            unknown_func: v
+            unknown_func: vi
 
             crate::other_module
             some_submodule: t
 
             crate::other_module::some_submodule
-            unknown_func: v
+            unknown_func: vi
 
             crate::some_module
             unknown_func: v

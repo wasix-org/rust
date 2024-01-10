@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::cmp;
-use crate::io::{self, IoSlice, IoSliceMut};
+use crate::io::{self, BorrowedBuf, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::mem;
 use crate::net::{Shutdown, SocketAddr};
 use crate::os::hermit::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, RawFd};
@@ -33,13 +33,7 @@ pub fn cvt_gai(err: i32) -> io::Result<()> {
     ))
 }
 
-/// Checks whether the HermitCore's socket interface has been started already, and
-/// if not, starts it.
-pub fn init() {
-    if unsafe { netc::network_init() } < 0 {
-        panic!("Unable to initialize network interface");
-    }
-}
+pub fn init() {}
 
 #[derive(Debug)]
 pub struct Socket(FileDesc);
@@ -60,6 +54,12 @@ impl Socket {
 
     pub fn new_pair(_fam: i32, _ty: i32) -> io::Result<(Socket, Socket)> {
         unimplemented!()
+    }
+
+    pub fn connect(&self, addr: &SocketAddr) -> io::Result<()> {
+        let (addr, len) = addr.into_inner();
+        cvt_r(|| unsafe { netc::connect(self.as_raw_fd(), addr.as_ptr(), len) })?;
+        Ok(())
     }
 
     pub fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<()> {
@@ -108,7 +108,7 @@ impl Socket {
             match unsafe { netc::poll(&mut pollfd, 1, timeout) } {
                 -1 => {
                     let err = io::Error::last_os_error();
-                    if err.kind() != io::ErrorKind::Interrupted {
+                    if !err.is_interrupted() {
                         return Err(err);
                     }
                 }
@@ -146,18 +146,35 @@ impl Socket {
         Ok(Socket(unsafe { FileDesc::from_raw_fd(fd) }))
     }
 
-    fn recv_with_flags(&self, buf: &mut [u8], flags: i32) -> io::Result<usize> {
-        let ret =
-            cvt(unsafe { netc::recv(self.0.as_raw_fd(), buf.as_mut_ptr(), buf.len(), flags) })?;
-        Ok(ret as usize)
+    fn recv_with_flags(&self, mut buf: BorrowedCursor<'_>, flags: i32) -> io::Result<()> {
+        let ret = cvt(unsafe {
+            netc::recv(
+                self.0.as_raw_fd(),
+                buf.as_mut().as_mut_ptr() as *mut u8,
+                buf.capacity(),
+                flags,
+            )
+        })?;
+        unsafe {
+            buf.advance(ret as usize);
+        }
+        Ok(())
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.recv_with_flags(buf, 0)
+        let mut buf = BorrowedBuf::from(buf);
+        self.recv_with_flags(buf.unfilled(), 0)?;
+        Ok(buf.len())
     }
 
     pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.recv_with_flags(buf, netc::MSG_PEEK)
+        let mut buf = BorrowedBuf::from(buf);
+        self.recv_with_flags(buf.unfilled(), netc::MSG_PEEK)?;
+        Ok(buf.len())
+    }
+
+    pub fn read_buf(&self, buf: BorrowedCursor<'_>) -> io::Result<()> {
+        self.recv_with_flags(buf, 0)
     }
 
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
@@ -323,6 +340,7 @@ impl Socket {
 }
 
 impl AsInner<FileDesc> for Socket {
+    #[inline]
     fn as_inner(&self) -> &FileDesc {
         &self.0
     }
@@ -347,6 +365,7 @@ impl AsFd for Socket {
 }
 
 impl AsRawFd for Socket {
+    #[inline]
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }

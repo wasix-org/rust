@@ -4,7 +4,7 @@ use rustc_errors::Applicability;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -20,7 +20,7 @@ declare_clippy_lint! {
     /// benefit as opposed to tuple initializers
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// struct TupleStruct(u8, u16);
     ///
     /// let _ = TupleStruct {
@@ -71,7 +71,7 @@ impl<'tcx> LateLintPass<'tcx> for NumberedFields {
                     INIT_NUMBERED_FIELDS,
                     e.span,
                     "used a field initializer for a tuple struct",
-                    "try this instead",
+                    "try",
                     snippet,
                     appl,
                 );

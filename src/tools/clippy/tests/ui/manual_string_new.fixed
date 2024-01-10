@@ -1,6 +1,5 @@
-// run-rustfix
-
 #![warn(clippy::manual_string_new)]
+#![allow(clippy::unnecessary_fallible_conversions)]
 
 macro_rules! create_strings_from_macro {
     // When inside a macro, nothing should warn to prevent false positives.

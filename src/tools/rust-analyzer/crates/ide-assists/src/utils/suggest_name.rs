@@ -1,5 +1,7 @@
 //! This module contains functions to suggest names for expressions, functions and other items
 
+use std::collections::HashSet;
+
 use hir::Semantics;
 use ide_db::RootDatabase;
 use itertools::Itertools;
@@ -58,12 +60,59 @@ const USELESS_METHODS: &[&str] = &[
     "into_future",
 ];
 
-pub(crate) fn for_generic_parameter(ty: &ast::ImplTraitType) -> SmolStr {
+/// Suggest a unique name for generic parameter.
+///
+/// `existing_params` is used to check if the name conflicts with existing
+/// generic parameters.
+///
+/// The function checks if the name conflicts with existing generic parameters.
+/// If so, it will try to resolve the conflict by adding a number suffix, e.g.
+/// `T`, `T0`, `T1`, ...
+pub(crate) fn for_unique_generic_name(
+    name: &str,
+    existing_params: &ast::GenericParamList,
+) -> SmolStr {
+    let param_names = existing_params
+        .generic_params()
+        .map(|param| match param {
+            ast::GenericParam::TypeParam(t) => t.name().unwrap().to_string(),
+            p => p.to_string(),
+        })
+        .collect::<HashSet<_>>();
+    let mut name = name.to_string();
+    let base_len = name.len();
+    let mut count = 0;
+    while param_names.contains(&name) {
+        name.truncate(base_len);
+        name.push_str(&count.to_string());
+        count += 1;
+    }
+
+    name.into()
+}
+
+/// Suggest name of impl trait type
+///
+/// `existing_params` is used to check if the name conflicts with existing
+/// generic parameters.
+///
+/// # Current implementation
+///
+/// In current implementation, the function tries to get the name from the first
+/// character of the name for the first type bound.
+///
+/// If the name conflicts with existing generic parameters, it will try to
+/// resolve the conflict with `for_unique_generic_name`.
+pub(crate) fn for_impl_trait_as_generic(
+    ty: &ast::ImplTraitType,
+    existing_params: &ast::GenericParamList,
+) -> SmolStr {
     let c = ty
         .type_bound_list()
         .and_then(|bounds| bounds.syntax().text().char_at(0.into()))
         .unwrap_or('T');
-    c.encode_utf8(&mut [0; 4]).into()
+
+    for_unique_generic_name(c.encode_utf8(&mut [0; 4]), existing_params)
 }
 
 /// Suggest name of variable for given expression
@@ -103,7 +152,6 @@ pub(crate) fn for_variable(expr: &ast::Expr, sema: &Semantics<'_, RootDatabase>)
 
         match expr {
             ast::Expr::RefExpr(inner) => next_expr = inner.expr(),
-            ast::Expr::BoxExpr(inner) => next_expr = inner.expr(),
             ast::Expr::AwaitExpr(inner) => next_expr = inner.expr(),
             // ast::Expr::BlockExpr(block) => expr = block.tail_expr(),
             ast::Expr::CastExpr(inner) => next_expr = inner.expr(),
@@ -234,7 +282,7 @@ fn from_type(expr: &ast::Expr, sema: &Semantics<'_, RootDatabase>) -> Option<Str
 
 fn name_of_type(ty: &hir::Type, db: &RootDatabase) -> Option<String> {
     let name = if let Some(adt) = ty.as_adt() {
-        let name = adt.name(db).to_string();
+        let name = adt.name(db).display(db).to_string();
 
         if WRAPPER_TYPES.contains(&name.as_str()) {
             let inner_ty = ty.type_arguments().next()?;
@@ -258,7 +306,7 @@ fn name_of_type(ty: &hir::Type, db: &RootDatabase) -> Option<String> {
 }
 
 fn trait_name(trait_: &hir::Trait, db: &RootDatabase) -> Option<String> {
-    let name = trait_.name(db).to_string();
+    let name = trait_.name(db).display(db).to_string();
     if USELESS_TRAITS.contains(&name.as_str()) {
         return None;
     }
@@ -276,7 +324,8 @@ fn from_field_name(expr: &ast::Expr) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use ide_db::base_db::{fixture::WithFixture, FileRange};
+    use ide_db::base_db::FileRange;
+    use test_fixture::WithFixture;
 
     use super::*;
 

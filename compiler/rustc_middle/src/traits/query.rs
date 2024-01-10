@@ -8,17 +8,16 @@
 use crate::error::DropCheckOverflow;
 use crate::infer::canonical::{Canonical, QueryResponse};
 use crate::ty::error::TypeError;
-use crate::ty::subst::GenericArg;
+use crate::ty::GenericArg;
 use crate::ty::{self, Ty, TyCtxt};
-use rustc_span::source_map::Span;
+use rustc_span::Span;
 
 pub mod type_op {
     use crate::ty::fold::TypeFoldable;
     use crate::ty::{Predicate, Ty, TyCtxt, UserType};
     use std::fmt;
 
-    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, Lift)]
-    #[derive(TypeFoldable, TypeVisitable)]
+    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, TypeFoldable, TypeVisitable)]
     pub struct AscribeUserType<'tcx> {
         pub mir_ty: Ty<'tcx>,
         pub user_ty: UserType<'tcx>,
@@ -30,22 +29,19 @@ pub mod type_op {
         }
     }
 
-    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, Lift)]
-    #[derive(TypeFoldable, TypeVisitable)]
+    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, TypeFoldable, TypeVisitable)]
     pub struct Eq<'tcx> {
         pub a: Ty<'tcx>,
         pub b: Ty<'tcx>,
     }
 
-    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, Lift)]
-    #[derive(TypeFoldable, TypeVisitable)]
+    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, TypeFoldable, TypeVisitable)]
     pub struct Subtype<'tcx> {
         pub sub: Ty<'tcx>,
         pub sup: Ty<'tcx>,
     }
 
-    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, Lift)]
-    #[derive(TypeFoldable, TypeVisitable)]
+    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, TypeFoldable, TypeVisitable)]
     pub struct ProvePredicate<'tcx> {
         pub predicate: Predicate<'tcx>,
     }
@@ -56,8 +52,7 @@ pub mod type_op {
         }
     }
 
-    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, Lift)]
-    #[derive(TypeFoldable, TypeVisitable)]
+    #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, HashStable, TypeFoldable, TypeVisitable)]
     pub struct Normalize<T> {
         pub value: T,
     }
@@ -92,10 +87,8 @@ pub type CanonicalTypeOpProvePredicateGoal<'tcx> =
 pub type CanonicalTypeOpNormalizeGoal<'tcx, T> =
     Canonical<'tcx, ty::ParamEnvAnd<'tcx, type_op::Normalize<T>>>;
 
-#[derive(Copy, Clone, Debug, HashStable, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Hash, HashStable, PartialEq, Eq)]
 pub struct NoSolution;
-
-pub type Fallible<T> = Result<T, NoSolution>;
 
 impl<'tcx> From<TypeError<'tcx>> for NoSolution {
     fn from(_: TypeError<'tcx>) -> NoSolution {
@@ -103,7 +96,7 @@ impl<'tcx> From<TypeError<'tcx>> for NoSolution {
     }
 }
 
-#[derive(Clone, Debug, Default, HashStable, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Clone, Debug, Default, HashStable, TypeFoldable, TypeVisitable)]
 pub struct DropckOutlivesResult<'tcx> {
     pub kinds: Vec<GenericArg<'tcx>>,
     pub overflows: Vec<Ty<'tcx>>,
@@ -112,19 +105,8 @@ pub struct DropckOutlivesResult<'tcx> {
 impl<'tcx> DropckOutlivesResult<'tcx> {
     pub fn report_overflows(&self, tcx: TyCtxt<'tcx>, span: Span, ty: Ty<'tcx>) {
         if let Some(overflow_ty) = self.overflows.get(0) {
-            tcx.sess.emit_err(DropCheckOverflow { span, ty, overflow_ty: *overflow_ty });
+            tcx.dcx().emit_err(DropCheckOverflow { span, ty, overflow_ty: *overflow_ty });
         }
-    }
-
-    pub fn into_kinds_reporting_overflows(
-        self,
-        tcx: TyCtxt<'tcx>,
-        span: Span,
-        ty: Ty<'tcx>,
-    ) -> Vec<GenericArg<'tcx>> {
-        self.report_overflows(tcx, span, ty);
-        let DropckOutlivesResult { kinds, overflows: _ } = self;
-        kinds
     }
 }
 
@@ -134,7 +116,7 @@ impl<'tcx> DropckOutlivesResult<'tcx> {
 pub struct DropckConstraint<'tcx> {
     /// Types that are required to be alive in order for this
     /// type to be valid for destruction.
-    pub outlives: Vec<ty::subst::GenericArg<'tcx>>,
+    pub outlives: Vec<ty::GenericArg<'tcx>>,
 
     /// Types that could not be resolved: projections and params.
     pub dtorck_types: Vec<Ty<'tcx>>,
@@ -196,7 +178,7 @@ pub struct MethodAutoderefBadTy<'tcx> {
 }
 
 /// Result from the `normalize_projection_ty` query.
-#[derive(Clone, Debug, HashStable, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Clone, Debug, HashStable, TypeFoldable, TypeVisitable)]
 pub struct NormalizationResult<'tcx> {
     /// Result of normalization.
     pub normalized_ty: Ty<'tcx>,
@@ -209,7 +191,7 @@ pub struct NormalizationResult<'tcx> {
 /// case they are called implied bounds). They are fed to the
 /// `OutlivesEnv` which in turn is supplied to the region checker and
 /// other parts of the inference system.
-#[derive(Clone, Debug, TypeFoldable, TypeVisitable, Lift, HashStable)]
+#[derive(Clone, Debug, TypeFoldable, TypeVisitable, HashStable)]
 pub enum OutlivesBound<'tcx> {
     RegionSubRegion(ty::Region<'tcx>, ty::Region<'tcx>),
     RegionSubParam(ty::Region<'tcx>, ty::ParamTy),

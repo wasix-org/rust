@@ -4,6 +4,7 @@
 mod tt_conversion;
 mod matching;
 mod meta_syntax;
+mod metavar_expr;
 mod regression;
 
 use expect_test::expect;
@@ -14,7 +15,6 @@ use crate::macro_expansion_tests::check;
 fn token_mapping_smoke_test() {
     check(
         r#"
-// +tokenids
 macro_rules! f {
     ( struct $ident:ident ) => {
         struct $ident {
@@ -23,26 +23,22 @@ macro_rules! f {
     };
 }
 
-// +tokenids
+// +spans+syntaxctxt
 f!(struct MyTraitMap2);
 "#,
-        expect![[r##"
-// call ids will be shifted by Shift(30)
-// +tokenids
-macro_rules! f {#0
-    (#1 struct#2 $#3ident#4:#5ident#6 )#1 =#7>#8 {#9
-        struct#10 $#11ident#12 {#13
-            map#14:#15 :#16:#17std#18:#19:#20collections#21:#22:#23HashSet#24<#25(#26)#26>#27,#28
-        }#13
-    }#9;#29
-}#0
+        expect![[r#"
+macro_rules! f {
+    ( struct $ident:ident ) => {
+        struct $ident {
+            map: ::std::collections::HashSet<()>,
+        }
+    };
+}
 
-// // +tokenids
-// f!(struct#1 MyTraitMap2#2);
-struct#10 MyTraitMap2#32 {#13
-    map#14:#15 ::std#18::collections#21::HashSet#24<#25(#26)#26>#27,#28
-}#13
-"##]],
+struct#FileId(0):1@58..64\2# MyTraitMap2#FileId(0):2@31..42\0# {#FileId(0):1@72..73\2#
+    map#FileId(0):1@86..89\2#:#FileId(0):1@89..90\2# #FileId(0):1@89..90\2#::#FileId(0):1@91..92\2#std#FileId(0):1@93..96\2#::#FileId(0):1@96..97\2#collections#FileId(0):1@98..109\2#::#FileId(0):1@109..110\2#HashSet#FileId(0):1@111..118\2#<#FileId(0):1@118..119\2#(#FileId(0):1@119..120\2#)#FileId(0):1@120..121\2#>#FileId(0):1@121..122\2#,#FileId(0):1@122..123\2#
+}#FileId(0):1@132..133\2#
+"#]],
     );
 }
 
@@ -52,53 +48,162 @@ fn token_mapping_floats() {
     // (and related issues)
     check(
         r#"
-// +tokenids
+// +spans+syntaxctxt
 macro_rules! f {
     ($($tt:tt)*) => {
         $($tt)*
     };
 }
 
-// +tokenids
+// +spans+syntaxctxt
 f! {
     fn main() {
         1;
         1.0;
+        ((1,),).0.0;
         let x = 1;
     }
 }
 
 
 "#,
+        expect![[r#"
+// +spans+syntaxctxt
+macro_rules! f {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
+fn#FileId(0):2@30..32\0# main#FileId(0):2@33..37\0#(#FileId(0):2@37..38\0#)#FileId(0):2@38..39\0# {#FileId(0):2@40..41\0#
+    1#FileId(0):2@50..51\0#;#FileId(0):2@51..52\0#
+    1.0#FileId(0):2@61..64\0#;#FileId(0):2@64..65\0#
+    (#FileId(0):2@74..75\0#(#FileId(0):2@75..76\0#1#FileId(0):2@76..77\0#,#FileId(0):2@77..78\0# )#FileId(0):2@78..79\0#,#FileId(0):2@79..80\0# )#FileId(0):2@80..81\0#.#FileId(0):2@81..82\0#0#FileId(0):2@82..85\0#.#FileId(0):2@82..85\0#0#FileId(0):2@82..85\0#;#FileId(0):2@85..86\0#
+    let#FileId(0):2@95..98\0# x#FileId(0):2@99..100\0# =#FileId(0):2@101..102\0# 1#FileId(0):2@103..104\0#;#FileId(0):2@104..105\0#
+}#FileId(0):2@110..111\0#
+
+
+"#]],
+    );
+}
+
+#[test]
+fn eager_expands_with_unresolved_within() {
+    check(
+        r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! concat {}
+macro_rules! identity {
+    ($tt:tt) => {
+        $tt
+    }
+}
+
+fn main(foo: ()) {
+    concat!("hello", identity!("world"), unresolved!(), identity!("!"));
+}
+"#,
         expect![[r##"
-// call ids will be shifted by Shift(18)
-// +tokenids
-macro_rules! f {#0
-    (#1$#2(#3$#4tt#5:#6tt#7)#3*#8)#1 =#9>#10 {#11
-        $#12(#13$#14tt#15)#13*#16
-    }#11;#17
-}#0
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! concat {}
+macro_rules! identity {
+    ($tt:tt) => {
+        $tt
+    }
+}
 
-// // +tokenids
-// f! {
-//     fn#1 main#2() {
-//         1#5;#6
-//         1.0#7;#8
-//         let#9 x#10 =#11 1#12;#13
-//     }
-// }
-fn#19 main#20(#21)#21 {#22
-    1#23;#24
-    1.0#25;#26
-    let#27 x#28 =#29 1#30;#31
-}#22
+fn main(foo: ()) {
+    /* error: unresolved macro unresolved */"helloworld!";
+}
+"##]],
+    );
+}
 
+#[test]
+fn concat_spans() {
+    check(
+        r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! concat {}
+macro_rules! identity {
+    ($tt:tt) => {
+        $tt
+    }
+}
+
+fn main(foo: ()) {
+    #[rustc_builtin_macro]
+    #[macro_export]
+    macro_rules! concat {}
+    macro_rules! identity {
+        ($tt:tt) => {
+            $tt
+        }
+    }
+
+    fn main(foo: ()) {
+        concat/*+spans+syntaxctxt*/!("hello", concat!("w", identity!("o")), identity!("rld"), unresolved!(), identity!("!"));
+    }
+}
+
+"#,
+        expect![[r##"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! concat {}
+macro_rules! identity {
+    ($tt:tt) => {
+        $tt
+    }
+}
+
+fn main(foo: ()) {
+    #[rustc_builtin_macro]
+    #[macro_export]
+    macro_rules! concat {}
+    macro_rules! identity {
+        ($tt:tt) => {
+            $tt
+        }
+    }
+
+    fn main(foo: ()) {
+        /* error: unresolved macro unresolved */"helloworld!"#FileId(0):3@207..323\6#;
+    }
+}
 
 "##]],
     );
 }
+
 #[test]
-fn float_field_acces_macro_input() {
+fn token_mapping_across_files() {
+    check(
+        r#"
+//- /lib.rs
+#[macro_use]
+mod foo;
+
+mk_struct/*+spans+syntaxctxt*/!(Foo with u32);
+//- /foo.rs
+macro_rules! mk_struct {
+    ($foo:ident with $ty:ty) => { struct $foo($ty); }
+}
+"#,
+        expect![[r#"
+#[macro_use]
+mod foo;
+
+struct#FileId(1):1@59..65\2# Foo#FileId(0):2@32..35\0#(#FileId(1):1@70..71\2#u32#FileId(0):2@41..44\0#)#FileId(1):1@74..75\2#;#FileId(1):1@75..76\2#
+"#]],
+    );
+}
+
+#[test]
+fn float_field_access_macro_input() {
     check(
         r#"
 macro_rules! foo {
@@ -812,6 +917,37 @@ fn foo() {
 }
 
 #[test]
+fn test_type_path_is_transcribed_as_expr_path() {
+    check(
+        r#"
+macro_rules! m {
+    ($p:path) => { let $p; }
+}
+fn test() {
+    m!(S)
+    m!(S<i32>)
+    m!(S<S<i32>>)
+    m!(S<{ module::CONST < 42 }>)
+}
+"#,
+        expect![[r#"
+macro_rules! m {
+    ($p:path) => { let $p; }
+}
+fn test() {
+    let S;
+    let S:: <i32> ;
+    let S:: <S:: <i32>> ;
+    let S:: < {
+        module::CONST<42
+    }
+    > ;
+}
+"#]],
+    );
+}
+
+#[test]
 fn test_expr() {
     check(
         r#"
@@ -922,7 +1058,7 @@ macro_rules! m {
 
 fn bar() -> &'a Baz<u8> {}
 
-fn bar() -> extern "Rust"fn() -> Ret {}
+fn bar() -> extern "Rust" fn() -> Ret {}
 "#]],
     );
 }
@@ -1082,8 +1218,10 @@ m! {
 macro_rules! m {
     ($(#[$m:meta])+) => ( $(#[$m])+ fn bar() {} )
 }
-#[doc = " Single Line Doc 1"]
-#[doc = "\n        MultiLines Doc\n    "] fn bar() {}
+#[doc = r" Single Line Doc 1"]
+#[doc = r"
+        MultiLines Doc
+    "] fn bar() {}
 "##]],
     );
 }
@@ -1124,8 +1262,10 @@ m! {
 macro_rules! m {
     ($(#[$ m:meta])+) => ( $(#[$m])+ fn bar() {} )
 }
-#[doc = " 錦瑟無端五十弦，一弦一柱思華年。"]
-#[doc = "\n        莊生曉夢迷蝴蝶，望帝春心託杜鵑。\n    "] fn bar() {}
+#[doc = r" 錦瑟無端五十弦，一弦一柱思華年。"]
+#[doc = r"
+        莊生曉夢迷蝴蝶，望帝春心託杜鵑。
+    "] fn bar() {}
 "##]],
     );
 }
@@ -1145,7 +1285,7 @@ m! {
 macro_rules! m {
     ($(#[$m:meta])+) => ( $(#[$m])+ fn bar() {} )
 }
-#[doc = " \\ \" \'"] fn bar() {}
+#[doc = r#" \ " '"#] fn bar() {}
 "##]],
     );
 }
@@ -1293,15 +1433,49 @@ ok!();
 }
 
 #[test]
-fn test_vertical_bar_with_pat() {
+fn test_vertical_bar_with_pat_param() {
     check(
         r#"
-macro_rules! m { (|$pat:pat| ) => { ok!(); } }
+macro_rules! m { (|$pat:pat_param| ) => { ok!(); } }
 m! { |x| }
  "#,
         expect![[r#"
-macro_rules! m { (|$pat:pat| ) => { ok!(); } }
+macro_rules! m { (|$pat:pat_param| ) => { ok!(); } }
 ok!();
+ "#]],
+    );
+}
+
+#[test]
+fn test_new_std_matches() {
+    check(
+        r#"
+macro_rules! matches {
+    ($expression:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
+        match $expression {
+            $pattern $(if $guard)? => true,
+            _ => false
+        }
+    };
+}
+fn main() {
+    matches!(0, 0 | 1 if true);
+}
+ "#,
+        expect![[r#"
+macro_rules! matches {
+    ($expression:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
+        match $expression {
+            $pattern $(if $guard)? => true,
+            _ => false
+        }
+    };
+}
+fn main() {
+    match 0 {
+        0|1 if true =>true , _=>false
+    };
+}
  "#]],
     );
 }
@@ -1578,92 +1752,6 @@ macro_rules! error {
 struct Foo;
 "##]],
     )
-}
-
-#[test]
-fn test_dollar_dollar() {
-    check(
-        r#"
-macro_rules! register_struct { ($Struct:ident) => {
-    macro_rules! register_methods { ($$($method:ident),*) => {
-        macro_rules! implement_methods { ($$$$($$val:expr),*) => {
-            struct $Struct;
-            impl $Struct { $$(fn $method() -> &'static [u32] { &[$$$$($$$$val),*] })*}
-        }}
-    }}
-}}
-
-register_struct!(Foo);
-register_methods!(alpha, beta);
-implement_methods!(1, 2, 3);
-"#,
-        expect![[r#"
-macro_rules! register_struct { ($Struct:ident) => {
-    macro_rules! register_methods { ($$($method:ident),*) => {
-        macro_rules! implement_methods { ($$$$($$val:expr),*) => {
-            struct $Struct;
-            impl $Struct { $$(fn $method() -> &'static [u32] { &[$$$$($$$$val),*] })*}
-        }}
-    }}
-}}
-
-macro_rules !register_methods {
-    ($($method: ident), *) = > {
-        macro_rules!implement_methods {
-            ($$($val: expr), *) = > {
-                struct Foo;
-                impl Foo {
-                    $(fn $method()-> &'static[u32] {
-                        &[$$($$val), *]
-                    }
-                    )*
-                }
-            }
-        }
-    }
-}
-macro_rules !implement_methods {
-    ($($val: expr), *) = > {
-        struct Foo;
-        impl Foo {
-            fn alpha()-> &'static[u32] {
-                &[$($val), *]
-            }
-            fn beta()-> &'static[u32] {
-                &[$($val), *]
-            }
-        }
-    }
-}
-struct Foo;
-impl Foo {
-    fn alpha() -> &'static[u32] {
-        &[1, 2, 3]
-    }
-    fn beta() -> &'static[u32] {
-        &[1, 2, 3]
-    }
-}
-"#]],
-    )
-}
-
-#[test]
-fn test_metavar_exprs() {
-    check(
-        r#"
-macro_rules! m {
-    ( $( $t:tt )* ) => ( $( ${ignore(t)} -${index()} )-* );
-}
-const _: i32 = m!(a b c);
-    "#,
-        expect![[r#"
-macro_rules! m {
-    ( $( $t:tt )* ) => ( $( ${ignore(t)} -${index()} )-* );
-}
-const _: i32 = -0--1--2;
-    "#]],
-    );
 }
 
 #[test]

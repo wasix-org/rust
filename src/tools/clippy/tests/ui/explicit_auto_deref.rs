@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![feature(closure_lifetime_binder)]
 #![warn(clippy::explicit_auto_deref)]
 #![allow(
@@ -294,5 +292,56 @@ fn main() {
     }
     fn return_dyn_assoc<'a>(x: &'a &'a u32) -> &'a <&'a u32 as WithAssoc>::Assoc {
         *x
+    }
+
+    // Issue #11366
+    let _: &mut u32 = match &mut Some(&mut 0u32) {
+        Some(x) => &mut *x,
+        None => panic!(),
+    };
+
+    // Issue #11474
+    #[derive(Clone, Copy)]
+    struct Wrap<T>(T);
+    impl<T> core::ops::Deref for Wrap<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+    impl<T> core::ops::DerefMut for Wrap<T> {
+        fn deref_mut(&mut self) -> &mut T {
+            &mut self.0
+        }
+    }
+
+    union U<T: Copy> {
+        u: T,
+    }
+
+    #[derive(Clone, Copy)]
+    struct S8 {
+        x: &'static str,
+    }
+
+    unsafe {
+        let mut x = U {
+            u: core::mem::ManuallyDrop::new(S8 { x: "" }),
+        };
+        let _ = &mut (*x.u).x;
+        let _ = &mut (*{ x.u }).x;
+        let _ = &mut ({ *x.u }).x;
+
+        let mut x = U {
+            u: Wrap(core::mem::ManuallyDrop::new(S8 { x: "" })),
+        };
+        let _ = &mut (**x.u).x;
+        let _ = &mut (**{ x.u }).x;
+        let _ = &mut ({ **x.u }).x;
+
+        let mut x = U { u: Wrap(S8 { x: "" }) };
+        let _ = &mut (*x.u).x;
+        let _ = &mut (*{ x.u }).x;
+        let _ = &mut ({ *x.u }).x;
     }
 }

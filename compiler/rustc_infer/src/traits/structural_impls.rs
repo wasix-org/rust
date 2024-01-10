@@ -17,7 +17,7 @@ impl<'tcx, T: fmt::Debug> fmt::Debug for Normalized<'tcx, T> {
 
 impl<'tcx, O: fmt::Debug> fmt::Debug for traits::Obligation<'tcx, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if ty::tls::with(|tcx| tcx.sess.verbose()) {
+        if ty::tls::with(|tcx| tcx.sess.verbose_internals()) {
             write!(
                 f,
                 "Obligation(predicate={:?}, cause={:?}, param_env={:?}, depth={})",
@@ -38,16 +38,17 @@ impl<'tcx> fmt::Debug for traits::FulfillmentError<'tcx> {
 impl<'tcx> fmt::Debug for traits::FulfillmentErrorCode<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            super::CodeSelectionError(ref e) => write!(f, "{:?}", e),
-            super::CodeProjectionError(ref e) => write!(f, "{:?}", e),
+            super::CodeSelectionError(ref e) => write!(f, "{e:?}"),
+            super::CodeProjectionError(ref e) => write!(f, "{e:?}"),
             super::CodeSubtypeError(ref a, ref b) => {
-                write!(f, "CodeSubtypeError({:?}, {:?})", a, b)
+                write!(f, "CodeSubtypeError({a:?}, {b:?})")
             }
             super::CodeConstEquateError(ref a, ref b) => {
-                write!(f, "CodeConstEquateError({:?}, {:?})", a, b)
+                write!(f, "CodeConstEquateError({a:?}, {b:?})")
             }
-            super::CodeAmbiguity => write!(f, "Ambiguity"),
-            super::CodeCycle(ref cycle) => write!(f, "Cycle({:?})", cycle),
+            super::CodeAmbiguity { overflow: false } => write!(f, "Ambiguity"),
+            super::CodeAmbiguity { overflow: true } => write!(f, "Overflow"),
+            super::CodeCycle(ref cycle) => write!(f, "Cycle({cycle:?})"),
         }
     }
 }

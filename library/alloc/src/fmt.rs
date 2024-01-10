@@ -177,8 +177,8 @@
 //! These are all flags altering the behavior of the formatter.
 //!
 //! * `+` - This is intended for numeric types and indicates that the sign
-//!         should always be printed. Positive signs are never printed by
-//!         default, and the negative sign is only printed by default for signed values.
+//!         should always be printed. By default only the negative sign of signed values
+//!         is printed, and the sign of positive or unsigned values is omitted.
 //!         This flag indicates that the correct sign (`+` or `-`) should always be printed.
 //! * `-` - Currently not used
 //! * `#` - This flag indicates that the "alternate" form of printing should
@@ -363,7 +363,7 @@
 //! # use std::fmt;
 //! # struct Foo; // our custom type
 //! # impl fmt::Display for Foo {
-//! fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//! fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 //! # write!(f, "testing, testing")
 //! # } }
 //! ```
@@ -399,7 +399,7 @@
 //! }
 //!
 //! impl fmt::Display for Vector2D {
-//!     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//!     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 //!         // The `f` value implements the `Write` trait, which is what the
 //!         // write! macro is expecting. Note that this formatting ignores the
 //!         // various flags provided to format strings.
@@ -410,7 +410,7 @@
 //! // Different traits allow different forms of output of a type. The meaning
 //! // of this format is to print the magnitude of a vector.
 //! impl fmt::Binary for Vector2D {
-//!     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//!     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 //!         let magnitude = (self.x * self.x + self.y * self.y) as f64;
 //!         let magnitude = magnitude.sqrt();
 //!
@@ -517,7 +517,7 @@
 //! let mut some_writer = io::stdout();
 //! write!(&mut some_writer, "{}", format_args!("print with a {}", "macro"));
 //!
-//! fn my_fmt_fn(args: fmt::Arguments) {
+//! fn my_fmt_fn(args: fmt::Arguments<'_>) {
 //!     write!(&mut io::stdout(), "{args}");
 //! }
 //! my_fmt_fn(format_args!(", or a {} too", "function"));
@@ -551,12 +551,12 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-#[unstable(feature = "fmt_internals", issue = "none")]
-pub use core::fmt::rt;
 #[stable(feature = "fmt_flags_align", since = "1.28.0")]
 pub use core::fmt::Alignment;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::Error;
+#[unstable(feature = "debug_closure_helpers", issue = "117729")]
+pub use core::fmt::FormatterFn;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{write, Arguments};
 #[stable(feature = "rust1", since = "1.0.0")]

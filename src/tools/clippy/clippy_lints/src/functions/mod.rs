@@ -9,7 +9,7 @@ mod too_many_lines;
 use rustc_hir as hir;
 use rustc_hir::intravisit;
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_session::impl_lint_pass;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::Span;
 
@@ -23,7 +23,7 @@ declare_clippy_lint! {
     /// grouping some parameters into a new type.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # struct Color;
     /// fn foo(x: u32, y: u32, name: &str, c: Color, w: f32, h: f32, a: f32, b: f32) {
     ///     // ..
@@ -46,7 +46,7 @@ declare_clippy_lint! {
     /// multiple functions.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn im_too_long() {
     ///     println!("");
     ///     // ... 100 more LoC
@@ -129,7 +129,7 @@ declare_clippy_lint! {
     /// a remnant of a refactoring that removed the return type.
     ///
     /// ### Examples
-    /// ```rust
+    /// ```no_run
     /// #[must_use]
     /// fn useless() { }
     /// ```
@@ -151,7 +151,7 @@ declare_clippy_lint! {
     /// attribute to improve the lint message.
     ///
     /// ### Examples
-    /// ```rust
+    /// ```no_run
     /// #[must_use]
     /// fn double_must_use() -> Result<(), ()> {
     ///     unimplemented!();
@@ -183,9 +183,9 @@ declare_clippy_lint! {
     /// `#[must_use]`.
     ///
     /// ### Examples
-    /// ```rust
+    /// ```no_run
     /// // this could be annotated with `#[must_use]`.
-    /// fn id<T>(t: T) -> T { t }
+    /// pub fn id<T>(t: T) -> T { t }
     /// ```
     #[clippy::version = "1.40.0"]
     pub MUST_USE_CANDIDATE,
@@ -211,7 +211,7 @@ declare_clippy_lint! {
     /// instead.
     ///
     /// ### Examples
-    /// ```rust
+    /// ```no_run
     /// pub fn read_u8() -> Result<u8, ()> { Err(()) }
     /// ```
     /// should become
@@ -252,12 +252,17 @@ declare_clippy_lint! {
     /// A `Result` is at least as large as the `Err`-variant. While we
     /// expect that variant to be seldomly used, the compiler needs to reserve
     /// and move that much memory every single time.
+    /// Furthermore, errors are often simply passed up the call-stack, making
+    /// use of the `?`-operator and its type-conversion mechanics. If the
+    /// `Err`-variant further up the call-stack stores the `Err`-variant in
+    /// question (as library code often does), it itself needs to be at least
+    /// as large, propagating the problem.
     ///
     /// ### Known problems
     /// The size determined by Clippy is platform-dependent.
     ///
     /// ### Examples
-    /// ```rust
+    /// ```no_run
     /// pub enum ParseError {
     ///     UnparsedBytes([u8; 512]),
     ///     UnexpectedEof,
@@ -269,7 +274,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// should be
-    /// ```
+    /// ```no_run
     /// pub enum ParseError {
     ///     UnparsedBytes(Box<[u8; 512]>),
     ///     UnexpectedEof,
@@ -296,7 +301,7 @@ declare_clippy_lint! {
     ///
     /// ### Example
 
-    /// ```rust
+    /// ```no_run
     /// struct A {
     ///     a: String,
     ///     b: String,
@@ -310,7 +315,7 @@ declare_clippy_lint! {
 
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// struct A {
     ///     a: String,
     ///     b: String,
@@ -330,43 +335,51 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Lints when `impl Trait` is being used in a function's paremeters.
+    /// Lints when `impl Trait` is being used in a function's parameters.
     /// ### Why is this bad?
     /// Turbofish syntax (`::<>`) cannot be used when `impl Trait` is being used, making `impl Trait` less powerful. Readability may also be a factor.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// trait MyTrait {}
     /// fn foo(a: impl MyTrait) {
     /// 	// [...]
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// trait MyTrait {}
     /// fn foo<T: MyTrait>(a: T) {
     /// 	// [...]
     /// }
     /// ```
-    #[clippy::version = "1.68.0"]
+    #[clippy::version = "1.69.0"]
     pub IMPL_TRAIT_IN_PARAMS,
     restriction,
     "`impl Trait` is used in the function's parameters"
 }
 
 #[derive(Copy, Clone)]
+#[allow(clippy::struct_field_names)]
 pub struct Functions {
     too_many_arguments_threshold: u64,
     too_many_lines_threshold: u64,
     large_error_threshold: u64,
+    avoid_breaking_exported_api: bool,
 }
 
 impl Functions {
-    pub fn new(too_many_arguments_threshold: u64, too_many_lines_threshold: u64, large_error_threshold: u64) -> Self {
+    pub fn new(
+        too_many_arguments_threshold: u64,
+        too_many_lines_threshold: u64,
+        large_error_threshold: u64,
+        avoid_breaking_exported_api: bool,
+    ) -> Self {
         Self {
             too_many_arguments_threshold,
             too_many_lines_threshold,
             large_error_threshold,
+            avoid_breaking_exported_api,
         }
     }
 }
@@ -394,7 +407,7 @@ impl<'tcx> LateLintPass<'tcx> for Functions {
         span: Span,
         def_id: LocalDefId,
     ) {
-        let hir_id = cx.tcx.hir().local_def_id_to_hir_id(def_id);
+        let hir_id = cx.tcx.local_def_id_to_hir_id(def_id);
         too_many_arguments::check_fn(cx, kind, decl, span, hir_id, self.too_many_arguments_threshold);
         too_many_lines::check_fn(cx, kind, span, body, self.too_many_lines_threshold);
         not_unsafe_ptr_arg_deref::check_fn(cx, kind, decl, body, def_id);
@@ -410,6 +423,7 @@ impl<'tcx> LateLintPass<'tcx> for Functions {
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx hir::ImplItem<'_>) {
         must_use::check_impl_item(cx, item);
         result::check_impl_item(cx, item, self.large_error_threshold);
+        impl_trait_in_params::check_impl_item(cx, item);
     }
 
     fn check_trait_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx hir::TraitItem<'_>) {
@@ -417,5 +431,6 @@ impl<'tcx> LateLintPass<'tcx> for Functions {
         not_unsafe_ptr_arg_deref::check_trait_item(cx, item);
         must_use::check_trait_item(cx, item);
         result::check_trait_item(cx, item, self.large_error_threshold);
+        impl_trait_in_params::check_trait_item(cx, item, self.avoid_breaking_exported_api);
     }
 }

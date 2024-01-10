@@ -24,7 +24,7 @@
 //! However, this model lacks SC accesses and is therefore unusable by Miri (SC accesses are everywhere in library code).
 //!
 //! If you find anything that proposes a relaxed memory model that is C++20-consistent, supports all orderings Rust's atomic accesses
-//! and fences accept, and is implementable (with operational semanitcs), please open a GitHub issue!
+//! and fences accept, and is implementable (with operational semantics), please open a GitHub issue!
 //!
 //! One characteristic of this implementation, in contrast to some other notable operational models such as ones proposed in
 //! Taming Release-Acquire Consistency by Ori Lahav et al. (<https://plv.mpi-sws.org/sra/paper.pdf>) or Promising Semantics noted above,
@@ -32,8 +32,8 @@
 //! and shared across all threads. This is more memory efficient but does require store elements (representing writes to a location) to record
 //! information about reads, whereas in the other two models it is the other way round: reads points to the write it got its value from.
 //! Additionally, writes in our implementation do not have globally unique timestamps attached. In the other two models this timestamp is
-//! used to make sure a value in a thread's view is not overwritten by a write that occured earlier than the one in the existing view.
-//! In our implementation, this is detected using read information attached to store elements, as there is no data strucutre representing reads.
+//! used to make sure a value in a thread's view is not overwritten by a write that occurred earlier than the one in the existing view.
+//! In our implementation, this is detected using read information attached to store elements, as there is no data structure representing reads.
 //!
 //! The C++ memory model is built around the notion of an 'atomic object', so it would be natural
 //! to attach store buffers to atomic objects. However, Rust follows LLVM in that it only has
@@ -48,7 +48,7 @@
 //! One consequence of this difference is that safe/sound Rust allows for more operations on atomic locations
 //! than the C++20 atomic API was intended to allow, such as non-atomically accessing
 //! a previously atomically accessed location, or accessing previously atomically accessed locations with a differently sized operation
-//! (such as accessing the top 16 bits of an AtomicU32). These senarios are generally undiscussed in formalisations of C++ memory model.
+//! (such as accessing the top 16 bits of an AtomicU32). These scenarios are generally undiscussed in formalisations of C++ memory model.
 //! In Rust, these operations can only be done through a `&mut AtomicFoo` reference or one derived from it, therefore these operations
 //! can only happen after all previous accesses on the same locations. This implementation is adapted to allow these operations.
 //! A mixed atomicity read that races with writes, or a write that races with reads or writes will still cause UBs to be thrown.
@@ -61,7 +61,7 @@
 //
 // 2. In the operational semantics, each store element keeps the timestamp of a thread when it loads from the store.
 // If the same thread loads from the same store element multiple times, then the timestamps at all loads are saved in a list of load elements.
-// This is not necessary as later loads by the same thread will always have greater timetstamp values, so we only need to record the timestamp of the first
+// This is not necessary as later loads by the same thread will always have greater timestamp values, so we only need to record the timestamp of the first
 // load by each thread. This optimisation is done in tsan11
 // (https://github.com/ChrisLidbury/tsan11/blob/ecbd6b81e9b9454e01cba78eb9d88684168132c7/lib/tsan/rtl/tsan_relaxed.h#L35-L37)
 // and here.
@@ -82,7 +82,6 @@ use std::{
     collections::VecDeque,
 };
 
-use rustc_const_eval::interpret::{alloc_range, AllocRange, InterpResult, MPlaceTy, Scalar};
 use rustc_data_structures::fx::FxHashMap;
 
 use crate::*;
@@ -108,15 +107,15 @@ pub struct StoreBufferAlloc {
     store_buffers: RefCell<RangeObjectMap<StoreBuffer>>,
 }
 
-impl VisitTags for StoreBufferAlloc {
-    fn visit_tags(&self, visit: &mut dyn FnMut(BorTag)) {
+impl VisitProvenance for StoreBufferAlloc {
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         let Self { store_buffers } = self;
         for val in store_buffers
             .borrow()
             .iter()
             .flat_map(|buf| buf.buffer.iter().map(|element| &element.val))
         {
-            val.visit_tags(visit);
+            val.visit_provenance(visit);
         }
     }
 }
@@ -169,14 +168,6 @@ impl StoreBufferAlloc {
         Self { store_buffers: RefCell::new(RangeObjectMap::new()) }
     }
 
-    /// Checks if the range imperfectly overlaps with existing buffers
-    /// Used to determine if mixed-size atomic accesses
-    fn is_overlapping(&self, range: AllocRange) -> bool {
-        let buffers = self.store_buffers.borrow();
-        let access_type = buffers.access_type(range);
-        matches!(access_type, AccessType::ImperfectlyOverlapping(_))
-    }
-
     /// When a non-atomic access happens on a location that has been atomically accessed
     /// before without data race, we can determine that the non-atomic access fully happens
     /// after all the prior atomic accesses so the location no longer needs to exhibit
@@ -190,10 +181,12 @@ impl StoreBufferAlloc {
                     buffers.remove_from_pos(pos);
                 }
                 AccessType::ImperfectlyOverlapping(pos_range) => {
+                    // We rely on the data-race check making sure this is synchronized.
+                    // Therefore we can forget about the old data here.
                     buffers.remove_pos_range(pos_range);
                 }
                 AccessType::Empty(_) => {
-                    // The range had no weak behaivours attached, do nothing
+                    // The range had no weak behaviours attached, do nothing
                 }
             }
         }
@@ -215,7 +208,7 @@ impl StoreBufferAlloc {
                 pos
             }
             AccessType::ImperfectlyOverlapping(pos_range) => {
-                // Once we reach here we would've already checked that this access is not racy
+                // Once we reach here we would've already checked that this access is not racy.
                 let mut buffers = self.store_buffers.borrow_mut();
                 buffers.remove_pos_range(pos_range.clone());
                 buffers.insert_at_pos(pos_range.start, range, StoreBuffer::new(init));
@@ -240,6 +233,7 @@ impl StoreBufferAlloc {
                 pos
             }
             AccessType::ImperfectlyOverlapping(pos_range) => {
+                // Once we reach here we would've already checked that this access is not racy.
                 buffers.remove_pos_range(pos_range.clone());
                 buffers.insert_at_pos(pos_range.start, range, StoreBuffer::new(init));
                 pos_range.start
@@ -336,7 +330,7 @@ impl<'mir, 'tcx: 'mir> StoreBuffer {
         let mut found_sc = false;
         // FIXME: we want an inclusive take_while (stops after a false predicate, but
         // includes the element that gave the false), but such function doesn't yet
-        // exist in the standard libary https://github.com/rust-lang/rust/issues/62208
+        // exist in the standard library https://github.com/rust-lang/rust/issues/62208
         // so we have to hack around it with keep_searching
         let mut keep_searching = true;
         let candidates = self
@@ -473,37 +467,6 @@ impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 
 pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
     crate::MiriInterpCxExt<'mir, 'tcx>
 {
-    // If weak memory emulation is enabled, check if this atomic op imperfectly overlaps with a previous
-    // atomic read or write. If it does, then we require it to be ordered (non-racy) with all previous atomic
-    // accesses on all the bytes in range
-    fn validate_overlapping_atomic(
-        &self,
-        place: &MPlaceTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx> {
-        let this = self.eval_context_ref();
-        let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(place.ptr)?;
-        if let crate::AllocExtra {
-            weak_memory: Some(alloc_buffers),
-            data_race: Some(alloc_clocks),
-            ..
-        } = this.get_alloc_extra(alloc_id)?
-        {
-            let range = alloc_range(base_offset, place.layout.size);
-            if alloc_buffers.is_overlapping(range)
-                && !alloc_clocks.race_free_with_atomic(
-                    range,
-                    this.machine.data_race.as_ref().unwrap(),
-                    &this.machine.threads,
-                )
-            {
-                throw_unsup_format!(
-                    "racy imperfectly overlapping atomic access is not possible in the C++20 memory model, and not supported by Miri's weak memory emulation"
-                );
-            }
-        }
-        Ok(())
-    }
-
     fn buffered_atomic_rmw(
         &mut self,
         new_val: Scalar<Provenance>,
@@ -512,7 +475,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
         init: Scalar<Provenance>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(place.ptr)?;
+        let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(place.ptr())?;
         if let (
             crate::AllocExtra { weak_memory: Some(alloc_buffers), .. },
             crate::MiriMachine { data_race: Some(global), threads, .. },
@@ -539,7 +502,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
     ) -> InterpResult<'tcx, Scalar<Provenance>> {
         let this = self.eval_context_ref();
         if let Some(global) = &this.machine.data_race {
-            let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(place.ptr)?;
+            let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(place.ptr())?;
             if let Some(alloc_buffers) = this.get_alloc_extra(alloc_id)?.weak_memory.as_ref() {
                 if atomic == AtomicReadOrd::SeqCst {
                     global.sc_read(&this.machine.threads);
@@ -577,7 +540,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
         init: Scalar<Provenance>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(dest.ptr)?;
+        let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(dest.ptr())?;
         if let (
             crate::AllocExtra { weak_memory: Some(alloc_buffers), .. },
             crate::MiriMachine { data_race: Some(global), threads, .. },
@@ -627,7 +590,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
                 global.sc_read(&this.machine.threads);
             }
             let size = place.layout.size;
-            let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(place.ptr)?;
+            let (alloc_id, base_offset, ..) = this.ptr_get_alloc_id(place.ptr())?;
             if let Some(alloc_buffers) = this.get_alloc_extra(alloc_id)?.weak_memory.as_ref() {
                 let buffer = alloc_buffers
                     .get_or_create_store_buffer(alloc_range(base_offset, size), init)?;

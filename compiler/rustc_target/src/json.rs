@@ -92,10 +92,13 @@ impl<A: ToJson> ToJson for Option<A> {
 
 impl ToJson for crate::abi::call::Conv {
     fn to_json(&self) -> Json {
+        let buf: String;
         let s = match self {
             Self::C => "C",
             Self::Rust => "Rust",
-            Self::RustCold => "RustCold",
+            Self::Cold => "Cold",
+            Self::PreserveMost => "PreserveMost",
+            Self::PreserveAll => "PreserveAll",
             Self::ArmAapcs => "ArmAapcs",
             Self::CCmseNonSecureCall => "CCmseNonSecureCall",
             Self::Msp430Intr => "Msp430Intr",
@@ -110,6 +113,10 @@ impl ToJson for crate::abi::call::Conv {
             Self::AmdGpuKernel => "AmdGpuKernel",
             Self::AvrInterrupt => "AvrInterrupt",
             Self::AvrNonBlockingInterrupt => "AvrNonBlockingInterrupt",
+            Self::RiscvInterrupt { kind } => {
+                buf = format!("RiscvInterrupt({})", kind.as_str());
+                &buf
+            }
         };
         Json::String(s.to_owned())
     }

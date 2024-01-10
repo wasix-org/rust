@@ -3,7 +3,7 @@
 # only-x86
 # only-windows
 
-include ../../run-make-fulldeps/tools.mk
+include ../tools.mk
 
 all:
 	$(RUSTC) --crate-type lib --crate-name raw_dylib_alt_calling_convention_test lib.rs
@@ -16,17 +16,9 @@ else
 endif
 
 	"$(TMPDIR)"/driver > "$(TMPDIR)"/output.txt
-ifdef RUSTC_BLESS_TEST
-	cp "$(TMPDIR)"/output.txt output.txt
-else
-	$(DIFF) output.txt "$(TMPDIR)"/output.txt
-endif
+	$(RUSTC_TEST_OP) "$(TMPDIR)"/output.txt output.txt
 
 ifdef IS_MSVC
 	"$(TMPDIR)"/driver true > "$(TMPDIR)"/output.msvc.txt
-ifdef RUSTC_BLESS_TEST
-	cp "$(TMPDIR)"/output.msvc.txt output.msvc.txt
-else
-	$(DIFF) output.msvc.txt "$(TMPDIR)"/output.msvc.txt
-endif
+	$(RUSTC_TEST_OP) "$(TMPDIR)"/output.msvc.txt output.msvc.txt
 endif

@@ -177,7 +177,7 @@ fn decodable_substructure(
                 ],
             )
         }
-        _ => cx.bug("expected StaticEnum or StaticStruct in derive(Decodable)"),
+        _ => cx.dcx().bug("expected StaticEnum or StaticStruct in derive(Decodable)"),
     };
     BlockOrExpr::new_expr(expr)
 }
@@ -204,7 +204,7 @@ where
                 let fields = fields
                     .iter()
                     .enumerate()
-                    .map(|(i, &span)| getarg(cx, span, Symbol::intern(&format!("_field{}", i)), i))
+                    .map(|(i, &span)| getarg(cx, span, Symbol::intern(&format!("_field{i}")), i))
                     .collect();
 
                 cx.expr_call(trait_span, path_expr, fields)

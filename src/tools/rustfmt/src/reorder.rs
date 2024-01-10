@@ -6,9 +6,9 @@
 
 // FIXME(#2455): Reorder trait items.
 
-use std::cmp::{Ord, Ordering};
+use std::cmp::Ordering;
 
-use rustc_ast::ast;
+use rustc_ast::{ast, attr};
 use rustc_span::{symbol::sym, Span};
 
 use crate::config::{Config, GroupImportsTactic};
@@ -167,7 +167,7 @@ fn rewrite_reorderable_or_regroupable_items(
 }
 
 fn contains_macro_use_attr(item: &ast::Item) -> bool {
-    crate::attr::contains_name(&item.attrs, sym::macro_use)
+    attr::contains_name(&item.attrs, sym::macro_use)
 }
 
 /// Divides imports into three groups, corresponding to standard, external

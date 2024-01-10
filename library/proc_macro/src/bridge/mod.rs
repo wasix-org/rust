@@ -8,12 +8,13 @@
 
 #![deny(unsafe_code)]
 
-use crate::{Delimiter, Level, LineColumn, Spacing};
+use crate::{Delimiter, Level, Spacing};
 use std::fmt;
 use std::hash::Hash;
 use std::marker;
 use std::mem;
 use std::ops::Bound;
+use std::ops::Range;
 use std::panic;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Once;
@@ -54,6 +55,7 @@ macro_rules! with_api {
         $m! {
             FreeFunctions {
                 fn drop($self: $S::FreeFunctions);
+                fn injected_env_var(var: &str) -> Option<String>;
                 fn track_env_var(var: &str, value: Option<&str>);
                 fn track_path(path: &str);
                 fn literal_from_str(s: &str) -> Result<Literal<$S::Span, $S::Symbol>, ()>;
@@ -93,10 +95,11 @@ macro_rules! with_api {
                 fn source_file($self: $S::Span) -> $S::SourceFile;
                 fn parent($self: $S::Span) -> Option<$S::Span>;
                 fn source($self: $S::Span) -> $S::Span;
-                fn start($self: $S::Span) -> LineColumn;
-                fn end($self: $S::Span) -> LineColumn;
-                fn before($self: $S::Span) -> $S::Span;
-                fn after($self: $S::Span) -> $S::Span;
+                fn byte_range($self: $S::Span) -> Range<usize>;
+                fn start($self: $S::Span) -> $S::Span;
+                fn end($self: $S::Span) -> $S::Span;
+                fn line($self: $S::Span) -> usize;
+                fn column($self: $S::Span) -> usize;
                 fn join($self: $S::Span, other: $S::Span) -> Option<$S::Span>;
                 fn subspan($self: $S::Span, start: Bound<usize>, end: Bound<usize>) -> Option<$S::Span>;
                 fn resolved_at($self: $S::Span, at: $S::Span) -> $S::Span;
@@ -297,7 +300,6 @@ mark_noop! {
     Delimiter,
     LitKind,
     Level,
-    LineColumn,
     Spacing,
 }
 
@@ -317,7 +319,6 @@ rpc_encode_decode!(
         Help,
     }
 );
-rpc_encode_decode!(struct LineColumn { line, column });
 rpc_encode_decode!(
     enum Spacing {
         Alone,
@@ -335,6 +336,8 @@ pub enum LitKind {
     StrRaw(u8),
     ByteStr,
     ByteStrRaw(u8),
+    CStr,
+    CStrRaw(u8),
     Err,
 }
 
@@ -348,6 +351,8 @@ rpc_encode_decode!(
         StrRaw(n),
         ByteStr,
         ByteStrRaw(n),
+        CStr,
+        CStrRaw(n),
         Err,
     }
 );
@@ -518,4 +523,8 @@ pub struct ExpnGlobals<Span> {
 
 compound_traits!(
     struct ExpnGlobals<Span> { def_site, call_site, mixed_site }
+);
+
+compound_traits!(
+    struct Range<T> { start, end }
 );

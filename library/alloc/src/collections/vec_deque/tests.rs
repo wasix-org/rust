@@ -351,14 +351,14 @@ fn test_rotate_left_right() {
 }
 
 #[test]
-#[should_panic = "assertion failed: mid <= self.len()"]
+#[should_panic = "assertion failed: n <= self.len()"]
 fn test_rotate_left_panic() {
     let mut tester: VecDeque<_> = (1..=10).collect();
     tester.rotate_left(tester.len() + 1);
 }
 
 #[test]
-#[should_panic = "assertion failed: k <= self.len()"]
+#[should_panic = "assertion failed: n <= self.len()"]
 fn test_rotate_right_panic() {
     let mut tester: VecDeque<_> = (1..=10).collect();
     tester.rotate_right(tester.len() + 1);
@@ -1085,7 +1085,7 @@ fn test_clone_from() {
 fn test_vec_deque_truncate_drop() {
     static mut DROPS: u32 = 0;
     #[derive(Clone)]
-    struct Elem(i32);
+    struct Elem(#[allow(dead_code)] i32);
     impl Drop for Elem {
         fn drop(&mut self) {
             unsafe {

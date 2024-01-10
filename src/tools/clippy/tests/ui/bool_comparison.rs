@@ -1,6 +1,6 @@
-// run-rustfix
-
+#![allow(clippy::needless_if)]
 #![warn(clippy::bool_comparison)]
+#![allow(clippy::non_canonical_partial_ord_impl)]
 
 fn main() {
     let x = true;
@@ -164,4 +164,13 @@ fn issue3973() {
     if cfg!(feature = "debugging") == is_debug {}
     if is_debug == m!(func) {}
     if m!(func) == is_debug {}
+}
+
+#[allow(clippy::unnecessary_cast)]
+fn issue9907() {
+    let _ = ((1 < 2) == false) as usize;
+    let _ = (false == m!(func)) as usize;
+    // This is not part of the issue, but an unexpected found when fixing the issue,
+    // the provided span was inside of macro rather than the macro callsite.
+    let _ = ((1 < 2) == !m!(func)) as usize;
 }

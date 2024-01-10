@@ -1,5 +1,5 @@
 // This test checks the appearance of the tables in the doc comments.
-goto: "file://" + |DOC_PATH| + "/test_docs/doc_block_table/struct.DocBlockTable.html#method.func"
+go-to: "file://" + |DOC_PATH| + "/test_docs/doc_block_table/struct.DocBlockTable.html#method.func"
 
 compare-elements-css: (".impl-items .docblock table th", ".top-doc .docblock table th", ["border"])
 compare-elements-css: (".impl-items .docblock table td", ".top-doc .docblock table td", ["border"])
@@ -8,7 +8,7 @@ define-function: (
     "check-colors",
     (theme, border_color, zebra_stripe_color),
     block {
-        local-storage: {"rustdoc-use-system-theme": "false", "rustdoc-theme": |theme|}
+        set-local-storage: {"rustdoc-use-system-theme": "false", "rustdoc-theme": |theme|}
         reload:
         assert-css: (".top-doc .docblock table tbody tr:nth-child(1)", {
             "background-color": "rgba(0, 0, 0, 0)",
@@ -36,17 +36,17 @@ define-function: (
 )
 
 call-function: ("check-colors", {
-    "theme": "dark",
-    "border_color": "rgb(224, 224, 224)",
-    "zebra_stripe_color": "rgb(42, 42, 42)",
+    "theme": "ayu",
+    "border_color": "#5c6773",
+    "zebra_stripe_color": "#191f26",
 })
 call-function: ("check-colors", {
-    "theme": "ayu",
-    "border_color": "rgb(92, 103, 115)",
-    "zebra_stripe_color": "rgb(25, 31, 38)",
+    "theme": "dark",
+    "border_color": "#e0e0e0",
+    "zebra_stripe_color": "#2a2a2a",
 })
 call-function: ("check-colors", {
     "theme": "light",
-    "border_color": "rgb(224, 224, 224)",
-    "zebra_stripe_color": "rgb(245, 245, 245)",
+    "border_color": "#e0e0e0",
+    "zebra_stripe_color": "#f5f5f5",
 })

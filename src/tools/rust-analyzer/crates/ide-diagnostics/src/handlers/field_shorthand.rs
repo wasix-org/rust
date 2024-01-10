@@ -1,11 +1,14 @@
 //! Suggests shortening `Foo { field: field }` to `Foo { field }` in both
 //! expressions and patterns.
 
-use ide_db::{base_db::FileId, source_change::SourceChange};
+use ide_db::{
+    base_db::{FileId, FileRange},
+    source_change::SourceChange,
+};
 use syntax::{ast, match_ast, AstNode, SyntaxNode};
 use text_edit::TextEdit;
 
-use crate::{fix, Diagnostic, Severity};
+use crate::{fix, Diagnostic, DiagnosticCode};
 
 pub(crate) fn field_shorthand(acc: &mut Vec<Diagnostic>, file_id: FileId, node: &SyntaxNode) {
     match_ast! {
@@ -46,14 +49,17 @@ fn check_expr_field_shorthand(
 
         let field_range = record_field.syntax().text_range();
         acc.push(
-            Diagnostic::new("use-field-shorthand", "Shorthand struct initialization", field_range)
-                .severity(Severity::WeakWarning)
-                .with_fixes(Some(vec![fix(
-                    "use_expr_field_shorthand",
-                    "Use struct shorthand initialization",
-                    SourceChange::from_text_edit(file_id, edit),
-                    field_range,
-                )])),
+            Diagnostic::new(
+                DiagnosticCode::Clippy("redundant_field_names"),
+                "Shorthand struct initialization",
+                FileRange { file_id, range: field_range },
+            )
+            .with_fixes(Some(vec![fix(
+                "use_expr_field_shorthand",
+                "Use struct shorthand initialization",
+                SourceChange::from_text_edit(file_id, edit),
+                field_range,
+            )])),
         );
     }
 }
@@ -87,14 +93,17 @@ fn check_pat_field_shorthand(
 
         let field_range = record_pat_field.syntax().text_range();
         acc.push(
-            Diagnostic::new("use-field-shorthand", "Shorthand struct pattern", field_range)
-                .severity(Severity::WeakWarning)
-                .with_fixes(Some(vec![fix(
-                    "use_pat_field_shorthand",
-                    "Use struct field shorthand",
-                    SourceChange::from_text_edit(file_id, edit),
-                    field_range,
-                )])),
+            Diagnostic::new(
+                DiagnosticCode::Clippy("redundant_field_names"),
+                "Shorthand struct pattern",
+                FileRange { file_id, range: field_range },
+            )
+            .with_fixes(Some(vec![fix(
+                "use_pat_field_shorthand",
+                "Use struct field shorthand",
+                SourceChange::from_text_edit(file_id, edit),
+                field_range,
+            )])),
         );
     }
 }
@@ -160,7 +169,7 @@ fn main() {
         check_diagnostics(
             r#"
 struct A { a: &'static str }
-fn f(a: A) { let A { a: hello } = a; }
+fn f(a: A) { let A { a: _hello } = a; }
 "#,
         );
         check_diagnostics(
@@ -175,12 +184,14 @@ fn f(a: A) { let A { 0: 0 } = a; }
 struct A { a: &'static str }
 fn f(a: A) {
     let A { a$0: a } = a;
+    _ = a;
 }
 "#,
             r#"
 struct A { a: &'static str }
 fn f(a: A) {
     let A { a } = a;
+    _ = a;
 }
 "#,
         );
@@ -190,12 +201,14 @@ fn f(a: A) {
 struct A { a: &'static str, b: &'static str }
 fn f(a: A) {
     let A { a$0: a, b } = a;
+    _ = (a, b);
 }
 "#,
             r#"
 struct A { a: &'static str, b: &'static str }
 fn f(a: A) {
     let A { a, b } = a;
+    _ = (a, b);
 }
 "#,
         );

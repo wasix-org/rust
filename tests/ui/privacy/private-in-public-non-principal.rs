@@ -5,8 +5,7 @@ pub trait PubPrincipal {}
 auto trait PrivNonPrincipal {}
 
 pub fn leak_dyn_nonprincipal() -> Box<dyn PubPrincipal + PrivNonPrincipal> { loop {} }
-//~^ WARN private trait `PrivNonPrincipal` in public interface
-//~| WARN this was previously accepted
+//~^ WARN trait `PrivNonPrincipal` is more private than the item `leak_dyn_nonprincipal`
 
 #[deny(missing_docs)]
 fn container() {

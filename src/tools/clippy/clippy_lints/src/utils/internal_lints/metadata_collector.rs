@@ -9,38 +9,36 @@
 
 use crate::renamed_lints::RENAMED_LINTS;
 use crate::utils::internal_lints::lint_without_lint_pass::{extract_clippy_version_value, is_lint_ref_type};
+use clippy_config::{get_configuration_metadata, ClippyConfiguration};
 
 use clippy_utils::diagnostics::span_lint;
 use clippy_utils::ty::{match_type, walk_ptrs_ty_depth};
 use clippy_utils::{last_path_segment, match_def_path, match_function_call, match_path, paths};
-use if_chain::if_chain;
 use itertools::Itertools;
 use rustc_ast as ast;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_hir::{
-    self as hir, def::DefKind, intravisit, intravisit::Visitor, Closure, ExprKind, Item, ItemKind, Mutability, QPath,
-};
-use rustc_lint::{CheckLintNameResult, LateContext, LateLintPass, LintContext, LintId};
+use rustc_hir::def::DefKind;
+use rustc_hir::intravisit::Visitor;
+use rustc_hir::{self as hir, intravisit, Closure, ExprKind, Item, ItemKind, Mutability, QPath};
+use rustc_lint::{unerased_lint_store, CheckLintNameResult, LateContext, LateLintPass, LintContext, LintId};
 use rustc_middle::hir::nested_filter;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_session::impl_lint_pass;
 use rustc_span::symbol::Ident;
 use rustc_span::{sym, Loc, Span, Symbol};
-use serde::{ser::SerializeStruct, Serialize, Serializer};
-use std::collections::BinaryHeap;
-use std::fmt;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
+use std::collections::{BTreeSet, BinaryHeap};
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File};
 use std::io::prelude::*;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, fmt};
 
 /// This is the json output file of the lint collector.
 const JSON_OUTPUT_FILE: &str = "../util/gh-pages/lints.json";
 /// This is the markdown output file of the lint collector.
 const MARKDOWN_OUTPUT_FILE: &str = "../book/src/lint_configuration.md";
-/// These lints are excluded from the export.
-const BLACK_LISTED_LINTS: &[&str] = &["lint_author", "dump_hir", "internal_metadata_collector"];
 /// These groups will be ignored by the lint group matcher. This is useful for collections like
 /// `clippy::all`
 const IGNORED_LINT_GROUPS: [&str; 1] = ["clippy::all"];
@@ -100,6 +98,8 @@ const APPLICABILITY_UNRESOLVED_STR: &str = "Unresolved";
 /// The version that will be displayed if none has been defined
 const VERSION_DEFAULT_STR: &str = "Unknown";
 
+const CHANGELOG_PATH: &str = "../CHANGELOG.md";
+
 declare_clippy_lint! {
     /// ### What it does
     /// Collects metadata about clippy lints for the website.
@@ -118,7 +118,7 @@ declare_clippy_lint! {
     /// ### Example output
     /// ```json,ignore
     /// {
-    ///     "id": "internal_metadata_collector",
+    ///     "id": "metadata_collector",
     ///     "id_span": {
     ///         "path": "clippy_lints/src/utils/internal_lints/metadata_collector.rs",
     ///         "line": 1
@@ -128,12 +128,12 @@ declare_clippy_lint! {
     /// }
     /// ```
     #[clippy::version = "1.56.0"]
-    pub INTERNAL_METADATA_COLLECTOR,
-    internal_warn,
+    pub METADATA_COLLECTOR,
+    internal,
     "A busy bee collection metadata about lints"
 }
 
-impl_lint_pass!(MetadataCollector => [INTERNAL_METADATA_COLLECTOR]);
+impl_lint_pass!(MetadataCollector => [METADATA_COLLECTOR]);
 
 #[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Clone)]
@@ -152,7 +152,7 @@ impl MetadataCollector {
         Self {
             lints: BinaryHeap::<LintMetadata>::default(),
             applicability_info: FxHashMap::<String, ApplicabilityInfo>::default(),
-            config: collect_configs(),
+            config: get_configuration_metadata(),
             clippy_project_root: std::env::current_dir()
                 .expect("failed to get current dir")
                 .ancestors()
@@ -191,8 +191,14 @@ This lint has the following configuration variables:
 
     fn get_markdown_docs(&self) -> String {
         format!(
-            "## Lint Configuration Options\n| <div style=\"width:290px\">Option</div> | Default Value |\n|--|--|\n{}\n\n{}\n",
-            self.configs_to_markdown(ClippyConfiguration::to_markdown_table_entry),
+            r#"# Lint Configuration Options
+
+The following list shows each configuration option, along with a description, its default value, an example
+and lints affected.
+
+---
+
+{}"#,
             self.configs_to_markdown(ClippyConfiguration::to_markdown_paragraph),
         )
     }
@@ -220,25 +226,10 @@ impl Drop for MetadataCollector {
         collect_renames(&mut lints);
 
         // Outputting json
-        if Path::new(JSON_OUTPUT_FILE).exists() {
-            fs::remove_file(JSON_OUTPUT_FILE).unwrap();
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(JSON_OUTPUT_FILE)
-            .unwrap();
-        writeln!(file, "{}", serde_json::to_string_pretty(&lints).unwrap()).unwrap();
+        fs::write(JSON_OUTPUT_FILE, serde_json::to_string_pretty(&lints).unwrap()).unwrap();
 
         // Outputting markdown
-        if Path::new(MARKDOWN_OUTPUT_FILE).exists() {
-            fs::remove_file(MARKDOWN_OUTPUT_FILE).unwrap();
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(MARKDOWN_OUTPUT_FILE)
-            .unwrap();
+        let mut file = File::create(MARKDOWN_OUTPUT_FILE).unwrap();
         writeln!(
             file,
             "<!--
@@ -248,6 +239,20 @@ Please use that command to update the file and do not edit it by hand.
 
 {}",
             self.get_markdown_docs(),
+        )
+        .unwrap();
+
+        // Write configuration links to CHANGELOG.md
+        let changelog = std::fs::read_to_string(CHANGELOG_PATH).unwrap();
+        let mut changelog_file = File::create(CHANGELOG_PATH).unwrap();
+        let position = changelog
+            .find("<!-- begin autogenerated links to configuration documentation -->")
+            .unwrap();
+        writeln!(
+            changelog_file,
+            "{}<!-- begin autogenerated links to configuration documentation -->\n{}\n<!-- end autogenerated links to configuration documentation -->",
+            &changelog[..position],
+            self.configs_to_markdown(ClippyConfiguration::to_markdown_link)
         )
         .unwrap();
     }
@@ -264,6 +269,9 @@ struct LintMetadata {
     /// This field is only used in the output and will only be
     /// mapped shortly before the actual output.
     applicability: Option<ApplicabilityInfo>,
+    /// All the past names of lints which have been renamed.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    former_ids: BTreeSet<String>,
 }
 
 impl LintMetadata {
@@ -283,6 +291,7 @@ impl LintMetadata {
             version,
             docs,
             applicability: None,
+            former_ids: BTreeSet::new(),
         }
     }
 }
@@ -406,7 +415,7 @@ fn get_lint_output(lint_name: &str, example: &[&mut String], clippy_project_root
 
     let prefixed_name = format!("{CLIPPY_LINT_GROUP_PREFIX}{lint_name}");
 
-    let mut cmd = Command::new("cargo");
+    let mut cmd = Command::new(env::var("CARGO").unwrap_or("cargo".into()));
 
     cmd.current_dir(clippy_project_root)
         .env("CARGO_INCREMENTAL", "0")
@@ -482,7 +491,7 @@ impl SerializableSpan {
         let loc: Loc = cx.sess().source_map().lookup_char_pos(span.lo());
 
         Self {
-            path: format!("{}", loc.file.name.prefer_remapped()),
+            path: format!("{}", loc.file.name.prefer_remapped_unconditionaly()),
             line: loc.line,
         }
     }
@@ -517,121 +526,6 @@ impl Serialize for ApplicabilityInfo {
 }
 
 // ==================================================================
-// Configuration
-// ==================================================================
-#[derive(Debug, Clone, Default)]
-pub struct ClippyConfiguration {
-    name: String,
-    config_type: &'static str,
-    default: String,
-    lints: Vec<String>,
-    doc: String,
-    #[allow(dead_code)]
-    deprecation_reason: Option<&'static str>,
-}
-
-impl ClippyConfiguration {
-    pub fn new(
-        name: &'static str,
-        config_type: &'static str,
-        default: String,
-        doc_comment: &'static str,
-        deprecation_reason: Option<&'static str>,
-    ) -> Self {
-        let (lints, doc) = parse_config_field_doc(doc_comment)
-            .unwrap_or_else(|| (vec![], "[ERROR] MALFORMED DOC COMMENT".to_string()));
-
-        Self {
-            name: to_kebab(name),
-            lints,
-            doc,
-            config_type,
-            default,
-            deprecation_reason,
-        }
-    }
-
-    fn to_markdown_paragraph(&self) -> String {
-        format!(
-            "### {}\n{}\n\n**Default Value:** `{}` (`{}`)\n\n{}\n\n",
-            self.name,
-            self.doc
-                .lines()
-                .map(|line| line.strip_prefix("    ").unwrap_or(line))
-                .join("\n"),
-            self.default,
-            self.config_type,
-            self.lints
-                .iter()
-                .map(|name| name.to_string().split_whitespace().next().unwrap().to_string())
-                .map(|name| format!("* [{name}](https://rust-lang.github.io/rust-clippy/master/index.html#{name})"))
-                .join("\n"),
-        )
-    }
-
-    fn to_markdown_table_entry(&self) -> String {
-        format!("| [{}](#{}) | `{}` |", self.name, self.name, self.default)
-    }
-}
-
-fn collect_configs() -> Vec<ClippyConfiguration> {
-    crate::utils::conf::metadata::get_configuration_metadata()
-}
-
-/// This parses the field documentation of the config struct.
-///
-/// ```rust, ignore
-/// parse_config_field_doc(cx, "Lint: LINT_NAME_1, LINT_NAME_2. Papa penguin, papa penguin")
-/// ```
-///
-/// Would yield:
-/// ```rust, ignore
-/// Some(["lint_name_1", "lint_name_2"], "Papa penguin, papa penguin")
-/// ```
-fn parse_config_field_doc(doc_comment: &str) -> Option<(Vec<String>, String)> {
-    const DOC_START: &str = " Lint: ";
-    if_chain! {
-        if doc_comment.starts_with(DOC_START);
-        if let Some(split_pos) = doc_comment.find('.');
-        then {
-            let mut doc_comment = doc_comment.to_string();
-            let mut documentation = doc_comment.split_off(split_pos);
-
-            // Extract lints
-            doc_comment.make_ascii_lowercase();
-            let lints: Vec<String> = doc_comment
-                .split_off(DOC_START.len())
-                .split(", ")
-                .map(str::to_string)
-                .collect();
-
-            // Format documentation correctly
-            // split off leading `.` from lint name list and indent for correct formatting
-            documentation = documentation.trim_start_matches('.').trim().replace("\n ", "\n    ");
-
-            Some((lints, documentation))
-        } else {
-            None
-        }
-    }
-}
-
-/// Transforms a given `snake_case_string` to a tasty `kebab-case-string`
-fn to_kebab(config_name: &str) -> String {
-    config_name.replace('_', "-")
-}
-
-impl fmt::Display for ClippyConfiguration {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "* `{}`: `{}`(defaults to `{}`): {}",
-            self.name, self.config_type, self.default, self.doc
-        )
-    }
-}
-
-// ==================================================================
 // Lint pass
 // ==================================================================
 impl<'hir> LateLintPass<'hir> for MetadataCollector {
@@ -648,51 +542,45 @@ impl<'hir> LateLintPass<'hir> for MetadataCollector {
     fn check_item(&mut self, cx: &LateContext<'hir>, item: &'hir Item<'_>) {
         if let ItemKind::Static(ty, Mutability::Not, _) = item.kind {
             // Normal lint
-            if_chain! {
+            if is_lint_ref_type(cx, ty)
                 // item validation
-                if is_lint_ref_type(cx, ty);
                 // disallow check
-                let lint_name = sym_to_string(item.ident.name).to_ascii_lowercase();
-                if !BLACK_LISTED_LINTS.contains(&lint_name.as_str());
+                && let lint_name = sym_to_string(item.ident.name).to_ascii_lowercase()
                 // metadata extraction
-                if let Some((group, level)) = get_lint_group_and_level_or_lint(cx, &lint_name, item);
-                if let Some(mut raw_docs) = extract_attr_docs_or_lint(cx, item);
-                then {
-                    if let Some(configuration_section) = self.get_lint_configs(&lint_name) {
-                        raw_docs.push_str(&configuration_section);
-                    }
-                    let version = get_lint_version(cx, item);
-
-                    self.lints.push(LintMetadata::new(
-                        lint_name,
-                        SerializableSpan::from_item(cx, item),
-                        group,
-                        level,
-                        version,
-                        raw_docs,
-                    ));
+                && let Some((group, level)) = get_lint_group_and_level_or_lint(cx, &lint_name, item)
+                && let Some(mut raw_docs) = extract_attr_docs_or_lint(cx, item)
+            {
+                if let Some(configuration_section) = self.get_lint_configs(&lint_name) {
+                    raw_docs.push_str(&configuration_section);
                 }
+                let version = get_lint_version(cx, item);
+
+                self.lints.push(LintMetadata::new(
+                    lint_name,
+                    SerializableSpan::from_item(cx, item),
+                    group,
+                    level,
+                    version,
+                    raw_docs,
+                ));
             }
 
-            if_chain! {
-                if is_deprecated_lint(cx, ty);
+            if is_deprecated_lint(cx, ty)
                 // disallow check
-                let lint_name = sym_to_string(item.ident.name).to_ascii_lowercase();
-                if !BLACK_LISTED_LINTS.contains(&lint_name.as_str());
+                && let lint_name = sym_to_string(item.ident.name).to_ascii_lowercase()
                 // Metadata the little we can get from a deprecated lint
-                if let Some(raw_docs) = extract_attr_docs_or_lint(cx, item);
-                then {
-                    let version = get_lint_version(cx, item);
+                && let Some(raw_docs) = extract_attr_docs_or_lint(cx, item)
+            {
+                let version = get_lint_version(cx, item);
 
-                    self.lints.push(LintMetadata::new(
-                        lint_name,
-                        SerializableSpan::from_item(cx, item),
-                        DEPRECATED_LINT_GROUP_STR.to_string(),
-                        DEPRECATED_LINT_LEVEL,
-                        version,
-                        raw_docs,
-                    ));
-                }
+                self.lints.push(LintMetadata::new(
+                    lint_name,
+                    SerializableSpan::from_item(cx, item),
+                    DEPRECATED_LINT_GROUP_STR.to_string(),
+                    DEPRECATED_LINT_LEVEL,
+                    version,
+                    raw_docs,
+                ));
             }
         }
     }
@@ -826,7 +714,7 @@ fn get_lint_group_and_level_or_lint(
     lint_name: &str,
     item: &Item<'_>,
 ) -> Option<(String, &'static str)> {
-    let result = cx.lint_store.check_lint_name(
+    let result = unerased_lint_store(cx.tcx.sess).check_lint_name(
         lint_name,
         Some(sym::clippy),
         &std::iter::once(Ident::with_dummy_span(sym::clippy)).collect(),
@@ -858,7 +746,7 @@ fn get_lint_group_and_level_or_lint(
 }
 
 fn get_lint_group(cx: &LateContext<'_>, lint_id: LintId) -> Option<String> {
-    for (group_name, lints, _) in cx.lint_store.get_lint_groups() {
+    for (group_name, lints, _) in unerased_lint_store(cx.tcx.sess).get_lint_groups() {
         if IGNORED_LINT_GROUPS.contains(&group_name) {
             continue;
         }
@@ -896,14 +784,13 @@ fn collect_renames(lints: &mut Vec<LintMetadata>) {
         loop {
             if let Some(lint_name) = names.pop() {
                 for (k, v) in RENAMED_LINTS {
-                    if_chain! {
-                        if let Some(name) = v.strip_prefix(CLIPPY_LINT_GROUP_PREFIX);
-                        if name == lint_name;
-                        if let Some(past_name) = k.strip_prefix(CLIPPY_LINT_GROUP_PREFIX);
-                        then {
-                            writeln!(collected, "* `{past_name}`").unwrap();
-                            names.push(past_name.to_string());
-                        }
+                    if let Some(name) = v.strip_prefix(CLIPPY_LINT_GROUP_PREFIX)
+                        && name == lint_name
+                        && let Some(past_name) = k.strip_prefix(CLIPPY_LINT_GROUP_PREFIX)
+                    {
+                        lint.former_ids.insert(past_name.to_owned());
+                        writeln!(collected, "* `{past_name}`").unwrap();
+                        names.push(past_name.to_string());
                     }
                 }
 
@@ -933,7 +820,7 @@ fn collect_renames(lints: &mut Vec<LintMetadata>) {
 fn lint_collection_error_item(cx: &LateContext<'_>, item: &Item<'_>, message: &str) {
     span_lint(
         cx,
-        INTERNAL_METADATA_COLLECTOR,
+        METADATA_COLLECTOR,
         item.ident.span,
         &format!("metadata collection error for `{}`: {message}", item.ident.name),
     );
@@ -1033,20 +920,17 @@ impl<'a, 'hir> intravisit::Visitor<'hir> for LintResolver<'a, 'hir> {
     }
 
     fn visit_expr(&mut self, expr: &'hir hir::Expr<'hir>) {
-        if_chain! {
-            if let ExprKind::Path(qpath) = &expr.kind;
-            if let QPath::Resolved(_, path) = qpath;
-
-            let (expr_ty, _) = walk_ptrs_ty_depth(self.cx.typeck_results().expr_ty(expr));
-            if match_type(self.cx, expr_ty, &paths::LINT);
-            then {
-                if let hir::def::Res::Def(DefKind::Static(..), _) = path.res {
-                    let lint_name = last_path_segment(qpath).ident.name;
-                    self.lints.push(sym_to_string(lint_name).to_ascii_lowercase());
-                } else if let Some(local) = get_parent_local(self.cx, expr) {
-                    if let Some(local_init) = local.init {
-                        intravisit::walk_expr(self, local_init);
-                    }
+        if let ExprKind::Path(qpath) = &expr.kind
+            && let QPath::Resolved(_, path) = qpath
+            && let (expr_ty, _) = walk_ptrs_ty_depth(self.cx.typeck_results().expr_ty(expr))
+            && match_type(self.cx, expr_ty, &paths::LINT)
+        {
+            if let hir::def::Res::Def(DefKind::Static(..), _) = path.res {
+                let lint_name = last_path_segment(qpath).ident.name;
+                self.lints.push(sym_to_string(lint_name).to_ascii_lowercase());
+            } else if let Some(local) = get_parent_local(self.cx, expr) {
+                if let Some(local_init) = local.init {
+                    intravisit::walk_expr(self, local_init);
                 }
             }
         }
@@ -1098,13 +982,11 @@ impl<'a, 'hir> intravisit::Visitor<'hir> for ApplicabilityResolver<'a, 'hir> {
     fn visit_expr(&mut self, expr: &'hir hir::Expr<'hir>) {
         let (expr_ty, _) = walk_ptrs_ty_depth(self.cx.typeck_results().expr_ty(expr));
 
-        if_chain! {
-            if match_type(self.cx, expr_ty, &paths::APPLICABILITY);
-            if let Some(local) = get_parent_local(self.cx, expr);
-            if let Some(local_init) = local.init;
-            then {
-                intravisit::walk_expr(self, local_init);
-            }
+        if match_type(self.cx, expr_ty, &paths::APPLICABILITY)
+            && let Some(local) = get_parent_local(self.cx, expr)
+            && let Some(local_init) = local.init
+        {
+            intravisit::walk_expr(self, local_init);
         };
 
         intravisit::walk_expr(self, expr);

@@ -1,4 +1,4 @@
-use crate::{Diagnostic, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 // Diagnostic: invalid-derive-target
 //
@@ -8,14 +8,13 @@ pub(crate) fn invalid_derive_target(
     ctx: &DiagnosticsContext<'_>,
     d: &hir::InvalidDeriveTarget,
 ) -> Diagnostic {
-    let display_range = ctx.sema.diagnostics_display_range(d.node.clone()).range;
+    let display_range = ctx.sema.diagnostics_display_range(d.node.clone());
 
     Diagnostic::new(
-        "invalid-derive-target",
+        DiagnosticCode::RustcHardError("E0774"),
         "`derive` may only be applied to `struct`s, `enum`s and `union`s",
         display_range,
     )
-    .severity(Severity::Error)
 }
 
 #[cfg(test)]

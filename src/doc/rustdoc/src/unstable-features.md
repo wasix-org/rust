@@ -38,6 +38,15 @@ future.
 Attempting to use these error numbers on stable will result in the code sample being interpreted as
 plain text.
 
+### `missing_doc_code_examples` lint
+
+This lint will emit a warning if an item doesn't have a code example in its documentation.
+It can be enabled using:
+
+```rust,ignore (nightly)
+#![deny(rustdoc::missing_doc_code_examples)]
+```
+
 ## Extensions to the `#[doc]` attribute
 
 These features operate by extending the `#[doc]` attribute, and thus can be caught by the compiler
@@ -177,9 +186,9 @@ Book][unstable-masked] and [its tracking issue][issue-masked].
 This is for Rust compiler internal use only.
 
 Since primitive types are defined in the compiler, there's no place to attach documentation
-attributes. The `#[doc(primitive)]` attribute is used by the standard library to provide a way
-to generate documentation for primitive types, and requires `#![feature(rustdoc_internals)]` to
-enable.
+attributes. The `#[rustc_doc_primitive = "..."]` attribute is used by the standard library to
+provide a way to generate documentation for primitive types, and requires `#![feature(rustc_attrs)]`
+to enable.
 
 ### Document keywords
 
@@ -191,10 +200,26 @@ To do so, the `#[doc(keyword = "...")]` attribute is used. Example:
 
 ```rust
 #![feature(rustdoc_internals)]
+#![allow(internal_features)]
 
 /// Some documentation about the keyword.
 #[doc(keyword = "keyword")]
 mod empty_mod {}
+```
+
+### Use the Rust logo as the crate logo
+
+This is for official Rust project use only.
+
+Internal Rustdoc pages like settings.html and scrape-examples-help.html show the Rust logo.
+This logo is tracked as a static resource. The attribute `#![doc(rust_logo)]` makes this same
+built-in resource act as the main logo.
+
+```rust
+#![feature(rustdoc_internals)]
+#![allow(internal_features)]
+#![doc(rust_logo)]
+//! This crate has the Rust(tm) branding on it.
 ```
 
 ## Effects of other nightly features
@@ -301,6 +326,8 @@ the source.
 
 ### `--show-type-layout`: add a section to each type's docs describing its memory layout
 
+* Tracking issue: [#113248](https://github.com/rust-lang/rust/issues/113248)
+
 Using this flag looks like this:
 
 ```bash
@@ -363,7 +390,7 @@ library, as an equivalent command-line argument is provided to `rustc` when buil
 This feature allows you to generate an index-page with a given markdown file. A good example of it
 is the [rust documentation index](https://doc.rust-lang.org/nightly/index.html).
 
-With this, you'll have a page which you can custom as much as you want at the top of your crates.
+With this, you'll have a page which you can customize as much as you want at the top of your crates.
 
 Using `index-page` option enables `enable-index-page` option as well.
 
@@ -601,10 +628,10 @@ Using this flag looks like this:
 
 ```bash
 $ rustdoc src/lib.rs -Z unstable-options \
-    --check-cfg='names()' --check-cfg='values(feature, "foo", "bar")'
+    --check-cfg='cfg(feature, values("foo", "bar"))'
 ```
 
-The example above check every well known names (`target_os`, `doc`, `test`, ... via `names()`)
+The example above check every well known names and values (`target_os`, `doc`, `test`, ...)
 and check the values of `feature`: `foo` and `bar`.
 
 ### `--generate-link-to-definition`: Generate links on types in source code
@@ -613,3 +640,47 @@ and check the values of `feature`: `foo` and `bar`.
 
 This flag enables the generation of links in the source code pages which allow the reader
 to jump to a type definition.
+
+### Custom CSS classes for code blocks
+
+```rust
+#![feature(custom_code_classes_in_docs)]
+
+/// ```custom,{class=language-c}
+/// int main(void) { return 0; }
+/// ```
+pub struct Bar;
+```
+
+The text `int main(void) { return 0; }` is rendered without highlighting in a code block
+with the class `language-c`. This can be used to highlight other languages through JavaScript
+libraries for example.
+
+Without the `custom` attribute, it would be generated as a Rust code example with an additional
+`language-C` CSS class. Therefore, if you specifically don't want it to be a Rust code example,
+don't forget to add the `custom` attribute.
+
+To be noted that you can replace `class=` with `.` to achieve the same result:
+
+```rust
+#![feature(custom_code_classes_in_docs)]
+
+/// ```custom,{.language-c}
+/// int main(void) { return 0; }
+/// ```
+pub struct Bar;
+```
+
+To be noted, `rust` and `.rust`/`class=rust` have different effects: `rust` indicates that this is
+a Rust code block whereas the two others add a "rust" CSS class on the code block.
+
+You can also use double quotes:
+
+```rust
+#![feature(custom_code_classes_in_docs)]
+
+/// ```"not rust" {."hello everyone"}
+/// int main(void) { return 0; }
+/// ```
+pub struct Bar;
+```

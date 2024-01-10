@@ -1,3 +1,4 @@
+use crate::errors;
 use crate::util::check_builtin_macro_attribute;
 
 use rustc_ast::ptr::P;
@@ -20,20 +21,19 @@ pub fn expand(
 
     // Allow using `#[alloc_error_handler]` on an item statement
     // FIXME - if we get deref patterns, use them to reduce duplication here
-    let (item, is_stmt, sig_span) =
-        if let Annotatable::Item(item) = &item
-            && let ItemKind::Fn(fn_kind) = &item.kind
-        {
-            (item, false, ecx.with_def_site_ctxt(fn_kind.sig.span))
-        } else if let Annotatable::Stmt(stmt) = &item
-            && let StmtKind::Item(item) = &stmt.kind
-            && let ItemKind::Fn(fn_kind) = &item.kind
-        {
-            (item, true, ecx.with_def_site_ctxt(fn_kind.sig.span))
-        } else {
-            ecx.sess.parse_sess.span_diagnostic.span_err(item.span(), "alloc_error_handler must be a function");
-            return vec![orig_item];
-        };
+    let (item, is_stmt, sig_span) = if let Annotatable::Item(item) = &item
+        && let ItemKind::Fn(fn_kind) = &item.kind
+    {
+        (item, false, ecx.with_def_site_ctxt(fn_kind.sig.span))
+    } else if let Annotatable::Stmt(stmt) = &item
+        && let StmtKind::Item(item) = &stmt.kind
+        && let ItemKind::Fn(fn_kind) = &item.kind
+    {
+        (item, true, ecx.with_def_site_ctxt(fn_kind.sig.span))
+    } else {
+        ecx.dcx().emit_err(errors::AllocErrorMustBeFn { span: item.span() });
+        return vec![orig_item];
+    };
 
     // Generate a bunch of new items using the AllocFnFactory
     let span = ecx.with_def_site_ctxt(item.span);

@@ -8,7 +8,11 @@
 //! Note that these tokens, unlike the tokens we feed into the parser, do
 //! include info about comments and whitespace.
 
+use rustc_dependencies::lexer as rustc_lexer;
+
 use std::ops;
+
+use rustc_lexer::unescape::{EscapeError, Mode};
 
 use crate::{
     SyntaxKind::{self, *},
@@ -36,7 +40,7 @@ impl<'a> LexedStr<'a> {
         };
 
         for token in rustc_lexer::tokenize(&text[conv.offset..]) {
-            let token_text = &text[conv.offset..][..token.len];
+            let token_text = &text[conv.offset..][..token.len as usize];
 
             conv.extend_token(&token.kind, token_text);
         }
@@ -49,8 +53,8 @@ impl<'a> LexedStr<'a> {
             return None;
         }
 
-        let token = rustc_lexer::first_token(text);
-        if token.len != text.len() {
+        let token = rustc_lexer::tokenize(text).next()?;
+        if token.len as usize != text.len() {
             return None;
         }
 
@@ -175,6 +179,10 @@ impl<'a> Converter<'a> {
                 rustc_lexer::TokenKind::Ident => {
                     SyntaxKind::from_keyword(token_text).unwrap_or(IDENT)
                 }
+                rustc_lexer::TokenKind::InvalidIdent => {
+                    err = "Ident contains invalid characters";
+                    IDENT
+                }
 
                 rustc_lexer::TokenKind::RawIdent => IDENT,
                 rustc_lexer::TokenKind::Literal { kind, .. } => {
@@ -217,10 +225,12 @@ impl<'a> Converter<'a> {
                 rustc_lexer::TokenKind::Caret => T![^],
                 rustc_lexer::TokenKind::Percent => T![%],
                 rustc_lexer::TokenKind::Unknown => ERROR,
+                rustc_lexer::TokenKind::UnknownPrefix if token_text == "builtin" => IDENT,
                 rustc_lexer::TokenKind::UnknownPrefix => {
                     err = "unknown literal prefix";
                     IDENT
                 }
+                rustc_lexer::TokenKind::Eof => EOF,
             }
         };
 
@@ -247,59 +257,145 @@ impl<'a> Converter<'a> {
             rustc_lexer::LiteralKind::Char { terminated } => {
                 if !terminated {
                     err = "Missing trailing `'` symbol to terminate the character literal";
+                } else {
+                    let text = &self.res.text[self.offset + 1..][..len - 1];
+                    let i = text.rfind('\'').unwrap();
+                    let text = &text[..i];
+                    if let Err(e) = rustc_lexer::unescape::unescape_char(text) {
+                        err = error_to_diagnostic_message(e, Mode::Char);
+                    }
                 }
                 CHAR
             }
             rustc_lexer::LiteralKind::Byte { terminated } => {
                 if !terminated {
                     err = "Missing trailing `'` symbol to terminate the byte literal";
+                } else {
+                    let text = &self.res.text[self.offset + 2..][..len - 2];
+                    let i = text.rfind('\'').unwrap();
+                    let text = &text[..i];
+                    if let Err(e) = rustc_lexer::unescape::unescape_byte(text) {
+                        err = error_to_diagnostic_message(e, Mode::Byte);
+                    }
                 }
+
                 BYTE
             }
             rustc_lexer::LiteralKind::Str { terminated } => {
                 if !terminated {
                     err = "Missing trailing `\"` symbol to terminate the string literal";
+                } else {
+                    let text = &self.res.text[self.offset + 1..][..len - 1];
+                    let i = text.rfind('"').unwrap();
+                    let text = &text[..i];
+                    err = unescape_string_error_message(text, Mode::Str);
                 }
                 STRING
             }
             rustc_lexer::LiteralKind::ByteStr { terminated } => {
                 if !terminated {
                     err = "Missing trailing `\"` symbol to terminate the byte string literal";
+                } else {
+                    let text = &self.res.text[self.offset + 2..][..len - 2];
+                    let i = text.rfind('"').unwrap();
+                    let text = &text[..i];
+                    err = unescape_string_error_message(text, Mode::ByteStr);
                 }
                 BYTE_STRING
             }
-            rustc_lexer::LiteralKind::RawStr { err: raw_str_err, .. } => {
-                if let Some(raw_str_err) = raw_str_err {
-                    err = match raw_str_err {
-                        rustc_lexer::RawStrError::InvalidStarter { .. } => "Missing `\"` symbol after `#` symbols to begin the raw string literal",
-                        rustc_lexer::RawStrError::NoTerminator { expected, found, .. } => if expected == found {
-                            "Missing trailing `\"` to terminate the raw string literal"
-                        } else {
-                            "Missing trailing `\"` with `#` symbols to terminate the raw string literal"
-                        },
-                        rustc_lexer::RawStrError::TooManyDelimiters { .. } => "Too many `#` symbols: raw strings may be delimited by up to 65535 `#` symbols",
-                    };
-                };
+            rustc_lexer::LiteralKind::CStr { terminated } => {
+                if !terminated {
+                    err = "Missing trailing `\"` symbol to terminate the string literal";
+                } else {
+                    let text = &self.res.text[self.offset + 2..][..len - 2];
+                    let i = text.rfind('"').unwrap();
+                    let text = &text[..i];
+                    err = unescape_string_error_message(text, Mode::CStr);
+                }
+                C_STRING
+            }
+            rustc_lexer::LiteralKind::RawStr { n_hashes } => {
+                if n_hashes.is_none() {
+                    err = "Invalid raw string literal";
+                }
                 STRING
             }
-            rustc_lexer::LiteralKind::RawByteStr { err: raw_str_err, .. } => {
-                if let Some(raw_str_err) = raw_str_err {
-                    err = match raw_str_err {
-                        rustc_lexer::RawStrError::InvalidStarter { .. } => "Missing `\"` symbol after `#` symbols to begin the raw byte string literal",
-                        rustc_lexer::RawStrError::NoTerminator { expected, found, .. } => if expected == found {
-                            "Missing trailing `\"` to terminate the raw byte string literal"
-                        } else {
-                            "Missing trailing `\"` with `#` symbols to terminate the raw byte string literal"
-                        },
-                        rustc_lexer::RawStrError::TooManyDelimiters { .. } => "Too many `#` symbols: raw byte strings may be delimited by up to 65535 `#` symbols",
-                    };
-                };
-
+            rustc_lexer::LiteralKind::RawByteStr { n_hashes } => {
+                if n_hashes.is_none() {
+                    err = "Invalid raw string literal";
+                }
                 BYTE_STRING
+            }
+            rustc_lexer::LiteralKind::RawCStr { n_hashes } => {
+                if n_hashes.is_none() {
+                    err = "Invalid raw string literal";
+                }
+                C_STRING
             }
         };
 
         let err = if err.is_empty() { None } else { Some(err) };
         self.push(syntax_kind, len, err);
     }
+}
+
+fn error_to_diagnostic_message(error: EscapeError, mode: Mode) -> &'static str {
+    match error {
+        EscapeError::ZeroChars => "empty character literal",
+        EscapeError::MoreThanOneChar => "character literal may only contain one codepoint",
+        EscapeError::LoneSlash => "",
+        EscapeError::InvalidEscape if mode == Mode::Byte || mode == Mode::ByteStr => {
+            "unknown byte escape"
+        }
+        EscapeError::InvalidEscape => "unknown character escape",
+        EscapeError::BareCarriageReturn => "",
+        EscapeError::BareCarriageReturnInRawString => "",
+        EscapeError::EscapeOnlyChar if mode == Mode::Byte => "byte constant must be escaped",
+        EscapeError::EscapeOnlyChar => "character constant must be escaped",
+        EscapeError::TooShortHexEscape => "numeric character escape is too short",
+        EscapeError::InvalidCharInHexEscape => "invalid character in numeric character escape",
+        EscapeError::OutOfRangeHexEscape => "out of range hex escape",
+        EscapeError::NoBraceInUnicodeEscape => "incorrect unicode escape sequence",
+        EscapeError::InvalidCharInUnicodeEscape => "invalid character in unicode escape",
+        EscapeError::EmptyUnicodeEscape => "empty unicode escape",
+        EscapeError::UnclosedUnicodeEscape => "unterminated unicode escape",
+        EscapeError::LeadingUnderscoreUnicodeEscape => "invalid start of unicode escape",
+        EscapeError::OverlongUnicodeEscape => "overlong unicode escape",
+        EscapeError::LoneSurrogateUnicodeEscape => "invalid unicode character escape",
+        EscapeError::OutOfRangeUnicodeEscape => "invalid unicode character escape",
+        EscapeError::UnicodeEscapeInByte => "unicode escape in byte string",
+        EscapeError::NonAsciiCharInByte if mode == Mode::Byte => {
+            "non-ASCII character in byte literal"
+        }
+        EscapeError::NonAsciiCharInByte if mode == Mode::ByteStr => {
+            "non-ASCII character in byte string literal"
+        }
+        EscapeError::NonAsciiCharInByte => "non-ASCII character in raw byte string literal",
+        EscapeError::UnskippedWhitespaceWarning => "",
+        EscapeError::MultipleSkippedLinesWarning => "",
+    }
+}
+
+fn unescape_string_error_message(text: &str, mode: Mode) -> &'static str {
+    let mut error_message = "";
+    match mode {
+        Mode::CStr => {
+            rustc_lexer::unescape::unescape_c_string(text, mode, &mut |_, res| {
+                if let Err(e) = res {
+                    error_message = error_to_diagnostic_message(e, mode);
+                }
+            });
+        }
+        Mode::ByteStr | Mode::Str => {
+            rustc_lexer::unescape::unescape_literal(text, mode, &mut |_, res| {
+                if let Err(e) = res {
+                    error_message = error_to_diagnostic_message(e, mode);
+                }
+            });
+        }
+        _ => {
+            // Other Modes are not supported yet or do not apply
+        }
+    }
+    error_message
 }

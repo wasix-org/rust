@@ -1,4 +1,4 @@
-//! Make sure that a retag acts like a write for the data race model.
+//! Make sure that a retag acts like a read for the data race model.
 //@compile-flags: -Zmiri-preemption-rate=0
 #[derive(Copy, Clone)]
 struct SendPtr(*mut u8);
@@ -15,7 +15,7 @@ fn thread_1(p: SendPtr) {
 fn thread_2(p: SendPtr) {
     let p = p.0;
     unsafe {
-        *p = 5; //~ ERROR: Data race detected between (1) Read on thread `<unnamed>` and (2) Write on thread `<unnamed>`
+        *p = 5; //~ ERROR: Data race detected between (1) non-atomic read on thread `<unnamed>` and (2) non-atomic write on thread `<unnamed>`
     }
 }
 

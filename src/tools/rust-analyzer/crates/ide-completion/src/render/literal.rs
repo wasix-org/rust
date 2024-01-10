@@ -1,7 +1,10 @@
 //! Renderer for `enum` variants.
 
-use hir::{db::HirDatabase, Documentation, HasAttrs, StructKind};
-use ide_db::SymbolKind;
+use hir::{db::HirDatabase, StructKind};
+use ide_db::{
+    documentation::{Documentation, HasDocs},
+    SymbolKind,
+};
 
 use crate::{
     context::{CompletionContext, PathCompletionCtx, PathKind},
@@ -71,8 +74,10 @@ fn render(
         }
         None => (name.clone().into(), name.into(), false),
     };
-    let (qualified_name, escaped_qualified_name) =
-        (qualified_name.unescaped().to_string(), qualified_name.to_string());
+    let (qualified_name, escaped_qualified_name) = (
+        qualified_name.unescaped().display(ctx.db()).to_string(),
+        qualified_name.display(ctx.db()).to_string(),
+    );
     let snippet_cap = ctx.snippet_cap();
 
     let mut rendered = match kind {
@@ -98,7 +103,7 @@ fn render(
     }
     let label = format_literal_label(&qualified_name, kind, snippet_cap);
     let lookup = if qualified {
-        format_literal_lookup(&short_qualified_name.to_string(), kind)
+        format_literal_lookup(&short_qualified_name.display(ctx.db()).to_string(), kind)
     } else {
         format_literal_lookup(&qualified_name, kind)
     };

@@ -1,17 +1,17 @@
 #![allow(unused)]
 
+use rand::RngCore;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use rand::RngCore;
 
 /// Copied from `std::test_helpers::test_rng`, since these tests rely on the
 /// seed not being the same for every RNG invocation too.
 #[track_caller]
 pub(crate) fn test_rng() -> rand_xorshift::XorShiftRng {
     use core::hash::{BuildHasher, Hash, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let mut hasher = std::hash::RandomState::new().build_hasher();
     core::panic::Location::caller().hash(&mut hasher);
     let hc64 = hasher.finish();
     let seed_vec = hc64.to_le_bytes().into_iter().chain(0u8..8).collect::<Vec<u8>>();
@@ -20,15 +20,15 @@ pub(crate) fn test_rng() -> rand_xorshift::XorShiftRng {
 }
 
 // Copied from std::sys_common::io
-pub struct TempDir(PathBuf);
+pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
-    pub fn join(&self, path: &str) -> PathBuf {
+    pub(crate) fn join(&self, path: &str) -> PathBuf {
         let TempDir(ref p) = *self;
         p.join(path)
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         let TempDir(ref p) = *self;
         p
     }
@@ -49,7 +49,7 @@ impl Drop for TempDir {
 }
 
 #[track_caller] // for `test_rng`
-pub fn tmpdir() -> TempDir {
+pub(crate) fn tmpdir() -> TempDir {
     let p = env::temp_dir();
     let mut r = test_rng();
     let ret = p.join(&format!("rust-{}", r.next_u32()));

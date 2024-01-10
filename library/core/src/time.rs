@@ -461,6 +461,27 @@ impl Duration {
         self.secs as u128 * NANOS_PER_SEC as u128 + self.nanos.0 as u128
     }
 
+    /// Computes the absolute difference between `self` and `other`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// #![feature(duration_abs_diff)]
+    /// use std::time::Duration;
+    ///
+    /// assert_eq!(Duration::new(100, 0).abs_diff(Duration::new(80, 0)), Duration::new(20, 0));
+    /// assert_eq!(Duration::new(100, 400_000_000).abs_diff(Duration::new(110, 0)), Duration::new(9, 600_000_000));
+    /// ```
+    #[unstable(feature = "duration_abs_diff", issue = "117618")]
+    #[must_use = "this returns the result of the operation, \
+                  without modifying the original"]
+    #[inline]
+    pub const fn abs_diff(self, other: Duration) -> Duration {
+        if let Some(res) = self.checked_sub(other) { res } else { other.checked_sub(self).unwrap() }
+    }
+
     /// Checked `Duration` addition. Computes `self + other`, returning [`None`]
     /// if overflow occurred.
     ///
@@ -656,10 +677,10 @@ impl Duration {
     #[rustc_const_stable(feature = "duration_consts_2", since = "1.58.0")]
     pub const fn checked_div(self, rhs: u32) -> Option<Duration> {
         if rhs != 0 {
-            let secs = self.secs / (rhs as u64);
-            let carry = self.secs - secs * (rhs as u64);
-            let extra_nanos = carry * (NANOS_PER_SEC as u64) / (rhs as u64);
-            let nanos = self.nanos.0 / rhs + (extra_nanos as u32);
+            let (secs, extra_secs) = (self.secs / (rhs as u64), self.secs % (rhs as u64));
+            let (mut nanos, extra_nanos) = (self.nanos.0 / rhs, self.nanos.0 % rhs);
+            nanos +=
+                ((extra_secs * (NANOS_PER_SEC as u64) + extra_nanos as u64) / (rhs as u64)) as u32;
             debug_assert!(nanos < NANOS_PER_SEC);
             Some(Duration::new(secs, nanos))
         } else {
@@ -735,8 +756,7 @@ impl Duration {
     #[stable(feature = "duration_float", since = "1.38.0")]
     #[must_use]
     #[inline]
-    #[rustc_const_unstable(feature = "duration_consts_float", issue = "72440")]
-    pub const fn from_secs_f64(secs: f64) -> Duration {
+    pub fn from_secs_f64(secs: f64) -> Duration {
         match Duration::try_from_secs_f64(secs) {
             Ok(v) => v,
             Err(e) => panic!("{}", e.description()),
@@ -773,8 +793,7 @@ impl Duration {
     #[stable(feature = "duration_float", since = "1.38.0")]
     #[must_use]
     #[inline]
-    #[rustc_const_unstable(feature = "duration_consts_float", issue = "72440")]
-    pub const fn from_secs_f32(secs: f32) -> Duration {
+    pub fn from_secs_f32(secs: f32) -> Duration {
         match Duration::try_from_secs_f32(secs) {
             Ok(v) => v,
             Err(e) => panic!("{}", e.description()),
@@ -798,8 +817,7 @@ impl Duration {
     #[must_use = "this returns the result of the operation, \
                   without modifying the original"]
     #[inline]
-    #[rustc_const_unstable(feature = "duration_consts_float", issue = "72440")]
-    pub const fn mul_f64(self, rhs: f64) -> Duration {
+    pub fn mul_f64(self, rhs: f64) -> Duration {
         Duration::from_secs_f64(rhs * self.as_secs_f64())
     }
 
@@ -820,8 +838,7 @@ impl Duration {
     #[must_use = "this returns the result of the operation, \
                   without modifying the original"]
     #[inline]
-    #[rustc_const_unstable(feature = "duration_consts_float", issue = "72440")]
-    pub const fn mul_f32(self, rhs: f32) -> Duration {
+    pub fn mul_f32(self, rhs: f32) -> Duration {
         Duration::from_secs_f32(rhs * self.as_secs_f32())
     }
 
@@ -842,8 +859,7 @@ impl Duration {
     #[must_use = "this returns the result of the operation, \
                   without modifying the original"]
     #[inline]
-    #[rustc_const_unstable(feature = "duration_consts_float", issue = "72440")]
-    pub const fn div_f64(self, rhs: f64) -> Duration {
+    pub fn div_f64(self, rhs: f64) -> Duration {
         Duration::from_secs_f64(self.as_secs_f64() / rhs)
     }
 
@@ -866,8 +882,7 @@ impl Duration {
     #[must_use = "this returns the result of the operation, \
                   without modifying the original"]
     #[inline]
-    #[rustc_const_unstable(feature = "duration_consts_float", issue = "72440")]
-    pub const fn div_f32(self, rhs: f32) -> Duration {
+    pub fn div_f32(self, rhs: f32) -> Duration {
         Duration::from_secs_f32(self.as_secs_f32() / rhs)
     }
 
@@ -916,6 +931,7 @@ impl Duration {
 impl Add for Duration {
     type Output = Duration;
 
+    #[inline]
     fn add(self, rhs: Duration) -> Duration {
         self.checked_add(rhs).expect("overflow when adding durations")
     }
@@ -923,6 +939,7 @@ impl Add for Duration {
 
 #[stable(feature = "time_augmented_assignment", since = "1.9.0")]
 impl AddAssign for Duration {
+    #[inline]
     fn add_assign(&mut self, rhs: Duration) {
         *self = *self + rhs;
     }
@@ -932,6 +949,7 @@ impl AddAssign for Duration {
 impl Sub for Duration {
     type Output = Duration;
 
+    #[inline]
     fn sub(self, rhs: Duration) -> Duration {
         self.checked_sub(rhs).expect("overflow when subtracting durations")
     }
@@ -939,6 +957,7 @@ impl Sub for Duration {
 
 #[stable(feature = "time_augmented_assignment", since = "1.9.0")]
 impl SubAssign for Duration {
+    #[inline]
     fn sub_assign(&mut self, rhs: Duration) {
         *self = *self - rhs;
     }
@@ -948,6 +967,7 @@ impl SubAssign for Duration {
 impl Mul<u32> for Duration {
     type Output = Duration;
 
+    #[inline]
     fn mul(self, rhs: u32) -> Duration {
         self.checked_mul(rhs).expect("overflow when multiplying duration by scalar")
     }
@@ -957,6 +977,7 @@ impl Mul<u32> for Duration {
 impl Mul<Duration> for u32 {
     type Output = Duration;
 
+    #[inline]
     fn mul(self, rhs: Duration) -> Duration {
         rhs * self
     }
@@ -964,6 +985,7 @@ impl Mul<Duration> for u32 {
 
 #[stable(feature = "time_augmented_assignment", since = "1.9.0")]
 impl MulAssign<u32> for Duration {
+    #[inline]
     fn mul_assign(&mut self, rhs: u32) {
         *self = *self * rhs;
     }
@@ -973,6 +995,7 @@ impl MulAssign<u32> for Duration {
 impl Div<u32> for Duration {
     type Output = Duration;
 
+    #[inline]
     fn div(self, rhs: u32) -> Duration {
         self.checked_div(rhs).expect("divide by zero error when dividing duration by scalar")
     }
@@ -980,6 +1003,7 @@ impl Div<u32> for Duration {
 
 #[stable(feature = "time_augmented_assignment", since = "1.9.0")]
 impl DivAssign<u32> for Duration {
+    #[inline]
     fn div_assign(&mut self, rhs: u32) {
         *self = *self / rhs;
     }
@@ -1178,7 +1202,7 @@ impl fmt::Debug for Duration {
                         emit_without_padding(f)
                     } else {
                         // We need to add padding. Use the `Formatter::padding` helper function.
-                        let default_align = crate::fmt::rt::v1::Alignment::Left;
+                        let default_align = fmt::Alignment::Left;
                         let post_padding = f.padding(requested_w - actual_w, default_align)?;
                         emit_without_padding(f)?;
                         post_padding.write(f)
@@ -1402,9 +1426,8 @@ impl Duration {
     /// assert_eq!(res, Ok(Duration::new(1, 2_929_688)));
     /// ```
     #[stable(feature = "duration_checked_float", since = "1.66.0")]
-    #[rustc_const_unstable(feature = "duration_consts_float", issue = "72440")]
     #[inline]
-    pub const fn try_from_secs_f32(secs: f32) -> Result<Duration, TryFromFloatSecsError> {
+    pub fn try_from_secs_f32(secs: f32) -> Result<Duration, TryFromFloatSecsError> {
         try_from_secs!(
             secs = secs,
             mantissa_bits = 23,
@@ -1479,9 +1502,8 @@ impl Duration {
     /// assert_eq!(res, Ok(Duration::new(1, 2_929_688)));
     /// ```
     #[stable(feature = "duration_checked_float", since = "1.66.0")]
-    #[rustc_const_unstable(feature = "duration_consts_float", issue = "72440")]
     #[inline]
-    pub const fn try_from_secs_f64(secs: f64) -> Result<Duration, TryFromFloatSecsError> {
+    pub fn try_from_secs_f64(secs: f64) -> Result<Duration, TryFromFloatSecsError> {
         try_from_secs!(
             secs = secs,
             mantissa_bits = 52,

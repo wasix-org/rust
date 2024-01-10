@@ -3,6 +3,7 @@
 use std::{cmp::Ordering, fmt, ops};
 
 use rowan::GreenToken;
+use smol_str::SmolStr;
 
 pub struct TokenText<'a>(pub(crate) Repr<'a>);
 
@@ -12,7 +13,7 @@ pub(crate) enum Repr<'a> {
 }
 
 impl<'a> TokenText<'a> {
-    pub(crate) fn borrowed(text: &'a str) -> Self {
+    pub fn borrowed(text: &'a str) -> Self {
         TokenText(Repr::Borrowed(text))
     }
 
@@ -44,6 +45,12 @@ impl AsRef<str> for TokenText<'_> {
 impl From<TokenText<'_>> for String {
     fn from(token_text: TokenText<'_>) -> Self {
         token_text.as_str().into()
+    }
+}
+
+impl From<TokenText<'_>> for SmolStr {
+    fn from(token_text: TokenText<'_>) -> Self {
+        SmolStr::new(token_text.as_str())
     }
 }
 

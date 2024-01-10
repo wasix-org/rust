@@ -6,15 +6,12 @@ use rustc_hir as hir;
 use rustc_hir::intravisit::{walk_body, walk_expr, walk_inf, walk_ty, Visitor};
 use rustc_hir::{Body, Expr, ExprKind, GenericArg, Item, ItemKind, QPath, TyKind};
 use rustc_hir_analysis::hir_ty_to_ty;
-use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::{Ty, TypeckResults};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
+use rustc_session::declare_lint_pass;
 use rustc_span::symbol::sym;
-
-use if_chain::if_chain;
+use rustc_span::Span;
 
 use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
 use clippy_utils::source::{snippet, snippet_opt};
@@ -36,7 +33,7 @@ declare_clippy_lint! {
     /// pieces of code, possibly including external crates.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::HashMap;
     /// # use std::hash::{Hash, BuildHasher};
     /// # trait Serialize {};
@@ -45,7 +42,7 @@ declare_clippy_lint! {
     /// pub fn foo(map: &mut HashMap<i32, i32>) { }
     /// ```
     /// could be rewritten as
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::HashMap;
     /// # use std::hash::{Hash, BuildHasher};
     /// # trait Serialize {};
@@ -121,7 +118,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                 vis.visit_ty(impl_.self_ty);
 
                 for target in &vis.found {
-                    if item.span.ctxt() != target.span().ctxt() {
+                    if !item.span.eq_ctxt(target.span()) {
                         return;
                     }
 
@@ -162,7 +159,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                     vis.visit_ty(ty);
 
                     for target in &vis.found {
-                        if in_external_macro(cx.sess(), generics.span) {
+                        if generics.span.from_expansion() {
                             continue;
                         }
                         let generics_suggestion_span = generics.span.substitute_dummy({
@@ -338,42 +335,38 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'a, 'b, 't
     }
 
     fn visit_expr(&mut self, e: &'tcx Expr<'_>) {
-        if_chain! {
-            if let ExprKind::Call(fun, args) = e.kind;
-            if let ExprKind::Path(QPath::TypeRelative(ty, method)) = fun.kind;
-            if let TyKind::Path(QPath::Resolved(None, ty_path)) = ty.kind;
-            if let Some(ty_did) = ty_path.res.opt_def_id();
-            then {
-                if self.target.ty() != self.maybe_typeck_results.unwrap().expr_ty(e) {
-                    return;
-                }
+        if let ExprKind::Call(fun, args) = e.kind
+            && let ExprKind::Path(QPath::TypeRelative(ty, method)) = fun.kind
+            && let TyKind::Path(QPath::Resolved(None, ty_path)) = ty.kind
+            && let Some(ty_did) = ty_path.res.opt_def_id()
+        {
+            if self.target.ty() != self.maybe_typeck_results.unwrap().expr_ty(e) {
+                return;
+            }
 
-                if self.cx.tcx.is_diagnostic_item(sym::HashMap, ty_did) {
-                    if method.ident.name == sym::new {
-                        self.suggestions
-                            .insert(e.span, "HashMap::default()".to_string());
-                    } else if method.ident.name == sym!(with_capacity) {
-                        self.suggestions.insert(
-                            e.span,
-                            format!(
-                                "HashMap::with_capacity_and_hasher({}, Default::default())",
-                                snippet(self.cx, args[0].span, "capacity"),
-                            ),
-                        );
-                    }
-                } else if self.cx.tcx.is_diagnostic_item(sym::HashSet, ty_did) {
-                    if method.ident.name == sym::new {
-                        self.suggestions
-                            .insert(e.span, "HashSet::default()".to_string());
-                    } else if method.ident.name == sym!(with_capacity) {
-                        self.suggestions.insert(
-                            e.span,
-                            format!(
-                                "HashSet::with_capacity_and_hasher({}, Default::default())",
-                                snippet(self.cx, args[0].span, "capacity"),
-                            ),
-                        );
-                    }
+            if self.cx.tcx.is_diagnostic_item(sym::HashMap, ty_did) {
+                if method.ident.name == sym::new {
+                    self.suggestions.insert(e.span, "HashMap::default()".to_string());
+                } else if method.ident.name == sym!(with_capacity) {
+                    self.suggestions.insert(
+                        e.span,
+                        format!(
+                            "HashMap::with_capacity_and_hasher({}, Default::default())",
+                            snippet(self.cx, args[0].span, "capacity"),
+                        ),
+                    );
+                }
+            } else if self.cx.tcx.is_diagnostic_item(sym::HashSet, ty_did) {
+                if method.ident.name == sym::new {
+                    self.suggestions.insert(e.span, "HashSet::default()".to_string());
+                } else if method.ident.name == sym!(with_capacity) {
+                    self.suggestions.insert(
+                        e.span,
+                        format!(
+                            "HashSet::with_capacity_and_hasher({}, Default::default())",
+                            snippet(self.cx, args[0].span, "capacity"),
+                        ),
+                    );
                 }
             }
         }

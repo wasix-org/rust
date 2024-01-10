@@ -36,7 +36,7 @@ PathSegment =
   '::'? NameRef
 | NameRef GenericArgList?
 | NameRef ParamList RetType?
-| '<' PathType ('as' PathType)? '>'
+| '<' Type ('as' PathType)? '>'
 
 GenericArgList =
   '::'? '<' (GenericArg (',' GenericArg)* ','?)? '>'
@@ -51,7 +51,9 @@ TypeArg =
   Type
 
 AssocTypeArg =
-  NameRef GenericArgList? (':' TypeBoundList | ('=' Type | ConstArg))
+  NameRef
+  (GenericArgList | ParamList RetType?)?
+  (':' TypeBoundList | ('=' Type | ConstArg))
 
 LifetimeArg =
   Lifetime
@@ -69,6 +71,12 @@ TokenTree =
 
 MacroItems =
   Item*
+
+MacroEagerInput =
+  '(' (Expr (',' Expr)* ','?)? ')'
+| '{' (Expr (',' Expr)* ','?)? '}'
+| '[' (Expr (',' Expr)* ','?)? ']'
+
 
 MacroStmts =
   statements:Stmt*
@@ -97,6 +105,7 @@ Item =
 | Static
 | Struct
 | Trait
+| TraitAlias
 | TypeAlias
 | Union
 | Use
@@ -240,10 +249,11 @@ Trait =
   Attr* Visibility?
   'unsafe'? 'auto'?
   'trait' Name GenericParamList?
-  (
-    (':' TypeBoundList?)? WhereClause? AssocItemList
-    | '=' TypeBoundList? WhereClause? ';'
-  )
+  (':' TypeBoundList?)? WhereClause? AssocItemList
+
+TraitAlias =
+  Attr* Visibility?
+  'trait' Name GenericParamList? '=' TypeBoundList? WhereClause? ';'
 
 AssocItemList =
   '{' Attr* AssocItem* '}'
@@ -286,7 +296,7 @@ TypeParam =
 
 ConstParam =
   Attr* 'const' Name ':' Type
-  ('=' default_val:Expr)?
+  ('=' default_val:ConstArg)?
 
 LifetimeParam =
   Attr* Lifetime (':' TypeBoundList?)?
@@ -330,10 +340,10 @@ ExprStmt =
 
 Expr =
   ArrayExpr
+| AsmExpr
 | AwaitExpr
 | BinExpr
 | BlockExpr
-| BoxExpr
 | BreakExpr
 | CallExpr
 | CastExpr
@@ -341,6 +351,7 @@ Expr =
 | ContinueExpr
 | FieldExpr
 | ForExpr
+| FormatArgsExpr
 | IfExpr
 | IndexExpr
 | Literal
@@ -348,6 +359,7 @@ Expr =
 | MacroExpr
 | MatchExpr
 | MethodCallExpr
+| OffsetOfExpr
 | ParenExpr
 | PathExpr
 | PrefixExpr
@@ -362,6 +374,21 @@ Expr =
 | YeetExpr
 | LetExpr
 | UnderscoreExpr
+
+OffsetOfExpr =
+  Attr* 'builtin' '#' 'offset_of' '(' Type ',' fields:(NameRef ('.' NameRef)* ) ')'
+
+AsmExpr =
+  Attr* 'builtin' '#' 'asm' '(' Expr ')'
+
+FormatArgsExpr =
+  Attr* 'builtin' '#' 'format_args' '('
+  template:Expr
+  (',' args:(FormatArgsArg (',' FormatArgsArg)* ','?)? )?
+  ')'
+
+FormatArgsArg =
+  (Name '=')? Expr
 
 MacroExpr =
   MacroCall
@@ -516,9 +543,6 @@ UnderscoreExpr =
 AwaitExpr =
   Attr* Expr '.' 'await'
 
-BoxExpr =
-  Attr* 'box' Expr
-
 //*************************//
 //          Types          //
 //*************************//
@@ -561,7 +585,7 @@ RefType =
   '&' Lifetime? 'mut'? Type
 
 ArrayType =
-  '[' Type ';' Expr ']'
+  '[' Type ';' ConstArg ']'
 
 SliceType =
   '[' Type ']'
@@ -579,7 +603,7 @@ ImplTraitType =
   'impl' TypeBoundList
 
 DynTraitType =
-  'dyn' TypeBoundList
+  'dyn'? TypeBoundList
 
 TypeBoundList =
   bounds:(TypeBound ('+' TypeBound)* '+'?)
@@ -611,7 +635,7 @@ Pat =
 | ConstBlockPat
 
 LiteralPat =
-  Literal
+  '-'? Literal
 
 IdentPat =
   Attr* 'ref'? 'mut'? Name ('@' Pat)?

@@ -1,11 +1,11 @@
 // Adapted from https://github.com/sunfishcode/mir2cranelift/blob/master/rust-examples/nocore-hello-world.rs
 
 #![feature(
-    no_core, unboxed_closures, start, lang_items, box_syntax, never_type, linkage,
+    no_core, unboxed_closures, start, lang_items, never_type, linkage,
     extern_types, thread_local
 )]
 #![no_core]
-#![allow(dead_code, non_camel_case_types)]
+#![allow(dead_code, internal_features, non_camel_case_types)]
 
 extern crate mini_core;
 
@@ -85,6 +85,7 @@ fn start<T: Termination + 'static>(
     main: fn() -> T,
     argc: isize,
     argv: *const *const u8,
+    _sigpipe: u8,
 ) -> isize {
     if argc == 3 {
         unsafe { puts(*argv); }
@@ -97,6 +98,9 @@ fn start<T: Termination + 'static>(
 }
 
 static mut NUM: u8 = 6 * 7;
+
+// FIXME: Use `SyncUnsafeCell` instead of allowing `static_mut_ref` lint
+#[allow(static_mut_ref)]
 static NUM_REF: &'static u8 = unsafe { &NUM };
 
 macro_rules! assert {
@@ -151,7 +155,8 @@ fn main() {
     let slice = &[0, 1] as &[i32];
     let slice_ptr = slice as *const [i32] as *const i32;
 
-    assert_eq!(slice_ptr as usize % 4, 0);
+    let align = intrinsics::min_align_of::<*const i32>();
+    assert_eq!(slice_ptr as usize % align, 0);
 
     //return;
 
@@ -162,11 +167,14 @@ fn main() {
         let ptr: *const u8 = hello as *const [u8] as *const u8;
         puts(ptr);
 
-        let world: Box<&str> = box "World!\0";
+        let world: Box<&str> = Box::new("World!\0");
         puts(*world as *const str as *const u8);
         world as Box<dyn SomeTrait>;
 
         assert_eq!(intrinsics::bitreverse(0b10101000u8), 0b00010101u8);
+        assert_eq!(intrinsics::bitreverse(0xddccu16), 0x33bbu16);
+        assert_eq!(intrinsics::bitreverse(0xffee_ddccu32), 0x33bb77ffu32);
+        assert_eq!(intrinsics::bitreverse(0x1234_5678_ffee_ddccu64), 0x33bb77ff1e6a2c48u64);
 
         assert_eq!(intrinsics::bswap(0xabu8), 0xabu8);
         assert_eq!(intrinsics::bswap(0xddccu16), 0xccddu16);
@@ -182,7 +190,10 @@ fn main() {
         let a: &dyn SomeTrait = &"abc\0";
         a.object_safe();
 
+        #[cfg(target_arch="x86_64")]
         assert_eq!(intrinsics::size_of_val(a) as u8, 16);
+        #[cfg(target_arch="m68k")]
+        assert_eq!(intrinsics::size_of_val(a) as u8, 8);
         assert_eq!(intrinsics::size_of_val(&0u32) as u8, 4);
 
         assert_eq!(intrinsics::min_align_of::<u16>() as u8, 2);
@@ -222,12 +233,13 @@ fn main() {
         }
     }
 
-    let _ = box NoisyDrop {
+    let _ = Box::new(NoisyDrop {
         text: "Boxed outer got dropped!\0",
         inner: NoisyDropInner,
-    } as Box<dyn SomeTrait>;
+    }) as Box<dyn SomeTrait>;
 
     const FUNC_REF: Option<fn()> = Some(main);
+    #[allow(unreachable_code)]
     match FUNC_REF {
         Some(_) => {},
         None => assert!(false),

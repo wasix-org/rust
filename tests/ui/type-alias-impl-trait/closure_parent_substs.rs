@@ -1,5 +1,5 @@
 // When WF checking the hidden type in the ParamEnv of the opaque type,
-// one complication arises when the hidden type is a closure/generator:
+// one complication arises when the hidden type is a closure/coroutine:
 // the "parent_substs" of the type may reference lifetime parameters
 // not present in the opaque type.
 // These region parameters are not really useful in this check.
@@ -12,7 +12,7 @@
 
 // Basic test
 mod test1 {
-    // Hidden type = Closure['_#0r]
+    // Hidden type = Closure['?0]
     type Opaque = impl Sized;
 
     fn define<'a: 'a>() -> Opaque {
@@ -24,8 +24,8 @@ mod test1 {
 mod test2 {
     trait Trait {}
 
-    // Hidden type = Closure['a, '_#0r, '_#1r]
-    // Constraints = [('_#0r: 'a), ('a: '_#1r)]
+    // Hidden type = Closure['a, '?0, '?1]
+    // Constraints = [('?0: 'a), ('a: '?1)]
     type Opaque<'a>
     where
         &'a (): Trait,
@@ -45,8 +45,8 @@ mod test2 {
 mod test3 {
     trait Trait {}
 
-    // Hidden type = Closure['a, 'b, '_#0r]
-    // Constraints = [('_#0r: 'a), ('_#0r: 'b)]
+    // Hidden type = Closure['a, 'b, '?0]
+    // Constraints = [('?0: 'a), ('?0: 'b)]
     type Opaque<'a, 'b>
     where
         (&'a (), &'b ()): Trait,

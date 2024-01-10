@@ -1,3 +1,6 @@
+// revisions: current next
+//[next] compile-flags: -Znext-solver
+
 #![feature(unsize)]
 
 use std::marker::Unsize;

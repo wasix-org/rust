@@ -3,10 +3,11 @@
 //!
 //! See [Eating your own dog food](https://en.wikipedia.org/wiki/Eating_your_own_dog_food) for context
 
-#![feature(once_cell)]
+#![feature(lazy_cell)]
 #![cfg_attr(feature = "deny-warnings", deny(warnings))]
 #![warn(rust_2018_idioms, unused_lifetimes)]
 
+use itertools::Itertools;
 use std::path::PathBuf;
 use std::process::Command;
 use test_utils::IS_RUSTC_TEST_SUITE;
@@ -19,17 +20,28 @@ fn dogfood_clippy() {
         return;
     }
 
+    let mut failed_packages = Vec::new();
+
     // "" is the root package
-    for package in &[
+    for package in [
         "",
         "clippy_dev",
         "clippy_lints",
         "clippy_utils",
+        "clippy_config",
         "lintcheck",
         "rustc_tools_util",
     ] {
-        run_clippy_for_package(package, &["-D", "clippy::all", "-D", "clippy::pedantic"]);
+        if !run_clippy_for_package(package, &["-D", "clippy::all", "-D", "clippy::pedantic"]) {
+            failed_packages.push(if package.is_empty() { "root" } else { package });
+        }
     }
+
+    assert!(
+        failed_packages.is_empty(),
+        "Dogfood failed for packages `{}`",
+        failed_packages.iter().join(", "),
+    );
 }
 
 #[test]
@@ -45,7 +57,10 @@ fn run_metadata_collection_lint() {
 
     // Run collection as is
     std::env::set_var("ENABLE_METADATA_COLLECTION", "1");
-    run_clippy_for_package("clippy_lints", &["-A", "unfulfilled_lint_expectations"]);
+    assert!(run_clippy_for_package(
+        "clippy_lints",
+        &["-A", "unfulfilled_lint_expectations"]
+    ));
 
     // Check if cargo caching got in the way
     if let Ok(file) = File::open(metadata_output_path) {
@@ -68,10 +83,14 @@ fn run_metadata_collection_lint() {
     .unwrap();
 
     // Running the collection again
-    run_clippy_for_package("clippy_lints", &["-A", "unfulfilled_lint_expectations"]);
+    assert!(run_clippy_for_package(
+        "clippy_lints",
+        &["-A", "unfulfilled_lint_expectations"]
+    ));
 }
 
-fn run_clippy_for_package(project: &str, args: &[&str]) {
+#[must_use]
+fn run_clippy_for_package(project: &str, args: &[&str]) -> bool {
     let root_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let mut command = Command::new(&*test_utils::CARGO_CLIPPY_PATH);
@@ -107,5 +126,5 @@ fn run_clippy_for_package(project: &str, args: &[&str]) {
     println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
     println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
 
-    assert!(output.status.success());
+    output.status.success()
 }

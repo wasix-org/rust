@@ -3,9 +3,8 @@
 use rustc_ast::InlineAsmTemplatePiece;
 
 use super::*;
-use crate::ty;
 
-TrivialTypeTraversalAndLiftImpls! {
+TrivialTypeTraversalImpls! {
     BlockTailInfo,
     MirPhase,
     SourceInfo,
@@ -16,18 +15,15 @@ TrivialTypeTraversalAndLiftImpls! {
     UserTypeAnnotationIndex,
     BorrowKind,
     CastKind,
-    NullOp,
-    hir::Movability,
     BasicBlock,
     SwitchTargets,
-    GeneratorKind,
-    GeneratorSavedLocal,
+    CoroutineKind,
+    CoroutineSavedLocal,
 }
 
 TrivialTypeTraversalImpls! {
-    for <'tcx> {
-        ConstValue<'tcx>,
-    }
+    ConstValue<'tcx>,
+    NullOp<'tcx>,
 }
 
 impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for &'tcx [InlineAsmTemplatePiece] {

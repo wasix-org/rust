@@ -17,9 +17,9 @@ extern "C" fn eh_personality() {}
 static EH_CATCH_TYPEINFO: u8 = 0;
 
 #[panic_handler]
-fn panic_handler() {}
-//~^ ERROR return type should be `!`
-//~| ERROR function should have one argument
+fn panic_handler(_: &core::panic::PanicInfo) -> ! {
+    unimplemented!();
+}
 
 // take a reference to any built-in range
 fn take_range(_r: &impl RangeBounds<i8>) {}
@@ -29,30 +29,30 @@ fn main() {
     take_range(0..1);
     //~^ ERROR mismatched types [E0308]
     //~| HELP consider borrowing here
-    //~| SUGGESTION &(0..1)
+    //~| SUGGESTION &(
 
     take_range(1..);
     //~^ ERROR mismatched types [E0308]
     //~| HELP consider borrowing here
-    //~| SUGGESTION &(1..)
+    //~| SUGGESTION &(
 
     take_range(..);
     //~^ ERROR mismatched types [E0308]
     //~| HELP consider borrowing here
-    //~| SUGGESTION &(..)
+    //~| SUGGESTION &(
 
     take_range(0..=1);
     //~^ ERROR mismatched types [E0308]
     //~| HELP consider borrowing here
-    //~| SUGGESTION &(0..=1)
+    //~| SUGGESTION &(
 
     take_range(..5);
     //~^ ERROR mismatched types [E0308]
     //~| HELP consider borrowing here
-    //~| SUGGESTION &(..5)
+    //~| SUGGESTION &(
 
     take_range(..=42);
     //~^ ERROR mismatched types [E0308]
     //~| HELP consider borrowing here
-    //~| SUGGESTION &(..=42)
+    //~| SUGGESTION &(
 }

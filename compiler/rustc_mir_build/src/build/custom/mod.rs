@@ -21,7 +21,7 @@ use rustc_ast::Attribute;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def_id::DefId;
 use rustc_hir::HirId;
-use rustc_index::vec::IndexVec;
+use rustc_index::{IndexSlice, IndexVec};
 use rustc_middle::{
     mir::*,
     thir::*,
@@ -37,7 +37,7 @@ pub(super) fn build_custom_mir<'tcx>(
     hir_id: HirId,
     thir: &Thir<'tcx>,
     expr: ExprId,
-    params: &IndexVec<ParamId, Param<'tcx>>,
+    params: &IndexSlice<ParamId, Param<'tcx>>,
     return_ty: Ty<'tcx>,
     return_ty_span: Span,
     span: Span,
@@ -48,8 +48,8 @@ pub(super) fn build_custom_mir<'tcx>(
         source: MirSource::item(did),
         phase: MirPhase::Built,
         source_scopes: IndexVec::new(),
-        generator: None,
-        local_decls: LocalDecls::new(),
+        coroutine: None,
+        local_decls: IndexVec::new(),
         user_type_annotations: IndexVec::new(),
         arg_count: params.len(),
         spread_arg: None,
@@ -60,6 +60,7 @@ pub(super) fn build_custom_mir<'tcx>(
         tainted_by_errors: None,
         injection_phase: None,
         pass_count: 0,
+        function_coverage_info: None,
     };
 
     body.local_decls.push(LocalDecl::new(return_ty, return_ty_span));
@@ -87,11 +88,11 @@ pub(super) fn build_custom_mir<'tcx>(
     };
 
     let res: PResult<_> = try {
-        pctxt.parse_args(&params)?;
+        pctxt.parse_args(params)?;
         pctxt.parse_body(expr)?;
     };
     if let Err(err) = res {
-        tcx.sess.diagnostic().span_fatal(
+        tcx.dcx().span_fatal(
             err.span,
             format!("Could not parse {}, found: {:?}", err.expected, err.item_description),
         )
@@ -118,7 +119,11 @@ fn parse_attribute(attr: &Attribute) -> MirPhase {
                 phase = Some(value);
             }
             other => {
-                panic!("Unexpected key {}", other);
+                span_bug!(
+                    nested.span(),
+                    "Unexpected key while parsing custom_mir attribute: '{}'",
+                    other
+                );
             }
         }
     }
@@ -154,6 +159,19 @@ impl<'tcx, 'body> ParseCtxt<'tcx, 'body> {
         ParseError {
             span: expr.span,
             item_description: format!("{:?}", expr.kind),
+            expected: expected.to_string(),
+        }
+    }
+
+    fn stmt_error(&self, stmt: StmtId, expected: &'static str) -> ParseError {
+        let stmt = &self.thir[stmt];
+        let span = match stmt.kind {
+            StmtKind::Expr { expr, .. } => self.thir[expr].span,
+            StmtKind::Let { span, .. } => span,
+        };
+        ParseError {
+            span,
+            item_description: format!("{:?}", stmt.kind),
             expected: expected.to_string(),
         }
     }

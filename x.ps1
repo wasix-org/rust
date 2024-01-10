@@ -2,22 +2,22 @@
 
 # See ./x for why these scripts exist.
 
+$ErrorActionPreference = "Stop"
+
+# syntax check
+Get-Command -syntax ${PSCommandPath} >$null
+
 $xpy = Join-Path $PSScriptRoot x.py
-# Start-Process for some reason splits arguments on spaces. (Isn't powershell supposed to be simpler than bash?)
-# Double-quote all the arguments so it doesn't do that.
-$xpy_args = @("""$xpy""")
-foreach ($arg in $args) {
-    $xpy_args += """$arg"""
-}
+$xpy_args = @($xpy) + $args
 
 function Get-Application($app) {
-    return Get-Command $app -ErrorAction SilentlyContinue -CommandType Application
+    $cmd = Get-Command $app -ErrorAction SilentlyContinue -CommandType Application | Select-Object -First 1
+    return $cmd
 }
 
 function Invoke-Application($application, $arguments) {
-    $process = Start-Process -NoNewWindow -PassThru $application $arguments
-    $process.WaitForExit()
-    Exit $process.ExitCode
+    & $application $arguments
+    Exit $LASTEXITCODE
 }
 
 foreach ($python in "py", "python3", "python", "python2") {
@@ -39,5 +39,7 @@ if (($null -ne $found) -and ($found.Length -ge 1)) {
     Invoke-Application $python $xpy_args
 }
 
-Write-Error "${PSCommandPath}: error: did not find python installed"
+$msg = "${PSCommandPath}: error: did not find python installed`n"
+$msg += "help: consider installing it from https://www.python.org/downloads/"
+Write-Error $msg -Category NotInstalled
 Exit 1

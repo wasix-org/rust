@@ -450,7 +450,6 @@ fn generate_syntax_kinds(grammar: KindsSrc<'_>) -> String {
             [ident] => { $crate::SyntaxKind::IDENT };
             [shebang] => { $crate::SyntaxKind::SHEBANG };
         }
-        pub use T;
     };
 
     sourcegen::add_preamble("sourcegen_ast", sourcegen::reformat(ast.to_string()))
@@ -535,6 +534,7 @@ impl Field {
                     "!" => "excl",
                     "*" => "star",
                     "&" => "amp",
+                    "-" => "minus",
                     "_" => "underscore",
                     "." => "dot",
                     ".." => "dotdot",
@@ -572,10 +572,11 @@ impl Field {
 
 fn lower(grammar: &Grammar) -> AstSrc {
     let mut res = AstSrc {
-        tokens: "Whitespace Comment String ByteString IntNumber FloatNumber Char Byte Ident"
-            .split_ascii_whitespace()
-            .map(|it| it.to_string())
-            .collect::<Vec<_>>(),
+        tokens:
+            "Whitespace Comment String ByteString CString IntNumber FloatNumber Char Byte Ident"
+                .split_ascii_whitespace()
+                .map(|it| it.to_string())
+                .collect::<Vec<_>>(),
         ..Default::default()
     };
 
@@ -621,7 +622,7 @@ fn lower_enum(grammar: &Grammar, rule: &Rule) -> Option<Vec<String>> {
 }
 
 fn lower_rule(acc: &mut Vec<Field>, grammar: &Grammar, label: Option<&String>, rule: &Rule) {
-    if lower_comma_list(acc, grammar, label, rule) {
+    if lower_separated_list(acc, grammar, label, rule) {
         return;
     }
 
@@ -687,7 +688,7 @@ fn lower_rule(acc: &mut Vec<Field>, grammar: &Grammar, label: Option<&String>, r
 }
 
 // (T (',' T)* ','?)
-fn lower_comma_list(
+fn lower_separated_list(
     acc: &mut Vec<Field>,
     grammar: &Grammar,
     label: Option<&String>,
@@ -697,19 +698,23 @@ fn lower_comma_list(
         Rule::Seq(it) => it,
         _ => return false,
     };
-    let (node, repeat, trailing_comma) = match rule.as_slice() {
-        [Rule::Node(node), Rule::Rep(repeat), Rule::Opt(trailing_comma)] => {
-            (node, repeat, trailing_comma)
+    let (node, repeat, trailing_sep) = match rule.as_slice() {
+        [Rule::Node(node), Rule::Rep(repeat), Rule::Opt(trailing_sep)] => {
+            (node, repeat, Some(trailing_sep))
         }
+        [Rule::Node(node), Rule::Rep(repeat)] => (node, repeat, None),
         _ => return false,
     };
     let repeat = match &**repeat {
         Rule::Seq(it) => it,
         _ => return false,
     };
-    match repeat.as_slice() {
-        [comma, Rule::Node(n)] if comma == &**trailing_comma && n == node => (),
-        _ => return false,
+    if !matches!(
+        repeat.as_slice(),
+        [comma, Rule::Node(n)]
+            if trailing_sep.map_or(true, |it| comma == &**it) && n == node
+    ) {
+        return false;
     }
     let ty = grammar[*node].name.clone();
     let name = label.cloned().unwrap_or_else(|| pluralize(&to_lower_snake_case(&ty)));
@@ -783,6 +788,7 @@ fn extract_struct_traits(ast: &mut AstSrc) {
         "Enum",
         "Variant",
         "Trait",
+        "TraitAlias",
         "Module",
         "Static",
         "Const",

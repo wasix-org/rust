@@ -3,8 +3,7 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher, StableOrd, 
 use rustc_span::{def_id::DefPathHash, HashStableContext};
 use std::fmt::{self, Debug};
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-#[derive(Encodable, Decodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Encodable, Decodable)]
 pub struct OwnerId {
     pub def_id: LocalDefId,
 }
@@ -22,6 +21,12 @@ impl From<OwnerId> for HirId {
     }
 }
 
+impl From<OwnerId> for DefId {
+    fn from(value: OwnerId) -> Self {
+        value.to_def_id()
+    }
+}
+
 impl OwnerId {
     #[inline]
     pub fn to_def_id(self) -> DefId {
@@ -29,7 +34,7 @@ impl OwnerId {
     }
 }
 
-impl rustc_index::vec::Idx for OwnerId {
+impl rustc_index::Idx for OwnerId {
     #[inline]
     fn new(idx: usize) -> Self {
         OwnerId { def_id: LocalDefId { local_def_index: DefIndex::from_usize(idx) } }
@@ -67,8 +72,7 @@ impl<CTX: HashStableContext> ToStableHashKey<CTX> for OwnerId {
 /// the `local_id` part of the `HirId` changing, which is a very useful property in
 /// incremental compilation where we have to persist things through changes to
 /// the code base.
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-#[derive(Encodable, Decodable, HashStable_Generic)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Encodable, Decodable, HashStable_Generic)]
 #[rustc_pass_by_value]
 pub struct HirId {
     pub owner: OwnerId,
@@ -110,10 +114,7 @@ impl HirId {
     }
 
     pub fn index(self) -> (usize, usize) {
-        (
-            rustc_index::vec::Idx::index(self.owner.def_id),
-            rustc_index::vec::Idx::index(self.local_id),
-        )
+        (rustc_index::Idx::index(self.owner.def_id), rustc_index::Idx::index(self.local_id))
     }
 }
 
@@ -153,6 +154,8 @@ rustc_index::newtype_index! {
     /// an "item-like" to something else can be implemented by a `Vec` instead of a
     /// tree or hash map.
     #[derive(HashStable_Generic)]
+    #[encodable]
+    #[orderable]
     pub struct ItemLocalId {}
 }
 
@@ -163,7 +166,9 @@ impl ItemLocalId {
 
 // Safety: Ord is implement as just comparing the ItemLocalId's numerical
 // values and these are not changed by (de-)serialization.
-unsafe impl StableOrd for ItemLocalId {}
+unsafe impl StableOrd for ItemLocalId {
+    const CAN_USE_UNSTABLE_SORT: bool = true;
+}
 
 /// The `HirId` corresponding to `CRATE_NODE_ID` and `CRATE_DEF_ID`.
 pub const CRATE_HIR_ID: HirId =

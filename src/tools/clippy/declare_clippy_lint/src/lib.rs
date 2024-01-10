@@ -6,16 +6,16 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{parse_macro_input, Attribute, Error, Ident, Lit, LitStr, Meta, Result, Token};
+use syn::{parse_macro_input, Attribute, Error, Expr, ExprLit, Ident, Lit, LitStr, Meta, Result, Token};
 
 fn parse_attr<const LEN: usize>(path: [&'static str; LEN], attr: &Attribute) -> Option<LitStr> {
-    if let Meta::NameValue(name_value) = attr.parse_meta().ok()? {
+    if let Meta::NameValue(name_value) = &attr.meta {
         let path_idents = name_value.path.segments.iter().map(|segment| &segment.ident);
 
         if itertools::equal(path_idents, path)
-            && let Lit::Str(lit) = name_value.lit
+            && let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &name_value.value
         {
-            return Some(lit);
+            return Some(s.clone());
         }
     }
 
@@ -85,8 +85,8 @@ impl Parse for ClippyLint {
 /// 2. The `LINT_NAME`. See [lint naming][lint_naming] on lint naming conventions.
 /// 3. The `lint_level`, which is a mapping from *one* of our lint groups to `Allow`, `Warn` or
 ///    `Deny`. The lint level here has nothing to do with what lint groups the lint is a part of.
-/// 4. The `description` that contains a short explanation on what's wrong with code where the
-///    lint is triggered.
+/// 4. The `description` that contains a short explanation on what's wrong with code where the lint
+///    is triggered.
 ///
 /// Currently the categories `style`, `correctness`, `suspicious`, `complexity` and `perf` are
 /// enabled by default. As said in the README.md of this repository, if the lint level mapping
@@ -94,7 +94,7 @@ impl Parse for ClippyLint {
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// use rustc_session::declare_tool_lint;
 ///
 /// declare_clippy_lint! {
@@ -136,31 +136,19 @@ pub fn declare_clippy_lint(input: TokenStream) -> TokenStream {
         "{}",
         match category.as_str() {
             "correctness" => "Deny",
-            "style" | "suspicious" | "complexity" | "perf" | "internal_warn" => "Warn",
+            "style" | "suspicious" | "complexity" | "perf" => "Warn",
             "pedantic" | "restriction" | "cargo" | "nursery" | "internal" => "Allow",
             _ => panic!("unknown category {category}"),
         },
     );
 
-    let info = if category == "internal_warn" {
-        None
-    } else {
-        let info_name = format_ident!("{name}_INFO");
+    let info_name = format_ident!("{name}_INFO");
 
-        (&mut category[0..1]).make_ascii_uppercase();
-        let category_variant = format_ident!("{category}");
-
-        Some(quote! {
-            pub(crate) static #info_name: &'static crate::LintInfo = &crate::LintInfo {
-                lint: &#name,
-                category: crate::LintCategory::#category_variant,
-                explanation: #explanation,
-            };
-        })
-    };
+    (&mut category[0..1]).make_ascii_uppercase();
+    let category_variant = format_ident!("{category}");
 
     let output = quote! {
-        declare_tool_lint! {
+        rustc_session::declare_tool_lint! {
             #(#attrs)*
             pub clippy::#name,
             #level,
@@ -168,7 +156,11 @@ pub fn declare_clippy_lint(input: TokenStream) -> TokenStream {
             report_in_external_macro: true
         }
 
-        #info
+        pub(crate) static #info_name: &'static crate::LintInfo = &crate::LintInfo {
+            lint: &#name,
+            category: crate::LintCategory::#category_variant,
+            explanation: #explanation,
+        };
     };
 
     TokenStream::from(output)

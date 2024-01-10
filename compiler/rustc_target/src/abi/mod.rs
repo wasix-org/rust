@@ -1,8 +1,10 @@
+use rustc_data_structures::intern::Interned;
 pub use Integer::*;
 pub use Primitive::*;
 
 use crate::json::{Json, ToJson};
 
+use std::fmt;
 use std::ops::Deref;
 
 use rustc_macros::HashStable_Generic;
@@ -17,6 +19,115 @@ impl ToJson for Endian {
     }
 }
 
+rustc_index::newtype_index! {
+    /// The *source-order* index of a field in a variant.
+    ///
+    /// This is how most code after type checking refers to fields, rather than
+    /// using names (as names have hygiene complications and more complex lookup).
+    ///
+    /// Particularly for `repr(Rust)` types, this may not be the same as *layout* order.
+    /// (It is for `repr(C)` `struct`s, however.)
+    ///
+    /// For example, in the following types,
+    /// ```rust
+    /// # enum Never {}
+    /// # #[repr(u16)]
+    /// enum Demo1 {
+    ///    Variant0 { a: Never, b: i32 } = 100,
+    ///    Variant1 { c: u8, d: u64 } = 10,
+    /// }
+    /// struct Demo2 { e: u8, f: u16, g: u8 }
+    /// ```
+    /// `b` is `FieldIdx(1)` in `VariantIdx(0)`,
+    /// `d` is `FieldIdx(1)` in `VariantIdx(1)`, and
+    /// `f` is `FieldIdx(1)` in `VariantIdx(0)`.
+    #[derive(HashStable_Generic)]
+    #[encodable]
+    #[orderable]
+    pub struct FieldIdx {}
+}
+
+rustc_index::newtype_index! {
+    /// The *source-order* index of a variant in a type.
+    ///
+    /// For enums, these are always `0..variant_count`, regardless of any
+    /// custom discriminants that may have been defined, and including any
+    /// variants that may end up uninhabited due to field types.  (Some of the
+    /// variants may not be present in a monomorphized ABI [`Variants`], but
+    /// those skipped variants are always counted when determining the *index*.)
+    ///
+    /// `struct`s, `tuples`, and `unions`s are considered to have a single variant
+    /// with variant index zero, aka [`FIRST_VARIANT`].
+    #[derive(HashStable_Generic)]
+    #[encodable]
+    #[orderable]
+    pub struct VariantIdx {
+        /// Equivalent to `VariantIdx(0)`.
+        const FIRST_VARIANT = 0;
+    }
+}
+#[derive(Copy, Clone, PartialEq, Eq, Hash, HashStable_Generic)]
+#[rustc_pass_by_value]
+pub struct Layout<'a>(pub Interned<'a, LayoutS<FieldIdx, VariantIdx>>);
+
+impl<'a> fmt::Debug for Layout<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // See comment on `<LayoutS as Debug>::fmt` above.
+        self.0.0.fmt(f)
+    }
+}
+
+impl<'a> Deref for Layout<'a> {
+    type Target = &'a LayoutS<FieldIdx, VariantIdx>;
+    fn deref(&self) -> &&'a LayoutS<FieldIdx, VariantIdx> {
+        &self.0.0
+    }
+}
+
+impl<'a> Layout<'a> {
+    pub fn fields(self) -> &'a FieldsShape<FieldIdx> {
+        &self.0.0.fields
+    }
+
+    pub fn variants(self) -> &'a Variants<FieldIdx, VariantIdx> {
+        &self.0.0.variants
+    }
+
+    pub fn abi(self) -> Abi {
+        self.0.0.abi
+    }
+
+    pub fn largest_niche(self) -> Option<Niche> {
+        self.0.0.largest_niche
+    }
+
+    pub fn align(self) -> AbiAndPrefAlign {
+        self.0.0.align
+    }
+
+    pub fn size(self) -> Size {
+        self.0.0.size
+    }
+
+    pub fn max_repr_align(self) -> Option<Align> {
+        self.0.0.max_repr_align
+    }
+
+    pub fn unadjusted_abi_align(self) -> Align {
+        self.0.0.unadjusted_abi_align
+    }
+
+    /// Whether the layout is from a type that implements [`std::marker::PointerLike`].
+    ///
+    /// Currently, that means that the type is pointer-sized, pointer-aligned,
+    /// and has a initialized (non-union), scalar ABI.
+    pub fn is_pointer_like(self, data_layout: &TargetDataLayout) -> bool {
+        self.size() == data_layout.pointer_size
+            && self.align().abi == data_layout.pointer_align.abi
+            && matches!(self.abi(), Abi::Scalar(Scalar::Initialized { .. }))
+    }
+}
+
 /// The layout of a type, alongside the type itself.
 /// Provides various type traversal APIs (e.g., recursing into fields).
 ///
@@ -24,22 +135,32 @@ impl ToJson for Endian {
 /// to that obtained from `layout_of(ty)`, as we need to produce
 /// layouts for which Rust types do not exist, such as enum variants
 /// or synthetic fields of enums (i.e., discriminants) and fat pointers.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable_Generic)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, HashStable_Generic)]
 pub struct TyAndLayout<'a, Ty> {
     pub ty: Ty,
     pub layout: Layout<'a>,
 }
 
+impl<'a, Ty: fmt::Display> fmt::Debug for TyAndLayout<'a, Ty> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Print the type in a readable way, not its debug representation.
+        f.debug_struct("TyAndLayout")
+            .field("ty", &format_args!("{}", self.ty))
+            .field("layout", &self.layout)
+            .finish()
+    }
+}
+
 impl<'a, Ty> Deref for TyAndLayout<'a, Ty> {
-    type Target = &'a LayoutS;
-    fn deref(&self) -> &&'a LayoutS {
+    type Target = &'a LayoutS<FieldIdx, VariantIdx>;
+    fn deref(&self) -> &&'a LayoutS<FieldIdx, VariantIdx> {
         &self.layout.0.0
     }
 }
 
 /// Trait that needs to be implemented by the higher-level type representation
 /// (e.g. `rustc_middle::ty::Ty`), to provide `rustc_target::abi` functionality.
-pub trait TyAbiInterface<'a, C>: Sized {
+pub trait TyAbiInterface<'a, C>: Sized + std::fmt::Debug {
     fn ty_and_layout_for_variant(
         this: TyAndLayout<'a, Self>,
         cx: &C,
@@ -55,6 +176,7 @@ pub trait TyAbiInterface<'a, C>: Sized {
     fn is_never(this: TyAndLayout<'a, Self>) -> bool;
     fn is_tuple(this: TyAndLayout<'a, Self>) -> bool;
     fn is_unit(this: TyAndLayout<'a, Self>) -> bool;
+    fn is_transparent(this: TyAndLayout<'a, Self>) -> bool;
 }
 
 impl<'a, Ty> TyAndLayout<'a, Ty> {
@@ -124,25 +246,55 @@ impl<'a, Ty> TyAndLayout<'a, Ty> {
     {
         Ty::is_unit(self)
     }
-}
 
-impl<'a, Ty> TyAndLayout<'a, Ty> {
-    /// Returns `true` if the layout corresponds to an unsized type.
-    pub fn is_unsized(&self) -> bool {
-        self.abi.is_unsized()
+    pub fn is_transparent<C>(self) -> bool
+    where
+        Ty: TyAbiInterface<'a, C>,
+    {
+        Ty::is_transparent(self)
     }
 
-    #[inline]
-    pub fn is_sized(&self) -> bool {
-        self.abi.is_sized()
-    }
+    pub fn offset_of_subfield<C, I>(self, cx: &C, indices: I) -> Size
+    where
+        Ty: TyAbiInterface<'a, C>,
+        I: Iterator<Item = (VariantIdx, FieldIdx)>,
+    {
+        let mut layout = self;
+        let mut offset = Size::ZERO;
 
-    /// Returns `true` if the type is a ZST and not unsized.
-    pub fn is_zst(&self) -> bool {
-        match self.abi {
-            Abi::Scalar(_) | Abi::ScalarPair(..) | Abi::Vector { .. } => false,
-            Abi::Uninhabited => self.size.bytes() == 0,
-            Abi::Aggregate { sized } => sized && self.size.bytes() == 0,
+        for (variant, field) in indices {
+            layout = layout.for_variant(cx, variant);
+            let index = field.index();
+            offset += layout.fields.offset(index);
+            layout = layout.field(cx, index);
+            assert!(
+                layout.is_sized(),
+                "offset of unsized field (type {:?}) cannot be computed statically",
+                layout.ty
+            );
         }
+
+        offset
+    }
+
+    /// Finds the one field that is not a 1-ZST.
+    /// Returns `None` if there are multiple non-1-ZST fields or only 1-ZST-fields.
+    pub fn non_1zst_field<C>(&self, cx: &C) -> Option<(usize, Self)>
+    where
+        Ty: TyAbiInterface<'a, C> + Copy,
+    {
+        let mut found = None;
+        for field_idx in 0..self.fields.count() {
+            let field = self.field(cx, field_idx);
+            if field.is_1zst() {
+                continue;
+            }
+            if found.is_some() {
+                // More than one non-1-ZST field.
+                return None;
+            }
+            found = Some((field_idx, field));
+        }
+        found
     }
 }

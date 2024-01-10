@@ -1,7 +1,6 @@
 //! Handle process life-time and message passing for proc-macro client
 
 use std::{
-    ffi::{OsStr, OsString},
     io::{self, BufRead, BufReader, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
@@ -10,7 +9,7 @@ use paths::{AbsPath, AbsPathBuf};
 use stdx::JodChild;
 
 use crate::{
-    msg::{Message, Request, Response, CURRENT_API_VERSION},
+    msg::{Message, Request, Response, SpanMode, CURRENT_API_VERSION, RUST_ANALYZER_SPAN_SUPPORT},
     ProcMacroKind, ServerError,
 };
 
@@ -20,18 +19,22 @@ pub(crate) struct ProcMacroProcessSrv {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     version: u32,
+    mode: SpanMode,
 }
 
 impl ProcMacroProcessSrv {
-    pub(crate) fn run(
-        process_path: AbsPathBuf,
-        args: impl IntoIterator<Item = impl AsRef<OsStr>> + Clone,
-    ) -> io::Result<ProcMacroProcessSrv> {
+    pub(crate) fn run(process_path: AbsPathBuf) -> io::Result<ProcMacroProcessSrv> {
         let create_srv = |null_stderr| {
-            let mut process = Process::run(process_path.clone(), args.clone(), null_stderr)?;
+            let mut process = Process::run(process_path.clone(), null_stderr)?;
             let (stdin, stdout) = process.stdio().expect("couldn't access child stdio");
 
-            io::Result::Ok(ProcMacroProcessSrv { _process: process, stdin, stdout, version: 0 })
+            io::Result::Ok(ProcMacroProcessSrv {
+                _process: process,
+                stdin,
+                stdout,
+                version: 0,
+                mode: SpanMode::Id,
+            })
         };
         let mut srv = create_srv(true)?;
         tracing::info!("sending version check");
@@ -47,6 +50,11 @@ impl ProcMacroProcessSrv {
                 tracing::info!("got version {v}");
                 srv = create_srv(false)?;
                 srv.version = v;
+                if srv.version > RUST_ANALYZER_SPAN_SUPPORT {
+                    if let Ok(mode) = srv.enable_rust_analyzer_spans() {
+                        srv.mode = mode;
+                    }
+                }
                 Ok(srv)
             }
             Err(e) => {
@@ -56,15 +64,29 @@ impl ProcMacroProcessSrv {
         }
     }
 
+    pub(crate) fn version(&self) -> u32 {
+        self.version
+    }
+
     pub(crate) fn version_check(&mut self) -> Result<u32, ServerError> {
         let request = Request::ApiVersionCheck {};
         let response = self.send_task(request)?;
 
         match response {
             Response::ApiVersionCheck(version) => Ok(version),
-            Response::ExpandMacro { .. } | Response::ListMacros { .. } => {
-                Err(ServerError { message: "unexpected response".to_string(), io: None })
-            }
+            _ => Err(ServerError { message: "unexpected response".to_string(), io: None }),
+        }
+    }
+
+    fn enable_rust_analyzer_spans(&mut self) -> Result<SpanMode, ServerError> {
+        let request = Request::SetConfig(crate::msg::ServerConfig {
+            span_mode: crate::msg::SpanMode::RustAnalyzer,
+        });
+        let response = self.send_task(request)?;
+
+        match response {
+            Response::SetConfig(crate::msg::ServerConfig { span_mode }) => Ok(span_mode),
+            _ => Err(ServerError { message: "unexpected response".to_string(), io: None }),
         }
     }
 
@@ -78,9 +100,7 @@ impl ProcMacroProcessSrv {
 
         match response {
             Response::ListMacros(it) => Ok(it),
-            Response::ExpandMacro { .. } | Response::ApiVersionCheck { .. } => {
-                Err(ServerError { message: "unexpected response".to_string(), io: None })
-            }
+            _ => Err(ServerError { message: "unexpected response".to_string(), io: None }),
         }
     }
 
@@ -96,13 +116,8 @@ struct Process {
 }
 
 impl Process {
-    fn run(
-        path: AbsPathBuf,
-        args: impl IntoIterator<Item = impl AsRef<OsStr>>,
-        null_stderr: bool,
-    ) -> io::Result<Process> {
-        let args: Vec<OsString> = args.into_iter().map(|s| s.as_ref().into()).collect();
-        let child = JodChild(mk_child(&path, args, null_stderr)?);
+    fn run(path: AbsPathBuf, null_stderr: bool) -> io::Result<Process> {
+        let child = JodChild(mk_child(&path, null_stderr)?);
         Ok(Process { child })
     }
 
@@ -115,13 +130,8 @@ impl Process {
     }
 }
 
-fn mk_child(
-    path: &AbsPath,
-    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
-    null_stderr: bool,
-) -> io::Result<Child> {
+fn mk_child(path: &AbsPath, null_stderr: bool) -> io::Result<Child> {
     Command::new(path.as_os_str())
-        .args(args)
         .env("RUST_ANALYZER_INTERNALS_DO_NOT_USE", "this is unstable")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

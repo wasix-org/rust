@@ -1,8 +1,6 @@
-// run-rustfix
-
 use core::num::Wrapping;
 
-#[allow(dead_code, unused_assignments)]
+#[allow(dead_code, unused_assignments, clippy::useless_vec)]
 #[warn(clippy::assign_op_pattern)]
 fn main() {
     let mut a = 5;

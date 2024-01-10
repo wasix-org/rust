@@ -1,18 +1,19 @@
 //! Builtin attributes.
+use span::{MacroCallId, Span};
 
-use crate::{db::AstDatabase, name, tt, ExpandResult, MacroCallId, MacroCallKind};
+use crate::{db::ExpandDatabase, name, tt, ExpandResult, MacroCallKind};
 
 macro_rules! register_builtin {
-    ( $(($name:ident, $variant:ident) => $expand:ident),* ) => {
+    ($expand_fn:ident: $(($name:ident, $variant:ident) => $expand:ident),* ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum BuiltinAttrExpander {
             $($variant),*
         }
 
         impl BuiltinAttrExpander {
-            pub fn expand(
+            pub fn $expand_fn(
                 &self,
-                db: &dyn AstDatabase,
+                db: &dyn ExpandDatabase,
                 id: MacroCallId,
                 tt: &tt::Subtree,
             ) -> ExpandResult<tt::Subtree> {
@@ -35,7 +36,7 @@ macro_rules! register_builtin {
 
 impl BuiltinAttrExpander {
     pub fn is_derive(self) -> bool {
-        matches!(self, BuiltinAttrExpander::Derive)
+        matches!(self, BuiltinAttrExpander::Derive | BuiltinAttrExpander::DeriveConst)
     }
     pub fn is_test(self) -> bool {
         matches!(self, BuiltinAttrExpander::Test)
@@ -45,11 +46,13 @@ impl BuiltinAttrExpander {
     }
 }
 
-register_builtin! {
+register_builtin! { expand:
     (bench, Bench) => dummy_attr_expand,
     (cfg_accessible, CfgAccessible) => dummy_attr_expand,
     (cfg_eval, CfgEval) => dummy_attr_expand,
     (derive, Derive) => derive_attr_expand,
+    // derive const is equivalent to derive for our proposes.
+    (derive_const, DeriveConst) => derive_attr_expand,
     (global_allocator, GlobalAllocator) => dummy_attr_expand,
     (test, Test) => dummy_attr_expand,
     (test_case, TestCase) => dummy_attr_expand
@@ -60,7 +63,7 @@ pub fn find_builtin_attr(ident: &name::Name) -> Option<BuiltinAttrExpander> {
 }
 
 fn dummy_attr_expand(
-    _db: &dyn AstDatabase,
+    _db: &dyn ExpandDatabase,
     _id: MacroCallId,
     tt: &tt::Subtree,
 ) -> ExpandResult<tt::Subtree> {
@@ -75,9 +78,8 @@ fn dummy_attr_expand(
 ///
 /// As such, we expand `#[derive(Foo, bar::Bar)]` into
 /// ```
-///  #[Foo]
-///  #[bar::Bar]
-///  ();
+///  #![Foo]
+///  #![bar::Bar]
 /// ```
 /// which allows fallback path resolution in hir::Semantics to properly identify our derives.
 /// Since we do not expand the attribute in nameres though, we keep the original item.
@@ -90,27 +92,35 @@ fn dummy_attr_expand(
 /// So this hacky approach is a lot more friendly for us, though it does require a bit of support in
 /// [`hir::Semantics`] to make this work.
 fn derive_attr_expand(
-    db: &dyn AstDatabase,
+    db: &dyn ExpandDatabase,
     id: MacroCallId,
     tt: &tt::Subtree,
 ) -> ExpandResult<tt::Subtree> {
     let loc = db.lookup_intern_macro_call(id);
     let derives = match &loc.kind {
-        MacroCallKind::Attr { attr_args, is_derive: true, .. } => &attr_args.0,
-        _ => return ExpandResult::ok(tt::Subtree::empty()),
+        MacroCallKind::Attr { attr_args: Some(attr_args), .. } if loc.def.is_attribute_derive() => {
+            attr_args
+        }
+        _ => {
+            return ExpandResult::ok(tt::Subtree::empty(tt::DelimSpan {
+                open: loc.call_site,
+                close: loc.call_site,
+            }))
+        }
     };
-    pseudo_derive_attr_expansion(tt, derives)
+    pseudo_derive_attr_expansion(tt, derives, loc.call_site)
 }
 
 pub fn pseudo_derive_attr_expansion(
     tt: &tt::Subtree,
     args: &tt::Subtree,
+    call_site: Span,
 ) -> ExpandResult<tt::Subtree> {
     let mk_leaf = |char| {
         tt::TokenTree::Leaf(tt::Leaf::Punct(tt::Punct {
             char,
             spacing: tt::Spacing::Alone,
-            span: tt::TokenId::unspecified(),
+            span: call_site,
         }))
     };
 
@@ -120,12 +130,10 @@ pub fn pseudo_derive_attr_expansion(
         .split(|tt| matches!(tt, tt::TokenTree::Leaf(tt::Leaf::Punct(tt::Punct { char: ',', .. }))))
     {
         token_trees.push(mk_leaf('#'));
+        token_trees.push(mk_leaf('!'));
         token_trees.push(mk_leaf('['));
         token_trees.extend(tt.iter().cloned());
         token_trees.push(mk_leaf(']'));
     }
-    token_trees.push(mk_leaf('('));
-    token_trees.push(mk_leaf(')'));
-    token_trees.push(mk_leaf(';'));
     ExpandResult::ok(tt::Subtree { delimiter: tt.delimiter, token_trees })
 }

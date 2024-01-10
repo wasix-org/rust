@@ -1,3 +1,6 @@
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_BIT_WIDTH
+
 #![feature(adt_const_params)]
 #![allow(incomplete_features)]
 

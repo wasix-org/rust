@@ -52,6 +52,7 @@ pub struct PidFd {
 }
 
 impl AsInner<FileDesc> for PidFd {
+    #[inline]
     fn as_inner(&self) -> &FileDesc {
         &self.inner
     }
@@ -70,6 +71,7 @@ impl IntoInner<FileDesc> for PidFd {
 }
 
 impl AsRawFd for PidFd {
+    #[inline]
     fn as_raw_fd(&self) -> RawFd {
         self.as_inner().as_raw_fd()
     }
@@ -149,6 +151,12 @@ pub trait CommandExt: Sealed {
     /// A pidfd will only be created if it is possible to do so
     /// in a guaranteed race-free manner (e.g. if the `clone3` system call
     /// is supported). Otherwise, [`pidfd`] will return an error.
+    ///
+    /// If a pidfd has been successfully created and not been taken from the `Child`
+    /// then calls to `kill()`, `wait()` and `try_wait()` will use the pidfd
+    /// instead of the pid. This can prevent pid recycling races, e.g.
+    /// those  caused by rogue libraries in the same process prematurely reaping
+    /// zombie children via `waitpid(-1, ...)` calls.
     ///
     /// [`Command`]: process::Command
     /// [`Child`]: process::Child

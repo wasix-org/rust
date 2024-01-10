@@ -291,6 +291,38 @@ macro_rules! int_module {
             }
 
             #[test]
+            fn test_isqrt() {
+                assert_eq!($T::MIN.checked_isqrt(), None);
+                assert_eq!((-1 as $T).checked_isqrt(), None);
+                assert_eq!((0 as $T).isqrt(), 0 as $T);
+                assert_eq!((1 as $T).isqrt(), 1 as $T);
+                assert_eq!((2 as $T).isqrt(), 1 as $T);
+                assert_eq!((99 as $T).isqrt(), 9 as $T);
+                assert_eq!((100 as $T).isqrt(), 10 as $T);
+            }
+
+            #[cfg(not(miri))] // Miri is too slow
+            #[test]
+            fn test_lots_of_isqrt() {
+                let n_max: $T = (1024 * 1024).min($T::MAX as u128) as $T;
+                for n in 0..=n_max {
+                    let isqrt: $T = n.isqrt();
+
+                    assert!(isqrt.pow(2) <= n);
+                    let (square, overflow) = (isqrt + 1).overflowing_pow(2);
+                    assert!(overflow || square > n);
+                }
+
+                for n in ($T::MAX - 127)..=$T::MAX {
+                    let isqrt: $T = n.isqrt();
+
+                    assert!(isqrt.pow(2) <= n);
+                    let (square, overflow) = (isqrt + 1).overflowing_pow(2);
+                    assert!(overflow || square > n);
+                }
+            }
+
+            #[test]
             fn test_div_floor() {
                 let a: $T = 8;
                 let b = 3;
@@ -363,6 +395,32 @@ macro_rules! int_module {
                 assert_eq!($T::MAX.borrowing_sub(-1, true), ($T::MAX, false)); // no intermediate overflow
                 assert_eq!((0 as $T).borrowing_sub($T::MIN, false), ($T::MIN, true));
                 assert_eq!((0 as $T).borrowing_sub($T::MIN, true), ($T::MAX, false));
+            }
+
+            #[test]
+            fn test_midpoint() {
+                assert_eq!(<$T>::midpoint(1, 3), 2);
+                assert_eq!(<$T>::midpoint(3, 1), 2);
+
+                assert_eq!(<$T>::midpoint(0, 0), 0);
+                assert_eq!(<$T>::midpoint(0, 2), 1);
+                assert_eq!(<$T>::midpoint(2, 0), 1);
+                assert_eq!(<$T>::midpoint(2, 2), 2);
+
+                assert_eq!(<$T>::midpoint(1, 4), 2);
+                assert_eq!(<$T>::midpoint(4, 1), 2);
+                assert_eq!(<$T>::midpoint(3, 4), 3);
+                assert_eq!(<$T>::midpoint(4, 3), 3);
+
+                assert_eq!(<$T>::midpoint(<$T>::MIN, <$T>::MAX), -1);
+                assert_eq!(<$T>::midpoint(<$T>::MAX, <$T>::MIN), -1);
+                assert_eq!(<$T>::midpoint(<$T>::MIN, <$T>::MIN), <$T>::MIN);
+                assert_eq!(<$T>::midpoint(<$T>::MAX, <$T>::MAX), <$T>::MAX);
+
+                assert_eq!(<$T>::midpoint(<$T>::MIN, 6), <$T>::MIN / 2 + 3);
+                assert_eq!(<$T>::midpoint(6, <$T>::MIN), <$T>::MIN / 2 + 3);
+                assert_eq!(<$T>::midpoint(<$T>::MAX, 6), <$T>::MAX / 2 + 3);
+                assert_eq!(<$T>::midpoint(6, <$T>::MAX), <$T>::MAX / 2 + 3);
             }
         }
     };

@@ -1,4 +1,4 @@
-use rustc_ast::{AttrStyle, Attribute, MetaItem};
+use rustc_ast::{attr, AttrStyle, Attribute, MetaItem};
 use rustc_expand::base::{Annotatable, ExtCtxt};
 use rustc_feature::AttributeTemplate;
 use rustc_lint_defs::builtin::DUPLICATE_MACRO_ATTRIBUTES;
@@ -10,7 +10,7 @@ pub fn check_builtin_macro_attribute(ecx: &ExtCtxt<'_>, meta_item: &MetaItem, na
     let template = AttributeTemplate { word: true, ..Default::default() };
     validate_attr::check_builtin_meta_item(
         &ecx.sess.parse_sess,
-        &meta_item,
+        meta_item,
         AttrStyle::Outer,
         name,
         template,
@@ -36,7 +36,7 @@ pub fn warn_on_duplicate_attribute(ecx: &ExtCtxt<'_>, item: &Annotatable, name: 
         _ => None,
     };
     if let Some(attrs) = attrs {
-        if let Some(attr) = ecx.sess.find_by_name(attrs, name) {
+        if let Some(attr) = attr::find_by_name(attrs, name) {
             ecx.parse_sess().buffer_lint(
                 DUPLICATE_MACRO_ATTRIBUTES,
                 attr.span,

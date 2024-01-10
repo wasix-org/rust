@@ -1,7 +1,7 @@
 #![unstable(issue = "none", feature = "windows_net")]
 
 use crate::cmp;
-use crate::io::{self, IoSlice, IoSliceMut, Read};
+use crate::io::{self, BorrowedBuf, BorrowedCursor, IoSlice, IoSliceMut, Read};
 use crate::mem;
 use crate::net::{Shutdown, SocketAddr};
 use crate::os::windows::io::{
@@ -15,7 +15,7 @@ use crate::sys_common::net;
 use crate::sys_common::{AsInner, FromInner, IntoInner};
 use crate::time::Duration;
 
-use libc::{c_int, c_long, c_ulong, c_ushort};
+use core::ffi::{c_int, c_long, c_ulong, c_ushort};
 
 pub type wrlen_t = i32;
 
@@ -117,7 +117,7 @@ impl Socket {
         };
 
         if socket != c::INVALID_SOCKET {
-            unsafe { Ok(Self::from_raw_socket(socket)) }
+            unsafe { Ok(Self::from_raw(socket)) }
         } else {
             let error = unsafe { c::WSAGetLastError() };
 
@@ -133,20 +133,22 @@ impl Socket {
             }
 
             unsafe {
-                let socket = Self::from_raw_socket(socket);
+                let socket = Self::from_raw(socket);
                 socket.0.set_no_inherit()?;
                 Ok(socket)
             }
         }
     }
 
+    pub fn connect(&self, addr: &SocketAddr) -> io::Result<()> {
+        let (addr, len) = addr.into_inner();
+        let result = unsafe { c::connect(self.as_raw(), addr.as_ptr(), len) };
+        cvt(result).map(drop)
+    }
+
     pub fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<()> {
         self.set_nonblocking(true)?;
-        let result = {
-            let (addr, len) = addr.into_inner();
-            let result = unsafe { c::connect(self.as_raw_socket(), addr.as_ptr(), len) };
-            cvt(result).map(drop)
-        };
+        let result = self.connect(addr);
         self.set_nonblocking(false)?;
 
         match result {
@@ -159,8 +161,8 @@ impl Socket {
                 }
 
                 let mut timeout = c::timeval {
-                    tv_sec: timeout.as_secs() as c_long,
-                    tv_usec: (timeout.subsec_nanos() / 1000) as c_long,
+                    tv_sec: cmp::min(timeout.as_secs(), c_long::MAX as u64) as c_long,
+                    tv_usec: timeout.subsec_micros() as c_long,
                 };
 
                 if timeout.tv_sec == 0 && timeout.tv_usec == 0 {
@@ -170,7 +172,7 @@ impl Socket {
                 let fds = {
                     let mut fds = unsafe { mem::zeroed::<c::fd_set>() };
                     fds.fd_count = 1;
-                    fds.fd_array[0] = self.as_raw_socket();
+                    fds.fd_array[0] = self.as_raw();
                     fds
                 };
 
@@ -202,11 +204,11 @@ impl Socket {
     }
 
     pub fn accept(&self, storage: *mut c::SOCKADDR, len: *mut c_int) -> io::Result<Socket> {
-        let socket = unsafe { c::accept(self.as_raw_socket(), storage, len) };
+        let socket = unsafe { c::accept(self.as_raw(), storage, len) };
 
         match socket {
             c::INVALID_SOCKET => Err(last_error()),
-            _ => unsafe { Ok(Self::from_raw_socket(socket)) },
+            _ => unsafe { Ok(Self::from_raw(socket)) },
         }
     }
 
@@ -218,28 +220,37 @@ impl Socket {
         Ok(Self(self.0.try_clone()?))
     }
 
-    fn recv_with_flags(&self, buf: &mut [u8], flags: c_int) -> io::Result<usize> {
+    fn recv_with_flags(&self, mut buf: BorrowedCursor<'_>, flags: c_int) -> io::Result<()> {
         // On unix when a socket is shut down all further reads return 0, so we
         // do the same on windows to map a shut down socket to returning EOF.
-        let length = cmp::min(buf.len(), i32::MAX as usize) as i32;
+        let length = cmp::min(buf.capacity(), i32::MAX as usize) as i32;
         let result =
-            unsafe { c::recv(self.as_raw_socket(), buf.as_mut_ptr() as *mut _, length, flags) };
+            unsafe { c::recv(self.as_raw(), buf.as_mut().as_mut_ptr() as *mut _, length, flags) };
 
         match result {
             c::SOCKET_ERROR => {
                 let error = unsafe { c::WSAGetLastError() };
 
                 if error == c::WSAESHUTDOWN {
-                    Ok(0)
+                    Ok(())
                 } else {
                     Err(io::Error::from_raw_os_error(error))
                 }
             }
-            _ => Ok(result as usize),
+            _ => {
+                unsafe { buf.advance(result as usize) };
+                Ok(())
+            }
         }
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut buf = BorrowedBuf::from(buf);
+        self.recv_with_flags(buf.unfilled(), 0)?;
+        Ok(buf.len())
+    }
+
+    pub fn read_buf(&self, buf: BorrowedCursor<'_>) -> io::Result<()> {
         self.recv_with_flags(buf, 0)
     }
 
@@ -251,13 +262,13 @@ impl Socket {
         let mut flags = 0;
         let result = unsafe {
             c::WSARecv(
-                self.as_raw_socket(),
+                self.as_raw(),
                 bufs.as_mut_ptr() as *mut c::WSABUF,
                 length,
                 &mut nread,
                 &mut flags,
                 ptr::null_mut(),
-                ptr::null_mut(),
+                None,
             )
         };
 
@@ -281,7 +292,9 @@ impl Socket {
     }
 
     pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.recv_with_flags(buf, c::MSG_PEEK)
+        let mut buf = BorrowedBuf::from(buf);
+        self.recv_with_flags(buf.unfilled(), c::MSG_PEEK)?;
+        Ok(buf.len())
     }
 
     fn recv_from_with_flags(
@@ -297,7 +310,7 @@ impl Socket {
         // do the same on windows to map a shut down socket to returning EOF.
         let result = unsafe {
             c::recvfrom(
-                self.as_raw_socket(),
+                self.as_raw(),
                 buf.as_mut_ptr() as *mut _,
                 length,
                 flags,
@@ -333,13 +346,13 @@ impl Socket {
         let mut nwritten = 0;
         let result = unsafe {
             c::WSASend(
-                self.as_raw_socket(),
+                self.as_raw(),
                 bufs.as_ptr() as *const c::WSABUF as *mut _,
                 length,
                 &mut nwritten,
                 0,
                 ptr::null_mut(),
-                ptr::null_mut(),
+                None,
             )
         };
         cvt(result).map(|_| nwritten as usize)
@@ -384,14 +397,14 @@ impl Socket {
             Shutdown::Read => c::SD_RECEIVE,
             Shutdown::Both => c::SD_BOTH,
         };
-        let result = unsafe { c::shutdown(self.as_raw_socket(), how) };
+        let result = unsafe { c::shutdown(self.as_raw(), how) };
         cvt(result).map(drop)
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         let mut nonblocking = nonblocking as c_ulong;
         let result =
-            unsafe { c::ioctlsocket(self.as_raw_socket(), c::FIONBIO as c_int, &mut nonblocking) };
+            unsafe { c::ioctlsocket(self.as_raw(), c::FIONBIO as c_int, &mut nonblocking) };
         cvt(result).map(drop)
     }
 
@@ -425,8 +438,15 @@ impl Socket {
     }
 
     // This is used by sys_common code to abstract over Windows and Unix.
-    pub fn as_raw(&self) -> RawSocket {
-        self.as_inner().as_raw_socket()
+    pub fn as_raw(&self) -> c::SOCKET {
+        debug_assert_eq!(mem::size_of::<c::SOCKET>(), mem::size_of::<RawSocket>());
+        debug_assert_eq!(mem::align_of::<c::SOCKET>(), mem::align_of::<RawSocket>());
+        self.as_inner().as_raw_socket() as c::SOCKET
+    }
+    pub unsafe fn from_raw(raw: c::SOCKET) -> Self {
+        debug_assert_eq!(mem::size_of::<c::SOCKET>(), mem::size_of::<RawSocket>());
+        debug_assert_eq!(mem::align_of::<c::SOCKET>(), mem::align_of::<RawSocket>());
+        Self::from_raw_socket(raw as RawSocket)
     }
 }
 
@@ -438,6 +458,7 @@ impl<'a> Read for &'a Socket {
 }
 
 impl AsInner<OwnedSocket> for Socket {
+    #[inline]
     fn as_inner(&self) -> &OwnedSocket {
         &self.0
     }

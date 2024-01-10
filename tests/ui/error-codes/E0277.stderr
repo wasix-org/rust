@@ -5,7 +5,8 @@ LL | fn f(p: Path) { }
    |      ^ doesn't have a size known at compile-time
    |
    = help: within `Path`, the trait `Sized` is not implemented for `[u8]`
-   = note: required because it appears within the type `Path`
+note: required because it appears within the type `Path`
+  --> $SRC_DIR/std/src/path.rs:LL:COL
    = help: unsized fn params are gated as an unstable feature
 help: function arguments must have a statically known size, borrowed types always have a known size
    |
@@ -20,6 +21,11 @@ LL |     some_func(5i32);
    |     |
    |     required by a bound introduced by this call
    |
+help: this trait has no implementations, consider adding one
+  --> $DIR/E0277.rs:3:1
+   |
+LL | trait Foo {
+   | ^^^^^^^^^
 note: required by a bound in `some_func`
   --> $DIR/E0277.rs:7:17
    |

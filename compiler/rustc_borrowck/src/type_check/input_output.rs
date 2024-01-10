@@ -7,8 +7,7 @@
 //! `RETURN_PLACE` the MIR arguments) are always fully normalized (and
 //! contain revealed `impl Trait` values).
 
-use rustc_index::vec::Idx;
-use rustc_infer::infer::LateBoundRegionConversionTime;
+use rustc_infer::infer::BoundRegionConversionTime;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::Span;
@@ -19,11 +18,11 @@ use super::{Locations, TypeChecker};
 
 impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
     /// Check explicit closure signature annotation,
-    /// e.g., `|x: FxHashMap<_, &'static u32>| ...`.
+    /// e.g., `|x: FxIndexMap<_, &'static u32>| ...`.
     #[instrument(skip(self, body), level = "debug")]
     pub(super) fn check_signature_annotation(&mut self, body: &Body<'tcx>) {
         let mir_def_id = body.source.def_id().expect_local();
-        if !self.tcx().is_closure(mir_def_id.to_def_id()) {
+        if !self.tcx().is_closure_or_coroutine(mir_def_id.to_def_id()) {
             return;
         }
         let user_provided_poly_sig = self.tcx().closure_user_provided_sig(mir_def_id);
@@ -36,7 +35,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             .instantiate_canonical_with_fresh_inference_vars(body.span, &user_provided_poly_sig);
         let user_provided_sig = self.infcx.instantiate_binder_with_fresh_vars(
             body.span,
-            LateBoundRegionConversionTime::FnCall,
+            BoundRegionConversionTime::FnCall,
             user_provided_sig,
         );
 
@@ -77,13 +76,13 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         for (argument_index, &normalized_input_ty) in normalized_input_tys.iter().enumerate() {
             if argument_index + 1 >= body.local_decls.len() {
                 self.tcx()
-                    .sess
-                    .delay_span_bug(body.span, "found more normalized_input_ty than local_decls");
+                    .dcx()
+                    .span_delayed_bug(body.span, "found more normalized_input_ty than local_decls");
                 break;
             }
 
             // In MIR, argument N is stored in local N+1.
-            let local = Local::new(argument_index + 1);
+            let local = Local::from_usize(argument_index + 1);
 
             let mir_input_ty = body.local_decls[local].ty;
 
@@ -95,51 +94,28 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             );
         }
 
-        debug!(
-            "equate_inputs_and_outputs: body.yield_ty {:?}, universal_regions.yield_ty {:?}",
-            body.yield_ty(),
-            universal_regions.yield_ty
-        );
-
-        // We will not have a universal_regions.yield_ty if we yield (by accident)
-        // outside of a generator and return an `impl Trait`, so emit a delay_span_bug
-        // because we don't want to panic in an assert here if we've already got errors.
-        if body.yield_ty().is_some() != universal_regions.yield_ty.is_some() {
-            self.tcx().sess.delay_span_bug(
-                body.span,
-                &format!(
-                    "Expected body to have yield_ty ({:?}) iff we have a UR yield_ty ({:?})",
-                    body.yield_ty(),
-                    universal_regions.yield_ty,
-                ),
+        if let Some(mir_yield_ty) = body.yield_ty() {
+            let yield_span = body.local_decls[RETURN_PLACE].source_info.span;
+            self.equate_normalized_input_or_output(
+                universal_regions.yield_ty.unwrap(),
+                mir_yield_ty,
+                yield_span,
             );
         }
 
-        if let (Some(mir_yield_ty), Some(ur_yield_ty)) =
-            (body.yield_ty(), universal_regions.yield_ty)
-        {
+        if let Some(mir_resume_ty) = body.resume_ty() {
             let yield_span = body.local_decls[RETURN_PLACE].source_info.span;
-            self.equate_normalized_input_or_output(ur_yield_ty, mir_yield_ty, yield_span);
+            self.equate_normalized_input_or_output(
+                universal_regions.resume_ty.unwrap(),
+                mir_resume_ty,
+                yield_span,
+            );
         }
 
         // Return types are a bit more complex. They may contain opaque `impl Trait` types.
         let mir_output_ty = body.local_decls[RETURN_PLACE].ty;
         let output_span = body.local_decls[RETURN_PLACE].source_info.span;
-        if let Err(terr) = self.eq_types(
-            normalized_output_ty,
-            mir_output_ty,
-            Locations::All(output_span),
-            ConstraintCategory::BoringNoLocation,
-        ) {
-            span_mirbug!(
-                self,
-                Location::START,
-                "equate_inputs_and_outputs: `{:?}=={:?}` failed with `{:?}`",
-                normalized_output_ty,
-                mir_output_ty,
-                terr
-            );
-        };
+        self.equate_normalized_input_or_output(normalized_output_ty, mir_output_ty, output_span);
     }
 
     #[instrument(skip(self), level = "debug")]

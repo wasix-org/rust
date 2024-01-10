@@ -202,7 +202,7 @@ impl OpenOptions {
             create: false,
             create_new: false,
             // system-specific
-            mode: 0x777,
+            mode: 0o777,
         }
     }
 
@@ -335,6 +335,7 @@ impl File {
         false
     }
 
+    #[inline]
     pub fn flush(&self) -> io::Result<()> {
         Ok(())
     }
@@ -367,12 +368,14 @@ impl DirBuilder {
 }
 
 impl AsInner<FileDesc> for File {
+    #[inline]
     fn as_inner(&self) -> &FileDesc {
         &self.0
     }
 }
 
 impl AsInnerMut<FileDesc> for File {
+    #[inline]
     fn as_inner_mut(&mut self) -> &mut FileDesc {
         &mut self.0
     }
@@ -397,6 +400,7 @@ impl AsFd for File {
 }
 
 impl AsRawFd for File {
+    #[inline]
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }

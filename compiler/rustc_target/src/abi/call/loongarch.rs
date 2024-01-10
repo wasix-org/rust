@@ -83,6 +83,17 @@ where
             }
             FieldsShape::Union(_) => {
                 if !arg_layout.is_zst() {
+                    if arg_layout.is_transparent() {
+                        let non_1zst_elem = arg_layout.non_1zst_field(cx).expect("not exactly one non-1-ZST field in non-ZST repr(transparent) union").1;
+                        return should_use_fp_conv_helper(
+                            cx,
+                            &non_1zst_elem,
+                            xlen,
+                            flen,
+                            field1_kind,
+                            field2_kind,
+                        );
+                    }
                     return Err(CannotUseFpConv);
                 }
             }
@@ -141,6 +152,10 @@ fn classify_ret<'a, Ty, C>(cx: &C, arg: &mut ArgAbi<'a, Ty>, xlen: u64, flen: u6
 where
     Ty: TyAbiInterface<'a, C> + Copy,
 {
+    if !arg.layout.is_sized() {
+        // Not touching this...
+        return false; // I guess? return value of this function is not documented
+    }
     if let Some(conv) = should_use_fp_conv(cx, &arg.layout, xlen, flen) {
         match conv {
             FloatConv::Float(f) => {
@@ -203,6 +218,10 @@ fn classify_arg<'a, Ty, C>(
 ) where
     Ty: TyAbiInterface<'a, C> + Copy,
 {
+    if !arg.layout.is_sized() {
+        // Not touching this...
+        return;
+    }
     if !is_vararg {
         match should_use_fp_conv(cx, &arg.layout, xlen, flen) {
             Some(FloatConv::Float(f)) if *avail_fprs >= 1 => {

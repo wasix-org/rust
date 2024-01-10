@@ -8,21 +8,30 @@ macro_rules! assert_const {
 }
 fn main() {
     assert!(true);
+    //~^ ERROR: `assert!(true)` will be optimized out by the compiler
     assert!(false);
+    //~^ ERROR: `assert!(false)` should probably be replaced
     assert!(true, "true message");
+    //~^ ERROR: `assert!(true)` will be optimized out by the compiler
     assert!(false, "false message");
+    //~^ ERROR: `assert!(false, ..)` should probably be replaced
 
     let msg = "panic message";
     assert!(false, "{}", msg.to_uppercase());
+    //~^ ERROR: `assert!(false, ..)` should probably be replaced
 
     const B: bool = true;
     assert!(B);
+    //~^ ERROR: `assert!(true)` will be optimized out by the compiler
 
     const C: bool = false;
     assert!(C);
+    //~^ ERROR: `assert!(false)` should probably be replaced
     assert!(C, "C message");
+    //~^ ERROR: `assert!(false, ..)` should probably be replaced
 
     debug_assert!(true);
+    //~^ ERROR: `debug_assert!(true)` will be optimized out by the compiler
     // Don't lint this, since there is no better way for expressing "Only panic in debug mode".
     debug_assert!(false); // #3948
     assert_const!(3);
@@ -36,4 +45,11 @@ fn main() {
 
     const CFG_FLAG: &bool = &cfg!(feature = "hey");
     assert!(!CFG_FLAG);
+
+    const _: () = assert!(true);
+    //~^ ERROR: `assert!(true)` will be optimized out by the compiler
+
+    // Don't lint if the value is dependent on a defined constant:
+    const N: usize = 1024;
+    const _: () = assert!(N.is_power_of_two());
 }

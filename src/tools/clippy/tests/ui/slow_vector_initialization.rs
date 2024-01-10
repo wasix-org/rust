@@ -1,9 +1,10 @@
+//@no-rustfix
 use std::iter::repeat;
-
 fn main() {
     resize_vector();
     extend_vector();
     mixed_extend_resize_vector();
+    from_empty_vec();
 }
 
 fn extend_vector() {
@@ -11,10 +12,13 @@ fn extend_vector() {
     let len = 300;
     let mut vec1 = Vec::with_capacity(len);
     vec1.extend(repeat(0).take(len));
+    //~^ ERROR: slow zero-filling initialization
+    //~| NOTE: `-D clippy::slow-vector-initialization` implied by `-D warnings`
 
     // Extend with len expression
     let mut vec2 = Vec::with_capacity(len - 10);
     vec2.extend(repeat(0).take(len - 10));
+    //~^ ERROR: slow zero-filling initialization
 
     // Extend with mismatching expression should not be warned
     let mut vec3 = Vec::with_capacity(24322);
@@ -22,6 +26,7 @@ fn extend_vector() {
 
     let mut vec4 = Vec::with_capacity(len);
     vec4.extend(repeat(0).take(vec4.capacity()));
+    //~^ ERROR: slow zero-filling initialization
 }
 
 fn mixed_extend_resize_vector() {
@@ -32,9 +37,11 @@ fn mixed_extend_resize_vector() {
     // Slow initialization
     let mut resized_vec = Vec::with_capacity(30);
     resized_vec.resize(30, 0);
+    //~^ ERROR: slow zero-filling initialization
 
     let mut extend_vec = Vec::with_capacity(30);
     extend_vec.extend(repeat(0).take(30));
+    //~^ ERROR: slow zero-filling initialization
 }
 
 fn resize_vector() {
@@ -42,6 +49,7 @@ fn resize_vector() {
     let len = 300;
     let mut vec1 = Vec::with_capacity(len);
     vec1.resize(len, 0);
+    //~^ ERROR: slow zero-filling initialization
 
     // Resize mismatch len
     let mut vec2 = Vec::with_capacity(200);
@@ -50,12 +58,47 @@ fn resize_vector() {
     // Resize with len expression
     let mut vec3 = Vec::with_capacity(len - 10);
     vec3.resize(len - 10, 0);
+    //~^ ERROR: slow zero-filling initialization
 
     let mut vec4 = Vec::with_capacity(len);
     vec4.resize(vec4.capacity(), 0);
+    //~^ ERROR: slow zero-filling initialization
 
     // Reinitialization should be warned
     vec1 = Vec::with_capacity(10);
+    vec1.resize(10, 0);
+    //~^ ERROR: slow zero-filling initialization
+}
+
+fn from_empty_vec() {
+    // Resize with constant expression
+    let len = 300;
+    let mut vec1 = Vec::new();
+    vec1.resize(len, 0);
+    //~^ ERROR: slow zero-filling initialization
+
+    // Resize with len expression
+    let mut vec3 = Vec::new();
+    vec3.resize(len - 10, 0);
+    //~^ ERROR: slow zero-filling initialization
+
+    // Reinitialization should be warned
+    vec1 = Vec::new();
+    vec1.resize(10, 0);
+    //~^ ERROR: slow zero-filling initialization
+
+    vec1 = vec![];
+    vec1.resize(10, 0);
+    //~^ ERROR: slow zero-filling initialization
+
+    macro_rules! x {
+        () => {
+            vec![]
+        };
+    }
+
+    // `vec![]` comes from another macro, don't warn
+    vec1 = x!();
     vec1.resize(10, 0);
 }
 

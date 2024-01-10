@@ -1,15 +1,16 @@
 #![feature(lint_reasons)]
 #![warn(clippy::manual_non_exhaustive)]
 #![allow(unused)]
-
+//@no-rustfix
 enum E {
+    //~^ ERROR: this seems like a manual implementation of the non-exhaustive pattern
     A,
     B,
     #[doc(hidden)]
     _C,
 }
 
-// user forgot to remove the marker
+// if the user explicitly marks as nonexhaustive we shouldn't warn them
 #[non_exhaustive]
 enum Ep {
     A,
@@ -25,7 +26,7 @@ enum NoDocHidden {
     _C,
 }
 
-// name of variant with doc hidden does not start with underscore, should be ignored
+// name of variant with doc hidden does not start with underscore
 enum NoUnderscore {
     A,
     B,

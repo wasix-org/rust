@@ -1,7 +1,5 @@
 use super::*;
 
-use crate::path::Path;
-
 #[test]
 #[cfg_attr(any(target_os = "emscripten", target_env = "sgx"), ignore)]
 fn test_self_exe_path() {
@@ -95,8 +93,28 @@ fn args_debug() {
         format!("Args {{ inner: {:?} }}", args().collect::<Vec<_>>()),
         format!("{:?}", args())
     );
+}
+
+#[test]
+fn args_os_debug() {
     assert_eq!(
         format!("ArgsOs {{ inner: {:?} }}", args_os().collect::<Vec<_>>()),
         format!("{:?}", args_os())
+    );
+}
+
+#[test]
+fn vars_debug() {
+    assert_eq!(
+        format!("Vars {{ inner: {:?} }}", vars().collect::<Vec<_>>()),
+        format!("{:?}", vars())
+    );
+}
+
+#[test]
+fn vars_os_debug() {
+    assert_eq!(
+        format!("VarsOs {{ inner: {:?} }}", vars_os().collect::<Vec<_>>()),
+        format!("{:?}", vars_os())
     );
 }

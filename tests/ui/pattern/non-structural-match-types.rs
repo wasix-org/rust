@@ -1,4 +1,5 @@
 // edition:2021
+
 #![allow(incomplete_features)]
 #![allow(unreachable_code)]
 #![feature(const_async_blocks)]
@@ -6,9 +7,9 @@
 
 fn main() {
     match loop {} {
-        const { || {} } => {}, //~ ERROR cannot be used in patterns
+        const { || {} } => {} //~ ERROR cannot be used in patterns
     }
     match loop {} {
-        const { async {} } => {}, //~ ERROR cannot be used in patterns
+        const { async {} } => {} //~ ERROR cannot be used in patterns
     }
 }

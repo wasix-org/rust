@@ -30,7 +30,7 @@ pub fn check_live_drops<'tcx>(tcx: TyCtxt<'tcx>, body: &mir::Body<'tcx>) {
         return;
     }
 
-    if tcx.has_attr(def_id.to_def_id(), sym::rustc_do_not_const_check) {
+    if tcx.has_attr(def_id, sym::rustc_do_not_const_check) {
         return;
     }
 
@@ -54,7 +54,7 @@ impl<'mir, 'tcx> std::ops::Deref for CheckLiveDrops<'mir, 'tcx> {
     type Target = ConstCx<'mir, 'tcx>;
 
     fn deref(&self) -> &Self::Target {
-        &self.ccx
+        self.ccx
     }
 }
 
@@ -80,9 +80,9 @@ impl<'tcx> Visitor<'tcx> for CheckLiveDrops<'_, 'tcx> {
         trace!("visit_terminator: terminator={:?} location={:?}", terminator, location);
 
         match &terminator.kind {
-            mir::TerminatorKind::Drop { place: dropped_place, .. }
-            | mir::TerminatorKind::DropAndReplace { place: dropped_place, .. } => {
+            mir::TerminatorKind::Drop { place: dropped_place, .. } => {
                 let dropped_ty = dropped_place.ty(self.body, self.tcx).ty;
+
                 if !NeedsNonConstDrop::in_any_value_of_ty(self.ccx, dropped_ty) {
                     // Instead of throwing a bug, we just return here. This is because we have to
                     // run custom `const Drop` impls.
@@ -105,15 +105,15 @@ impl<'tcx> Visitor<'tcx> for CheckLiveDrops<'_, 'tcx> {
                 }
             }
 
-            mir::TerminatorKind::Abort
+            mir::TerminatorKind::UnwindTerminate(_)
             | mir::TerminatorKind::Call { .. }
             | mir::TerminatorKind::Assert { .. }
             | mir::TerminatorKind::FalseEdge { .. }
             | mir::TerminatorKind::FalseUnwind { .. }
-            | mir::TerminatorKind::GeneratorDrop
+            | mir::TerminatorKind::CoroutineDrop
             | mir::TerminatorKind::Goto { .. }
             | mir::TerminatorKind::InlineAsm { .. }
-            | mir::TerminatorKind::Resume
+            | mir::TerminatorKind::UnwindResume
             | mir::TerminatorKind::Return
             | mir::TerminatorKind::SwitchInt { .. }
             | mir::TerminatorKind::Unreachable

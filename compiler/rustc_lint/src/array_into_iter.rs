@@ -34,8 +34,8 @@ declare_lint! {
     Warn,
     "detects calling `into_iter` on arrays in Rust 2015 and 2018",
     @future_incompatible = FutureIncompatibleInfo {
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/IntoIterator-for-arrays.html>",
         reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2021),
+        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/IntoIterator-for-arrays.html>",
     };
 }
 
@@ -81,7 +81,7 @@ impl<'tcx> LateLintPass<'tcx> for ArrayIntoIter {
             let adjustments = cx.typeck_results().expr_adjustments(receiver_arg);
 
             let Some(Adjustment { kind: Adjust::Borrow(_), target }) = adjustments.last() else {
-                return
+                return;
             };
 
             let types =

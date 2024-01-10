@@ -1,10 +1,11 @@
 use clippy_utils::diagnostics::span_lint;
 use clippy_utils::ty::is_c_void;
-use clippy_utils::{get_parent_expr, is_hir_ty_cfg_dependant, match_any_def_paths, paths};
+use clippy_utils::{get_parent_expr, is_hir_ty_cfg_dependant};
 use rustc_hir::{Expr, ExprKind, GenericArg};
 use rustc_lint::LateContext;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::{self, Ty};
+use rustc_span::sym;
 
 use super::CAST_PTR_ALIGNMENT;
 
@@ -25,8 +26,7 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>) {
             // There probably is no obvious reason to do this, just to be consistent with `as` cases.
             && !is_hir_ty_cfg_dependant(cx, cast_to)
         {
-            let (cast_from, cast_to) =
-                (cx.typeck_results().expr_ty(self_arg), cx.typeck_results().expr_ty(expr));
+            let (cast_from, cast_to) = (cx.typeck_results().expr_ty(self_arg), cx.typeck_results().expr_ty(expr));
             lint_cast_ptr_alignment(cx, expr, cast_from, cast_to);
         }
     }
@@ -66,7 +66,7 @@ fn is_used_as_unaligned(cx: &LateContext<'_>, e: &Expr<'_>) -> bool {
             if matches!(name.ident.as_str(), "read_unaligned" | "write_unaligned")
                 && let Some(def_id) = cx.typeck_results().type_dependent_def_id(parent.hir_id)
                 && let Some(def_id) = cx.tcx.impl_of_method(def_id)
-                && cx.tcx.type_of(def_id).subst_identity().is_unsafe_ptr()
+                && cx.tcx.type_of(def_id).instantiate_identity().is_unsafe_ptr()
             {
                 true
             } else {
@@ -74,15 +74,17 @@ fn is_used_as_unaligned(cx: &LateContext<'_>, e: &Expr<'_>) -> bool {
             }
         },
         ExprKind::Call(func, [arg, ..]) if arg.hir_id == e.hir_id => {
-            static PATHS: &[&[&str]] = &[
-                paths::PTR_READ_UNALIGNED.as_slice(),
-                paths::PTR_WRITE_UNALIGNED.as_slice(),
-                paths::PTR_UNALIGNED_VOLATILE_LOAD.as_slice(),
-                paths::PTR_UNALIGNED_VOLATILE_STORE.as_slice(),
-            ];
             if let ExprKind::Path(path) = &func.kind
                 && let Some(def_id) = cx.qpath_res(path, func.hir_id).opt_def_id()
-                && match_any_def_paths(cx, def_id, PATHS).is_some()
+                && matches!(
+                    cx.tcx.get_diagnostic_name(def_id),
+                    Some(
+                        sym::ptr_write_unaligned
+                            | sym::ptr_read_unaligned
+                            | sym::intrinsics_unaligned_volatile_load
+                            | sym::intrinsics_unaligned_volatile_store
+                    )
+                )
             {
                 true
             } else {

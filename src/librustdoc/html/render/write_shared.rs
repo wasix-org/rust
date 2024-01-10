@@ -5,18 +5,28 @@ use std::io::{self, BufReader};
 use std::path::{Component, Path};
 use std::rc::{Rc, Weak};
 
+use indexmap::IndexMap;
 use itertools::Itertools;
 use rustc_data_structures::flock;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
+use rustc_span::def_id::DefId;
+use rustc_span::Symbol;
 use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 
-use super::{collect_paths_for_type, ensure_trailing_slash, Context};
-use crate::clean::Crate;
+use super::{collect_paths_for_type, ensure_trailing_slash, Context, RenderMode};
+use crate::clean::{Crate, Item, ItemId, ItemKind};
 use crate::config::{EmitType, RenderOptions};
 use crate::docfs::PathError;
 use crate::error::Error;
+use crate::formats::cache::Cache;
+use crate::formats::item_type::ItemType;
+use crate::formats::Impl;
+use crate::html::format::Buffer;
+use crate::html::render::{AssocItemLink, ImplRenderingParameters};
 use crate::html::{layout, static_files};
+use crate::visit::DocVisitor;
 use crate::{try_err, try_none};
 
 /// Rustdoc writes out two kinds of shared files:
@@ -73,7 +83,7 @@ pub(super) fn write_shared(
         }
 
         let bytes = try_err!(fs::read(&entry.path), &entry.path);
-        let filename = format!("{}{}.{}", theme, cx.shared.resource_suffix, extension);
+        let filename = format!("{theme}{suffix}.{extension}", suffix = cx.shared.resource_suffix);
         cx.shared.fs.write(cx.dst.join(filename), bytes)?;
     }
 
@@ -112,7 +122,7 @@ pub(super) fn write_shared(
         let mut krates = Vec::new();
 
         if path.exists() {
-            let prefix = format!("\"{}\"", krate);
+            let prefix = format!("\"{krate}\"");
             for line in BufReader::new(File::open(path)?).lines() {
                 let line = line?;
                 if !line.starts_with('"') {
@@ -157,23 +167,24 @@ pub(super) fn write_shared(
         let mut krates = Vec::new();
 
         if path.exists() {
-            let prefix = format!("\"{}\"", krate);
+            let prefix = format!("[\"{krate}\"");
             for line in BufReader::new(File::open(path)?).lines() {
                 let line = line?;
-                if !line.starts_with('"') {
+                if !line.starts_with("[\"") {
                     continue;
                 }
                 if line.starts_with(&prefix) {
                     continue;
                 }
-                if line.ends_with(",\\") {
+                if line.ends_with("],\\") {
                     ret.push(line[..line.len() - 2].to_string());
                 } else {
                     // Ends with "\\" (it's the case for the last added crate line)
                     ret.push(line[..line.len() - 1].to_string());
                 }
                 krates.push(
-                    line.split('"')
+                    line[1..] // We skip the `[` parent at the beginning of the line.
+                        .split('"')
                         .find(|s| !s.is_empty())
                         .map(|s| s.to_owned())
                         .unwrap_or_else(String::new),
@@ -213,10 +224,10 @@ pub(super) fn write_shared(
             let dirs = if subs.is_empty() && files.is_empty() {
                 String::new()
             } else {
-                format!(",[{}]", subs)
+                format!(",[{subs}]")
             };
             let files = files.join(",");
-            let files = if files.is_empty() { String::new() } else { format!(",[{}]", files) };
+            let files = if files.is_empty() { String::new() } else { format!(",[{files}]") };
             format!(
                 "[\"{name}\"{dirs}{files}]",
                 name = self.elem.to_str().expect("invalid osstring conversion"),
@@ -270,12 +281,12 @@ pub(super) fn write_shared(
             hierarchy.add_path(source);
         }
         let hierarchy = Rc::try_unwrap(hierarchy).unwrap();
-        let dst = cx.dst.join(&format!("source-files{}.js", cx.shared.resource_suffix));
+        let dst = cx.dst.join(&format!("src-files{}.js", cx.shared.resource_suffix));
         let make_sources = || {
             let (mut all_sources, _krates) =
                 try_err!(collect_json(&dst, krate.name(cx.tcx()).as_str()), &dst);
             all_sources.push(format!(
-                r#""{}":{}"#,
+                r#"["{}",{}]"#,
                 &krate.name(cx.tcx()),
                 hierarchy
                     .to_json_string()
@@ -286,12 +297,15 @@ pub(super) fn write_shared(
                     .replace("\\\"", "\\\\\"")
             ));
             all_sources.sort();
-            let mut v = String::from("var sourcesIndex = JSON.parse('{\\\n");
+            // This needs to be `var`, not `const`.
+            // This variable needs declared in the current global scope so that if
+            // src-script.js loads first, it can pick it up.
+            let mut v = String::from("var srcIndex = new Map(JSON.parse('[\\\n");
             v.push_str(&all_sources.join(",\\\n"));
-            v.push_str("\\\n}');\ncreateSourceSidebar();\n");
+            v.push_str("\\\n]'));\ncreateSrcSidebar();\n");
             Ok(v.into_bytes())
         };
-        write_invocation_specific("source-files.js", &make_sources)?;
+        write_invocation_specific("src-files.js", &make_sources)?;
     }
 
     // Update the search index and crate list.
@@ -306,21 +320,24 @@ pub(super) fn write_shared(
     // with rustdoc running in parallel.
     all_indexes.sort();
     write_invocation_specific("search-index.js", &|| {
-        let mut v = String::from("var searchIndex = JSON.parse('{\\\n");
+        // This needs to be `var`, not `const`.
+        // This variable needs declared in the current global scope so that if
+        // search.js loads first, it can pick it up.
+        let mut v = String::from("var searchIndex = new Map(JSON.parse('[\\\n");
         v.push_str(&all_indexes.join(",\\\n"));
         v.push_str(
             r#"\
-}');
-if (typeof window !== 'undefined' && window.initSearch) {window.initSearch(searchIndex)};
-if (typeof exports !== 'undefined') {exports.searchIndex = searchIndex};
+]'));
+if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
+else if (window.initSearch) window.initSearch(searchIndex);
 "#,
         );
         Ok(v.into_bytes())
     })?;
 
     write_invocation_specific("crates.js", &|| {
-        let krates = krates.iter().map(|k| format!("\"{}\"", k)).join(",");
-        Ok(format!("window.ALL_CRATES = [{}];", krates).into_bytes())
+        let krates = krates.iter().map(|k| format!("\"{k}\"")).join(",");
+        Ok(format!("window.ALL_CRATES = [{krates}];").into_bytes())
     })?;
 
     if options.enable_index_page {
@@ -336,34 +353,286 @@ if (typeof exports !== 'undefined') {exports.searchIndex = searchIndex};
             let dst = cx.dst.join("index.html");
             let page = layout::Page {
                 title: "Index of crates",
-                css_class: "mod",
+                css_class: "mod sys",
                 root_path: "./",
                 static_root_path: shared.static_root_path.as_deref(),
                 description: "List of crates",
                 resource_suffix: &shared.resource_suffix,
+                rust_logo: true,
             };
 
             let content = format!(
                 "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
-                krates
-                    .iter()
-                    .map(|s| {
-                        format!(
-                            "<li><a href=\"{}index.html\">{}</a></li>",
-                            ensure_trailing_slash(s),
-                            s
-                        )
-                    })
-                    .collect::<String>()
+                krates.iter().format_with("", |k, f| {
+                    f(&format_args!(
+                        "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
+                        trailing_slash = ensure_trailing_slash(k),
+                    ))
+                })
             );
             let v = layout::render(&shared.layout, &page, "", content, &shared.style_files);
             shared.fs.write(dst, v)?;
         }
     }
 
+    let cloned_shared = Rc::clone(&cx.shared);
+    let cache = &cloned_shared.cache;
+
+    // Collect the list of aliased types and their aliases.
+    // <https://github.com/search?q=repo%3Arust-lang%2Frust+[RUSTDOCIMPL]+type.impl&type=code>
+    //
+    // The clean AST has type aliases that point at their types, but
+    // this visitor works to reverse that: `aliased_types` is a map
+    // from target to the aliases that reference it, and each one
+    // will generate one file.
+    struct TypeImplCollector<'cx, 'cache> {
+        // Map from DefId-of-aliased-type to its data.
+        aliased_types: IndexMap<DefId, AliasedType<'cache>>,
+        visited_aliases: FxHashSet<DefId>,
+        cache: &'cache Cache,
+        cx: &'cache mut Context<'cx>,
+    }
+    // Data for an aliased type.
+    //
+    // In the final file, the format will be roughly:
+    //
+    // ```json
+    // // type.impl/CRATE/TYPENAME.js
+    // JSONP(
+    // "CRATE": [
+    //   ["IMPL1 HTML", "ALIAS1", "ALIAS2", ...],
+    //   ["IMPL2 HTML", "ALIAS3", "ALIAS4", ...],
+    //    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ struct AliasedType
+    //   ...
+    // ]
+    // )
+    // ```
+    struct AliasedType<'cache> {
+        // This is used to generate the actual filename of this aliased type.
+        target_fqp: &'cache [Symbol],
+        target_type: ItemType,
+        // This is the data stored inside the file.
+        // ItemId is used to deduplicate impls.
+        impl_: IndexMap<ItemId, AliasedTypeImpl<'cache>>,
+    }
+    // The `impl_` contains data that's used to figure out if an alias will work,
+    // and to generate the HTML at the end.
+    //
+    // The `type_aliases` list is built up with each type alias that matches.
+    struct AliasedTypeImpl<'cache> {
+        impl_: &'cache Impl,
+        type_aliases: Vec<(&'cache [Symbol], Item)>,
+    }
+    impl<'cx, 'cache> DocVisitor for TypeImplCollector<'cx, 'cache> {
+        fn visit_item(&mut self, it: &Item) {
+            self.visit_item_recur(it);
+            let cache = self.cache;
+            let ItemKind::TypeAliasItem(ref t) = *it.kind else { return };
+            let Some(self_did) = it.item_id.as_def_id() else { return };
+            if !self.visited_aliases.insert(self_did) {
+                return;
+            }
+            let Some(target_did) = t.type_.def_id(cache) else { return };
+            let get_extern = { || cache.external_paths.get(&target_did) };
+            let Some(&(ref target_fqp, target_type)) =
+                cache.paths.get(&target_did).or_else(get_extern)
+            else {
+                return;
+            };
+            let aliased_type = self.aliased_types.entry(target_did).or_insert_with(|| {
+                let impl_ = cache
+                    .impls
+                    .get(&target_did)
+                    .map(|v| &v[..])
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|impl_| {
+                        (
+                            impl_.impl_item.item_id,
+                            AliasedTypeImpl { impl_, type_aliases: Vec::new() },
+                        )
+                    })
+                    .collect();
+                AliasedType { target_fqp: &target_fqp[..], target_type, impl_ }
+            });
+            let get_local = { || cache.paths.get(&self_did).map(|(p, _)| p) };
+            let Some(self_fqp) = cache.exact_paths.get(&self_did).or_else(get_local) else {
+                return;
+            };
+            let aliased_ty = self.cx.tcx().type_of(self_did).skip_binder();
+            // Exclude impls that are directly on this type. They're already in the HTML.
+            // Some inlining scenarios can cause there to be two versions of the same
+            // impl: one on the type alias and one on the underlying target type.
+            let mut seen_impls: FxHashSet<ItemId> = cache
+                .impls
+                .get(&self_did)
+                .map(|s| &s[..])
+                .unwrap_or_default()
+                .iter()
+                .map(|i| i.impl_item.item_id)
+                .collect();
+            for (impl_item_id, aliased_type_impl) in &mut aliased_type.impl_ {
+                // Only include this impl if it actually unifies with this alias.
+                // Synthetic impls are not included; those are also included in the HTML.
+                //
+                // FIXME(lazy_type_alias): Once the feature is complete or stable, rewrite this
+                // to use type unification.
+                // Be aware of `tests/rustdoc/type-alias/deeply-nested-112515.rs` which might regress.
+                let Some(impl_did) = impl_item_id.as_def_id() else { continue };
+                let for_ty = self.cx.tcx().type_of(impl_did).skip_binder();
+                let reject_cx =
+                    DeepRejectCtxt { treat_obligation_params: TreatParams::AsCandidateKey };
+                if !reject_cx.types_may_unify(aliased_ty, for_ty) {
+                    continue;
+                }
+                // Avoid duplicates
+                if !seen_impls.insert(*impl_item_id) {
+                    continue;
+                }
+                // This impl was not found in the set of rejected impls
+                aliased_type_impl.type_aliases.push((&self_fqp[..], it.clone()));
+            }
+        }
+    }
+    let mut type_impl_collector = TypeImplCollector {
+        aliased_types: IndexMap::default(),
+        visited_aliases: FxHashSet::default(),
+        cache,
+        cx,
+    };
+    DocVisitor::visit_crate(&mut type_impl_collector, &krate);
+    // Final serialized form of the alias impl
+    struct AliasSerializableImpl {
+        text: String,
+        trait_: Option<String>,
+        aliases: Vec<String>,
+    }
+    impl Serialize for AliasSerializableImpl {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let mut seq = serializer.serialize_seq(None)?;
+            seq.serialize_element(&self.text)?;
+            if let Some(trait_) = &self.trait_ {
+                seq.serialize_element(trait_)?;
+            } else {
+                seq.serialize_element(&0)?;
+            }
+            for type_ in &self.aliases {
+                seq.serialize_element(type_)?;
+            }
+            seq.end()
+        }
+    }
+    let cx = type_impl_collector.cx;
+    let dst = cx.dst.join("type.impl");
+    let aliased_types = type_impl_collector.aliased_types;
+    for aliased_type in aliased_types.values() {
+        let impls = aliased_type
+            .impl_
+            .values()
+            .flat_map(|AliasedTypeImpl { impl_, type_aliases }| {
+                let mut ret = Vec::new();
+                let trait_ = impl_
+                    .inner_impl()
+                    .trait_
+                    .as_ref()
+                    .map(|trait_| format!("{:#}", trait_.print(cx)));
+                // render_impl will filter out "impossible-to-call" methods
+                // to make that functionality work here, it needs to be called with
+                // each type alias, and if it gives a different result, split the impl
+                for &(type_alias_fqp, ref type_alias_item) in type_aliases {
+                    let mut buf = Buffer::html();
+                    cx.id_map = Default::default();
+                    cx.deref_id_map = Default::default();
+                    let target_did = impl_
+                        .inner_impl()
+                        .trait_
+                        .as_ref()
+                        .map(|trait_| trait_.def_id())
+                        .or_else(|| impl_.inner_impl().for_.def_id(cache));
+                    let provided_methods;
+                    let assoc_link = if let Some(target_did) = target_did {
+                        provided_methods = impl_.inner_impl().provided_trait_methods(cx.tcx());
+                        AssocItemLink::GotoSource(ItemId::DefId(target_did), &provided_methods)
+                    } else {
+                        AssocItemLink::Anchor(None)
+                    };
+                    super::render_impl(
+                        &mut buf,
+                        cx,
+                        *impl_,
+                        &type_alias_item,
+                        assoc_link,
+                        RenderMode::Normal,
+                        None,
+                        &[],
+                        ImplRenderingParameters {
+                            show_def_docs: true,
+                            show_default_items: true,
+                            show_non_assoc_items: true,
+                            toggle_open_by_default: true,
+                        },
+                    );
+                    let text = buf.into_inner();
+                    let type_alias_fqp = (*type_alias_fqp).iter().join("::");
+                    if Some(&text) == ret.last().map(|s: &AliasSerializableImpl| &s.text) {
+                        ret.last_mut()
+                            .expect("already established that ret.last() is Some()")
+                            .aliases
+                            .push(type_alias_fqp);
+                    } else {
+                        ret.push(AliasSerializableImpl {
+                            text,
+                            trait_: trait_.clone(),
+                            aliases: vec![type_alias_fqp],
+                        })
+                    }
+                }
+                ret
+            })
+            .collect::<Vec<_>>();
+        let impls = format!(
+            r#""{}":{}"#,
+            krate.name(cx.tcx()),
+            serde_json::to_string(&impls).expect("failed serde conversion"),
+        );
+
+        let mut mydst = dst.clone();
+        for part in &aliased_type.target_fqp[..aliased_type.target_fqp.len() - 1] {
+            mydst.push(part.to_string());
+        }
+        cx.shared.ensure_dir(&mydst)?;
+        let aliased_item_type = aliased_type.target_type;
+        mydst.push(&format!(
+            "{aliased_item_type}.{}.js",
+            aliased_type.target_fqp[aliased_type.target_fqp.len() - 1]
+        ));
+
+        let (mut all_impls, _) = try_err!(collect(&mydst, krate.name(cx.tcx()).as_str()), &mydst);
+        all_impls.push(impls);
+        // Sort the implementors by crate so the file will be generated
+        // identically even with rustdoc running in parallel.
+        all_impls.sort();
+
+        let mut v = String::from("(function() {var type_impls = {\n");
+        v.push_str(&all_impls.join(",\n"));
+        v.push_str("\n};");
+        v.push_str(
+            "if (window.register_type_impls) {\
+                 window.register_type_impls(type_impls);\
+             } else {\
+                 window.pending_type_impls = type_impls;\
+             }",
+        );
+        v.push_str("})()");
+        cx.shared.fs.write(mydst, v)?;
+    }
+
     // Update the list of all implementors for traits
-    let dst = cx.dst.join("implementors");
-    let cache = cx.cache();
+    // <https://github.com/search?q=repo%3Arust-lang%2Frust+[RUSTDOCIMPL]+trait.impl&type=code>
+    let dst = cx.dst.join("trait.impl");
     for (&did, imps) in &cache.implementors {
         // Private modules can leak through to this phase of rustdoc, which
         // could contain implementations for otherwise private types. In some
@@ -444,7 +713,7 @@ if (typeof exports !== 'undefined') {exports.searchIndex = searchIndex};
             mydst.push(part.to_string());
         }
         cx.shared.ensure_dir(&mydst)?;
-        mydst.push(&format!("{}.{}.js", remote_item_type, remote_path[remote_path.len() - 1]));
+        mydst.push(&format!("{remote_item_type}.{}.js", remote_path[remote_path.len() - 1]));
 
         let (mut all_implementors, _) =
             try_err!(collect(&mydst, krate.name(cx.tcx()).as_str()), &mydst);

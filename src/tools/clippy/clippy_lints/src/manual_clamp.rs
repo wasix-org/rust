@@ -1,23 +1,22 @@
+use clippy_config::msrvs::{self, Msrv};
 use clippy_utils::diagnostics::{span_lint_and_then, span_lint_hir_and_then};
 use clippy_utils::higher::If;
-use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::sugg::Sugg;
 use clippy_utils::ty::implements_trait;
 use clippy_utils::visitors::is_const_evaluatable;
-use clippy_utils::MaybePath;
 use clippy_utils::{
-    eq_expr_value, is_diag_trait_item, is_trait_method, path_res, path_to_local_id, peel_blocks, peel_blocks_with_stmt,
+    eq_expr_value, in_constant, is_diag_trait_item, is_trait_method, path_res, path_to_local_id, peel_blocks,
+    peel_blocks_with_stmt, MaybePath,
 };
 use itertools::Itertools;
-use rustc_errors::Applicability;
-use rustc_errors::Diagnostic;
-use rustc_hir::{
-    def::Res, Arm, BinOpKind, Block, Expr, ExprKind, Guard, HirId, PatKind, PathSegment, PrimTy, QPath, StmtKind,
-};
+use rustc_errors::{Applicability, Diagnostic};
+use rustc_hir::def::Res;
+use rustc_hir::{Arm, BinOpKind, Block, Expr, ExprKind, HirId, PatKind, PathSegment, PrimTy, QPath, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::Ty;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{symbol::sym, Span};
+use rustc_session::impl_lint_pass;
+use rustc_span::symbol::sym;
+use rustc_span::Span;
 use std::ops::Deref;
 
 declare_clippy_lint! {
@@ -39,7 +38,7 @@ declare_clippy_lint! {
     /// PR](https://github.com/rust-lang/rust-clippy/pull/9484#issuecomment-1278922613).
     ///
     /// ### Examples
-    /// ```rust
+    /// ```no_run
     /// # let (input, min, max) = (0, -2, 1);
     /// if input > max {
     ///     max
@@ -51,13 +50,13 @@ declare_clippy_lint! {
     /// # ;
     /// ```
     ///
-    /// ```rust
+    /// ```no_run
     /// # let (input, min, max) = (0, -2, 1);
     /// input.max(min).min(max)
     /// # ;
     /// ```
     ///
-    /// ```rust
+    /// ```no_run
     /// # let (input, min, max) = (0, -2, 1);
     /// match input {
     ///     x if x > max => max,
@@ -67,14 +66,14 @@ declare_clippy_lint! {
     /// # ;
     /// ```
     ///
-    /// ```rust
+    /// ```no_run
     /// # let (input, min, max) = (0, -2, 1);
     /// let mut x = input;
     /// if x < min { x = min; }
     /// if x > max { x = max; }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let (input, min, max) = (0, -2, 1);
     /// input.clamp(min, max)
     /// # ;
@@ -117,7 +116,7 @@ impl<'tcx> LateLintPass<'tcx> for ManualClamp {
         if !self.msrv.meets(msrvs::CLAMP) {
             return;
         }
-        if !expr.span.from_expansion() {
+        if !expr.span.from_expansion() && !in_constant(cx, expr.hir_id) {
             let suggestion = is_if_elseif_else_pattern(cx, expr)
                 .or_else(|| is_max_min_pattern(cx, expr))
                 .or_else(|| is_call_max_min_pattern(cx, expr))
@@ -130,7 +129,7 @@ impl<'tcx> LateLintPass<'tcx> for ManualClamp {
     }
 
     fn check_block(&mut self, cx: &LateContext<'tcx>, block: &'tcx Block<'tcx>) {
-        if !self.msrv.meets(msrvs::CLAMP) {
+        if !self.msrv.meets(msrvs::CLAMP) || in_constant(cx, block.hir_id) {
             return;
         }
         for suggestion in is_two_if_pattern(cx, block) {
@@ -208,7 +207,7 @@ impl TypeClampability {
 
 /// Targets patterns like
 ///
-/// ```
+/// ```no_run
 /// # let (input, min, max) = (0, -3, 12);
 ///
 /// if input < min {
@@ -226,11 +225,11 @@ fn is_if_elseif_else_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx
         then,
         r#else: Some(else_if),
     }) = If::hir(expr)
-    && let Some(If {
-        cond: else_if_cond,
-        then: else_if_then,
-        r#else: Some(else_body),
-    }) = If::hir(peel_blocks(else_if))
+        && let Some(If {
+            cond: else_if_cond,
+            then: else_if_then,
+            r#else: Some(else_body),
+        }) = If::hir(peel_blocks(else_if))
     {
         let params = is_clamp_meta_pattern(
             cx,
@@ -257,7 +256,7 @@ fn is_if_elseif_else_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx
 
 /// Targets patterns like
 ///
-/// ```
+/// ```no_run
 /// # let (input, min_value, max_value) = (0, -3, 12);
 ///
 /// input.max(min_value).min(max_value)
@@ -276,7 +275,12 @@ fn is_max_min_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> O
             _ => return None,
         };
         Some(ClampSuggestion {
-            params: InputMinMax { input, min, max, is_float },
+            params: InputMinMax {
+                input,
+                min,
+                max,
+                is_float,
+            },
             span: expr.span,
             make_assignment: None,
             hir_with_ignore_attr: None,
@@ -288,7 +292,7 @@ fn is_max_min_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> O
 
 /// Targets patterns like
 ///
-/// ```
+/// ```no_run
 /// # let (input, min_value, max_value) = (0, -3, 12);
 /// # use std::cmp::{max, min};
 /// min(max(input, min_value), max_value)
@@ -347,11 +351,16 @@ fn is_call_max_min_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>)
                         ("max", "min") => (inner_arg, outer_arg),
                         _ => return None,
                     }
-                }
+                },
                 _ => return None,
             };
             Some(ClampSuggestion {
-                params: InputMinMax { input, min, max, is_float },
+                params: InputMinMax {
+                    input,
+                    min,
+                    max,
+                    is_float,
+                },
                 span,
                 make_assignment: None,
                 hir_with_ignore_attr: None,
@@ -370,7 +379,7 @@ fn is_call_max_min_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>)
 
 /// Targets patterns like
 ///
-/// ```
+/// ```no_run
 /// # let (input, min, max) = (0, -3, 12);
 ///
 /// match input {
@@ -385,7 +394,8 @@ fn is_match_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> Opt
         // Find possible min/max branches
         let minmax_values = |a: &'tcx Arm<'tcx>| {
             if let PatKind::Binding(_, var_hir_id, _, None) = &a.pat.kind
-            && let Some(Guard::If(e)) = a.guard {
+                && let Some(e) = a.guard
+            {
                 Some((e, var_hir_id, a.body))
             } else {
                 None
@@ -429,7 +439,7 @@ fn is_match_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> Opt
 
 /// Targets patterns like
 ///
-/// ```
+/// ```no_run
 /// # let (input, min, max) = (0, -3, 12);
 ///
 /// let mut x = input;
@@ -442,18 +452,20 @@ fn is_two_if_pattern<'tcx>(cx: &LateContext<'tcx>, block: &'tcx Block<'tcx>) -> 
         .filter_map(|(maybe_set_first, maybe_set_second)| {
             if let StmtKind::Expr(first_expr) = *maybe_set_first
                 && let StmtKind::Expr(second_expr) = *maybe_set_second
-                && let Some(If { cond: first_cond, then: first_then, r#else: None }) = If::hir(first_expr)
-                && let Some(If { cond: second_cond, then: second_then, r#else: None }) = If::hir(second_expr)
-                && let ExprKind::Assign(
-                    maybe_input_first_path,
-                    maybe_min_max_first,
-                    _
-                ) = peel_blocks_with_stmt(first_then).kind
-                && let ExprKind::Assign(
-                    maybe_input_second_path,
-                    maybe_min_max_second,
-                    _
-                ) = peel_blocks_with_stmt(second_then).kind
+                && let Some(If {
+                    cond: first_cond,
+                    then: first_then,
+                    r#else: None,
+                }) = If::hir(first_expr)
+                && let Some(If {
+                    cond: second_cond,
+                    then: second_then,
+                    r#else: None,
+                }) = If::hir(second_expr)
+                && let ExprKind::Assign(maybe_input_first_path, maybe_min_max_first, _) =
+                    peel_blocks_with_stmt(first_then).kind
+                && let ExprKind::Assign(maybe_input_second_path, maybe_min_max_second, _) =
+                    peel_blocks_with_stmt(second_then).kind
                 && eq_expr_value(cx, maybe_input_first_path, maybe_input_second_path)
                 && let Some(first_bin) = BinaryOp::new(first_cond)
                 && let Some(second_bin) = BinaryOp::new(second_cond)
@@ -463,7 +475,7 @@ fn is_two_if_pattern<'tcx>(cx: &LateContext<'tcx>, block: &'tcx Block<'tcx>) -> 
                     &second_bin,
                     maybe_min_max_first,
                     maybe_min_max_second,
-                    None
+                    None,
                 )
             {
                 Some(ClampSuggestion {
@@ -486,7 +498,7 @@ fn is_two_if_pattern<'tcx>(cx: &LateContext<'tcx>, block: &'tcx Block<'tcx>) -> 
 
 /// Targets patterns like
 ///
-/// ```
+/// ```no_run
 /// # let (mut input, min, max) = (0, -3, 12);
 ///
 /// if input < min {
@@ -506,16 +518,9 @@ fn is_if_elseif_pattern<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) ->
             then: else_if_then,
             r#else: None,
         }) = If::hir(peel_blocks(else_if))
-        && let ExprKind::Assign(
-            maybe_input_first_path,
-            maybe_min_max_first,
-            _
-        ) = peel_blocks_with_stmt(then).kind
-        && let ExprKind::Assign(
-            maybe_input_second_path,
-            maybe_min_max_second,
-            _
-        ) = peel_blocks_with_stmt(else_if_then).kind
+        && let ExprKind::Assign(maybe_input_first_path, maybe_min_max_first, _) = peel_blocks_with_stmt(then).kind
+        && let ExprKind::Assign(maybe_input_second_path, maybe_min_max_second, _) =
+            peel_blocks_with_stmt(else_if_then).kind
     {
         let params = is_clamp_meta_pattern(
             cx,

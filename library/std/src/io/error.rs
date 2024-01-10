@@ -1,17 +1,16 @@
 #[cfg(test)]
 mod tests;
 
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "64", not(target_os = "uefi")))]
 mod repr_bitpacked;
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "64", not(target_os = "uefi")))]
 use repr_bitpacked::Repr;
 
-#[cfg(not(target_pointer_width = "64"))]
+#[cfg(any(not(target_pointer_width = "64"), target_os = "uefi"))]
 mod repr_unpacked;
-#[cfg(not(target_pointer_width = "64"))]
+#[cfg(any(not(target_pointer_width = "64"), target_os = "uefi"))]
 use repr_unpacked::Repr;
 
-use crate::convert::From;
 use crate::error;
 use crate::fmt;
 use crate::result;
@@ -103,7 +102,7 @@ enum ErrorData<C> {
 ///
 /// [`into`]: Into::into
 #[unstable(feature = "raw_os_error_ty", issue = "107792")]
-pub type RawOsError = i32;
+pub type RawOsError = sys::RawOsError;
 
 // `#[repr(align(4))]` is probably redundant, it should have that value or
 // higher already. We include it just because repr_bitpacked.rs's encoding
@@ -370,7 +369,7 @@ pub enum ErrorKind {
 
     // "Unusual" error kinds which do not correspond simply to (sets
     // of) OS error codes, should be added just above this comment.
-    // `Other` and `Uncategorised` should remain at the end:
+    // `Other` and `Uncategorized` should remain at the end:
     //
     /// A custom error that does not fall under any other I/O error kind.
     ///
@@ -512,6 +511,7 @@ impl Error {
     /// let eof_error = Error::from(ErrorKind::UnexpectedEof);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[inline(never)]
     pub fn new<E>(kind: ErrorKind, error: E) -> Error
     where
         E: Into<Box<dyn error::Error + Send + Sync>>,
@@ -528,8 +528,6 @@ impl Error {
     /// # Examples
     ///
     /// ```
-    /// #![feature(io_error_other)]
-    ///
     /// use std::io::Error;
     ///
     /// // errors can be created from strings
@@ -538,7 +536,7 @@ impl Error {
     /// // errors can also be created from other errors
     /// let custom_error2 = Error::other(custom_error);
     /// ```
-    #[unstable(feature = "io_error_other", issue = "91946")]
+    #[stable(feature = "io_error_other", since = "1.74.0")]
     pub fn other<E>(error: E) -> Error
     where
         E: Into<Box<dyn error::Error + Send + Sync>>,
@@ -882,6 +880,13 @@ impl Error {
 
     /// Returns the corresponding [`ErrorKind`] for this error.
     ///
+    /// This may be a value set by Rust code constructing custom `io::Error`s,
+    /// or if this `io::Error` was sourced from the operating system,
+    /// it will be a value inferred from the system's error encoding.
+    /// See [`last_os_error`] for more details.
+    ///
+    /// [`last_os_error`]: Error::last_os_error
+    ///
     /// # Examples
     ///
     /// ```
@@ -892,7 +897,8 @@ impl Error {
     /// }
     ///
     /// fn main() {
-    ///     // Will print "Uncategorized".
+    ///     // As no error has (visibly) occurred, this may print anything!
+    ///     // It likely prints a placeholder for unidentified (non-)errors.
     ///     print_error(Error::last_os_error());
     ///     // Will print "AddrInUse".
     ///     print_error(Error::new(ErrorKind::AddrInUse, "oh no!"));
@@ -907,6 +913,16 @@ impl Error {
             ErrorData::Custom(c) => c.kind,
             ErrorData::Simple(kind) => kind,
             ErrorData::SimpleMessage(m) => m.kind,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_interrupted(&self) -> bool {
+        match self.repr.data() {
+            ErrorData::Os(code) => sys::is_interrupted(code),
+            ErrorData::Custom(c) => c.kind == ErrorKind::Interrupted,
+            ErrorData::Simple(kind) => kind == ErrorKind::Interrupted,
+            ErrorData::SimpleMessage(m) => m.kind == ErrorKind::Interrupted,
         }
     }
 }

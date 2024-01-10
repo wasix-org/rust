@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![warn(clippy::needless_bool)]
 #![allow(
     unused,
@@ -7,8 +5,10 @@
     clippy::no_effect,
     clippy::if_same_then_else,
     clippy::equatable_if_let,
+    clippy::needless_if,
     clippy::needless_return,
-    clippy::self_named_constructors
+    clippy::self_named_constructors,
+    clippy::struct_field_names
 )]
 
 use std::cell::Cell;
@@ -99,6 +99,13 @@ fn main() {
     needless_bool2(x);
     needless_bool3(x);
     needless_bool_condition();
+
+    if a == b {
+        true
+    } else {
+        // Do not lint as this comment might be important
+        false
+    };
 }
 
 fn bool_ret3(x: bool) -> bool {

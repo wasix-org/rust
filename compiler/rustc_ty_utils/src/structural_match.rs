@@ -1,5 +1,5 @@
 use rustc_hir::lang_items::LangItem;
-use rustc_middle::ty::query::Providers;
+use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 
 use rustc_infer::infer::TyCtxtInferExt;
@@ -13,7 +13,7 @@ use rustc_trait_selection::traits::{ObligationCause, ObligationCtxt};
 /// Note that this does *not* recursively check if the substructure of `adt_ty`
 /// implements the traits.
 fn has_structural_eq_impls<'tcx>(tcx: TyCtxt<'tcx>, adt_ty: Ty<'tcx>) -> bool {
-    let ref infcx = tcx.infer_ctxt().build();
+    let infcx = &tcx.infer_ctxt().build();
     let cause = ObligationCause::dummy();
 
     let ocx = ObligationCtxt::new(infcx);
@@ -39,6 +39,6 @@ fn has_structural_eq_impls<'tcx>(tcx: TyCtxt<'tcx>, adt_ty: Ty<'tcx>) -> bool {
     ocx.select_all_or_error().is_empty()
 }
 
-pub fn provide(providers: &mut Providers) {
+pub(crate) fn provide(providers: &mut Providers) {
     providers.has_structural_eq_impls = has_structural_eq_impls;
 }

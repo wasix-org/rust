@@ -5,16 +5,31 @@ each one organized by a "feature flag." That is, when using an unstable
 feature of Rust, you must use a flag, like this:
 
 ```rust
-#![feature(box_syntax)]
+#![feature(coroutines, coroutine_trait)]
+
+use std::ops::{Coroutine, CoroutineState};
+use std::pin::Pin;
 
 fn main() {
-    let five = box 5;
+    let mut coroutine = || {
+        yield 1;
+        return "foo"
+    };
+
+    match Pin::new(&mut coroutine).resume(()) {
+        CoroutineState::Yielded(1) => {}
+        _ => panic!("unexpected value from resume"),
+    }
+    match Pin::new(&mut coroutine).resume(()) {
+        CoroutineState::Complete("foo") => {}
+        _ => panic!("unexpected value from resume"),
+    }
 }
 ```
 
-The `box_syntax` feature [has a chapter][box] describing how to use it.
+The `coroutines` feature [has a chapter][coroutines] describing how to use it.
 
-[box]: language-features/box-syntax.md
+[coroutines]: language-features/coroutines.md
 
 Because this documentation relates to unstable features, we make no guarantees
 that what is contained here is accurate or up to date. It's developed on a

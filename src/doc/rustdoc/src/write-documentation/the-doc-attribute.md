@@ -201,7 +201,7 @@ mod bar {
 # fn main() {}
 ```
 
-Here, because `bar` is not public, `Bar` wouldn't have its own page, so there's nowhere
+Here, because `bar` is not public, `bar` wouldn't have its own page, so there's nowhere
 to link to. `rustdoc` will inline these definitions, and so we end up in the same case
 as the `#[doc(inline)]` above; `Bar` is in a `Structs` section, as if it were defined at
 the top level. If we add the `no_inline` form of the attribute:
@@ -223,12 +223,18 @@ Now we'll have a `Re-exports` line, and `Bar` will not link to anywhere.
 One special case: In Rust 2018 and later, if you `pub use` one of your dependencies, `rustdoc` will
 not eagerly inline it as a module unless you add `#[doc(inline)]`.
 
+If you want to know more about inlining rules, take a look at the
+[`re-exports` chapter](./re-exports.md).
+
 ### `hidden`
 
 <span id="dochidden"></span>
 
 Any item annotated with `#[doc(hidden)]` will not appear in the documentation, unless
-the `strip-hidden` pass is removed.
+the `strip-hidden` pass is removed. Re-exported items where one of its ancestors has
+`#[doc(hidden)]` will be considered the same as private.
+
+You can find more information in the [`re-exports` chapter](./re-exports.md).
 
 ### `alias`
 

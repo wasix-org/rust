@@ -8,7 +8,6 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 use super::*;
-use crate::constraints::OutlivesConstraint;
 use rustc_graphviz as dot;
 
 impl<'tcx> RegionInferenceContext<'tcx> {
@@ -49,7 +48,7 @@ impl<'a, 'this, 'tcx> dot::Labeller<'this> for RawConstraints<'a, 'tcx> {
         Some(dot::LabelText::LabelStr(Cow::Borrowed("box")))
     }
     fn node_label(&'this self, n: &RegionVid) -> dot::LabelText<'this> {
-        dot::LabelText::LabelStr(format!("{:?}", n).into())
+        dot::LabelText::LabelStr(format!("{n:?}").into())
     }
     fn edge_label(&'this self, e: &OutlivesConstraint<'tcx>) -> dot::LabelText<'this> {
         dot::LabelText::LabelStr(format!("{:?}", e.locations).into())
@@ -100,7 +99,7 @@ impl<'a, 'this, 'tcx> dot::Labeller<'this> for SccConstraints<'a, 'tcx> {
     }
     fn node_label(&'this self, n: &ConstraintSccIndex) -> dot::LabelText<'this> {
         let nodes = &self.nodes_per_scc[*n];
-        dot::LabelText::LabelStr(format!("{:?} = {:?}", n, nodes).into())
+        dot::LabelText::LabelStr(format!("{n:?} = {nodes:?}").into())
     }
 }
 

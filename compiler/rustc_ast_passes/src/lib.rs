@@ -4,6 +4,9 @@
 //!
 //! The crate also contains other misc AST visitors, e.g. `node_count` and `show_span`.
 
+#![allow(internal_features)]
+#![doc(rust_logo)]
+#![feature(rustdoc_internals)]
 #![feature(box_patterns)]
 #![feature(if_let_guard)]
 #![feature(iter_is_partitioned)]
@@ -12,13 +15,10 @@
 #![deny(rustc::untranslatable_diagnostic)]
 #![deny(rustc::diagnostic_outside_of_impl)]
 
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::fluent_messages;
-
 pub mod ast_validation;
 mod errors;
 pub mod feature_gate;
 pub mod node_count;
 pub mod show_span;
 
-fluent_messages! { "../locales/en-US.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

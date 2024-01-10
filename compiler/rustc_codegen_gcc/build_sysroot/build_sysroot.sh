@@ -5,9 +5,9 @@
 set -e
 cd $(dirname "$0")
 
-pushd ../ >/dev/null
+pushd ../
 source ./config.sh
-popd >/dev/null
+popd
 
 # Cleanup for previous run
 #     v Clean target dir except for build scripts and incremental cache
@@ -16,15 +16,19 @@ rm Cargo.lock test_target/Cargo.lock 2>/dev/null || true
 rm -r sysroot/ 2>/dev/null || true
 
 # Build libs
-export RUSTFLAGS="$RUSTFLAGS -Z force-unstable-if-unmarked -Cpanic=abort"
+export RUSTFLAGS="$RUSTFLAGS -Z force-unstable-if-unmarked"
 if [[ "$1" == "--release" ]]; then
     sysroot_channel='release'
     RUSTFLAGS="$RUSTFLAGS -Zmir-opt-level=3" cargo build --target $TARGET_TRIPLE --release
 else
     sysroot_channel='debug'
-    cargo build --target $TARGET_TRIPLE --features compiler_builtins/c
+    cargo build --target $TARGET_TRIPLE
 fi
 
 # Copy files to sysroot
 mkdir -p sysroot/lib/rustlib/$TARGET_TRIPLE/lib/
 cp -r target/$TARGET_TRIPLE/$sysroot_channel/deps/* sysroot/lib/rustlib/$TARGET_TRIPLE/lib/
+# Copy the source files to the sysroot (Rust for Linux needs this).
+source_dir=sysroot/lib/rustlib/src/rust
+mkdir -p $source_dir
+cp -r sysroot_src/library/ $source_dir

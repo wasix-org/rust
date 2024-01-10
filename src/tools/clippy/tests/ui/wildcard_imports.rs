@@ -1,6 +1,6 @@
-// edition:2015
-// run-rustfix
-// aux-build:wildcard_imports_helper.rs
+//@edition:2015
+
+//@aux-build:wildcard_imports_helper.rs
 
 // the 2015 edition here is needed because edition 2018 changed the module system
 // (see https://doc.rust-lang.org/edition-guide/rust-2018/path-changes.html) which means the lint
@@ -24,6 +24,7 @@ use wildcard_imports_helper::inner::inner_for_self_import::*;
 use wildcard_imports_helper::*;
 
 use std::io::prelude::*;
+use wildcard_imports_helper::extern_prelude::v1::*;
 use wildcard_imports_helper::prelude::v1::*;
 
 struct ReadFoo;
@@ -68,6 +69,34 @@ mod struct_mod {
     }
 }
 
+// issue 9942
+mod underscore_mod {
+    // allow use of `deref` so that `clippy --fix` includes `Deref`.
+    #![allow(noop_method_call)]
+
+    mod exports_underscore {
+        pub use std::ops::Deref as _;
+        pub fn dummy() {}
+    }
+
+    mod exports_underscore_ish {
+        pub use std::ops::Deref as _Deref;
+        pub fn dummy() {}
+    }
+
+    fn does_not_lint() {
+        use self::exports_underscore::*;
+        let _ = (&0).deref();
+        dummy();
+    }
+
+    fn does_lint() {
+        use self::exports_underscore_ish::*;
+        let _ = (&0).deref();
+        dummy();
+    }
+}
+
 fn main() {
     foo();
     multi_foo();
@@ -81,6 +110,7 @@ fn main() {
     let _ = inner_struct_mod::C;
     let _ = ExternA;
     let _ = PreludeModAnywhere;
+    let _ = ExternPreludeModAnywhere;
 
     double_struct_import_test!();
     double_struct_import_test!();
@@ -110,6 +140,7 @@ mod in_fn_test {
     }
 
     fn test_inner_nested() {
+        #[rustfmt::skip]
         use self::{inner::*, inner2::*};
 
         inner_foo();
@@ -210,7 +241,7 @@ mod super_imports {
     }
 
     mod use_explicit_should_be_replaced {
-        use super_imports::*;
+        use crate::super_imports::*;
 
         fn with_explicit() {
             let _ = foofoo();

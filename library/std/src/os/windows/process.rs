@@ -106,6 +106,45 @@ impl IntoRawHandle for process::ChildStderr {
     }
 }
 
+/// Create a `ChildStdin` from the provided `OwnedHandle`.
+///
+/// The provided handle must be asynchronous, as reading and
+/// writing from and to it is implemented using asynchronous APIs.
+#[stable(feature = "child_stream_from_fd", since = "1.74.0")]
+impl From<OwnedHandle> for process::ChildStdin {
+    fn from(handle: OwnedHandle) -> process::ChildStdin {
+        let handle = sys::handle::Handle::from_inner(handle);
+        let pipe = sys::pipe::AnonPipe::from_inner(handle);
+        process::ChildStdin::from_inner(pipe)
+    }
+}
+
+/// Create a `ChildStdout` from the provided `OwnedHandle`.
+///
+/// The provided handle must be asynchronous, as reading and
+/// writing from and to it is implemented using asynchronous APIs.
+#[stable(feature = "child_stream_from_fd", since = "1.74.0")]
+impl From<OwnedHandle> for process::ChildStdout {
+    fn from(handle: OwnedHandle) -> process::ChildStdout {
+        let handle = sys::handle::Handle::from_inner(handle);
+        let pipe = sys::pipe::AnonPipe::from_inner(handle);
+        process::ChildStdout::from_inner(pipe)
+    }
+}
+
+/// Create a `ChildStderr` from the provided `OwnedHandle`.
+///
+/// The provided handle must be asynchronous, as reading and
+/// writing from and to it is implemented using asynchronous APIs.
+#[stable(feature = "child_stream_from_fd", since = "1.74.0")]
+impl From<OwnedHandle> for process::ChildStderr {
+    fn from(handle: OwnedHandle) -> process::ChildStderr {
+        let handle = sys::handle::Handle::from_inner(handle);
+        let pipe = sys::pipe::AnonPipe::from_inner(handle);
+        process::ChildStderr::from_inner(pipe)
+    }
+}
+
 /// Windows-specific extensions to [`process::ExitStatus`].
 ///
 /// This trait is sealed: it cannot be implemented outside the standard library.
@@ -192,6 +231,66 @@ pub trait CommandExt: Sealed {
     /// ```
     #[unstable(feature = "windows_process_extensions_async_pipes", issue = "98289")]
     fn async_pipes(&mut self, always_async: bool) -> &mut process::Command;
+
+    /// Sets a raw attribute on the command, providing extended configuration options for Windows processes.
+    ///
+    /// This method allows you to specify custom attributes for a child process on Windows systems using raw attribute values.
+    /// Raw attributes provide extended configurability for process creation, but their usage can be complex and potentially unsafe.
+    ///
+    /// The `attribute` parameter specifies the raw attribute to be set, while the `value` parameter holds the value associated with that attribute.
+    /// Please refer to the [`windows-rs`](https://microsoft.github.io/windows-docs-rs/doc/windows/) documentation or the [`Win32 API documentation`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute) for detailed information about available attributes and their meanings.
+    ///
+    /// # Note
+    ///
+    /// The maximum number of raw attributes is the value of [`u32::MAX`].
+    /// If this limit is exceeded, the call to [`process::Command::spawn`] will return an `Error` indicating that the maximum number of attributes has been exceeded.
+    /// # Safety
+    ///
+    /// The usage of raw attributes is potentially unsafe and should be done with caution. Incorrect attribute values or improper configuration can lead to unexpected behavior or errors.
+    ///
+    /// # Example
+    ///
+    /// The following example demonstrates how to create a child process with a specific parent process ID using a raw attribute.
+    ///
+    /// ```rust
+    /// #![feature(windows_process_extensions_raw_attribute)]
+    /// use std::os::windows::{process::CommandExt, io::AsRawHandle};
+    /// use std::process::Command;
+    ///
+    /// # struct ProcessDropGuard(std::process::Child);
+    /// # impl Drop for ProcessDropGuard {
+    /// #     fn drop(&mut self) {
+    /// #         let _ = self.0.kill();
+    /// #     }
+    /// # }
+    ///
+    /// let parent = Command::new("cmd").spawn()?;
+    ///
+    /// let mut child_cmd = Command::new("cmd");
+    ///
+    /// const PROC_THREAD_ATTRIBUTE_PARENT_PROCESS: usize = 0x00020000;
+    ///
+    /// unsafe {
+    ///     child_cmd.raw_attribute(PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, parent.as_raw_handle() as isize);
+    /// }
+    /// #
+    /// # let parent = ProcessDropGuard(parent);
+    ///
+    /// let mut child = child_cmd.spawn()?;
+    ///
+    /// # child.kill()?;
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    ///
+    /// # Safety Note
+    ///
+    /// Remember that improper use of raw attributes can lead to undefined behavior or security vulnerabilities. Always consult the documentation and ensure proper attribute values are used.
+    #[unstable(feature = "windows_process_extensions_raw_attribute", issue = "114854")]
+    unsafe fn raw_attribute<T: Copy + Send + Sync + 'static>(
+        &mut self,
+        attribute: usize,
+        value: T,
+    ) -> &mut process::Command;
 }
 
 #[stable(feature = "windows_process_extensions", since = "1.16.0")]
@@ -219,6 +318,15 @@ impl CommandExt for process::Command {
         let _ = always_async;
         self
     }
+
+    unsafe fn raw_attribute<T: Copy + Send + Sync + 'static>(
+        &mut self,
+        attribute: usize,
+        value: T,
+    ) -> &mut process::Command {
+        self.as_inner_mut().raw_attribute(attribute, value);
+        self
+    }
 }
 
 #[unstable(feature = "windows_process_extensions_main_thread_handle", issue = "96723")]
@@ -239,7 +347,7 @@ impl ChildExt for process::Child {
 ///
 /// This trait is sealed: it cannot be implemented outside the standard library.
 /// This is so that future additional methods are not breaking changes.
-#[unstable(feature = "windows_process_exit_code_from", issue = "none")]
+#[unstable(feature = "windows_process_exit_code_from", issue = "111688")]
 pub trait ExitCodeExt: Sealed {
     /// Creates a new `ExitCode` from the raw underlying `u32` return value of
     /// a process.
@@ -247,11 +355,11 @@ pub trait ExitCodeExt: Sealed {
     /// The exit code should not be 259, as this conflicts with the `STILL_ACTIVE`
     /// macro returned from the `GetExitCodeProcess` function to signal that the
     /// process has yet to run to completion.
-    #[unstable(feature = "windows_process_exit_code_from", issue = "none")]
+    #[unstable(feature = "windows_process_exit_code_from", issue = "111688")]
     fn from_raw(raw: u32) -> Self;
 }
 
-#[unstable(feature = "windows_process_exit_code_from", issue = "none")]
+#[unstable(feature = "windows_process_exit_code_from", issue = "111688")]
 impl ExitCodeExt for process::ExitCode {
     fn from_raw(raw: u32) -> Self {
         process::ExitCode::from_inner(From::from(raw))

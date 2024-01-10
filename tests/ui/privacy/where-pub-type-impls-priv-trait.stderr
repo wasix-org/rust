@@ -1,54 +1,72 @@
-error[E0445]: private trait `PrivTr` in public interface
-  --> $DIR/where-pub-type-impls-priv-trait.rs:19:1
+warning: trait `PrivTr` is more private than the item `S`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:20:1
    |
-LL | trait PrivTr {}
-   | ------------ `PrivTr` declared as private
-...
 LL | pub struct S
-   | ^^^^^^^^^^^^ can't leak private trait
-
-error[E0445]: private trait `PrivTr` in public interface
-  --> $DIR/where-pub-type-impls-priv-trait.rs:26:1
+   | ^^^^^^^^^^^^ struct `S` is reachable at visibility `pub`
+   |
+note: but trait `PrivTr` is only usable at visibility `pub(crate)`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:10:1
    |
 LL | trait PrivTr {}
-   | ------------ `PrivTr` declared as private
-...
-LL | pub enum E
-   | ^^^^^^^^^^ can't leak private trait
+   | ^^^^^^^^^^^^
+   = note: `#[warn(private_bounds)]` on by default
 
-error[E0445]: private trait `PrivTr` in public interface
-  --> $DIR/where-pub-type-impls-priv-trait.rs:33:1
+warning: trait `PrivTr` is more private than the item `E`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:27:1
    |
-LL |   trait PrivTr {}
-   |   ------------ `PrivTr` declared as private
-...
+LL | pub enum E
+   | ^^^^^^^^^^ enum `E` is reachable at visibility `pub`
+   |
+note: but trait `PrivTr` is only usable at visibility `pub(crate)`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:10:1
+   |
+LL | trait PrivTr {}
+   | ^^^^^^^^^^^^
+
+warning: trait `PrivTr` is more private than the item `f`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:34:1
+   |
 LL | / pub fn f()
 LL | |
 LL | | where
 LL | |     PubTy: PrivTr
-   | |_________________^ can't leak private trait
-
-error[E0445]: private trait `PrivTr` in public interface
-  --> $DIR/where-pub-type-impls-priv-trait.rs:40:1
+   | |_________________^ function `f` is reachable at visibility `pub`
+   |
+note: but trait `PrivTr` is only usable at visibility `pub(crate)`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:10:1
    |
 LL | trait PrivTr {}
-   | ------------ `PrivTr` declared as private
-...
-LL | impl S
-   | ^^^^^^ can't leak private trait
+   | ^^^^^^^^^^^^
 
-error[E0445]: private trait `PrivTr` in public interface
-  --> $DIR/where-pub-type-impls-priv-trait.rs:45:5
+warning: trait `PrivTr` is more private than the item `S`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:41:1
    |
-LL |   trait PrivTr {}
-   |   ------------ `PrivTr` declared as private
-...
+LL | / impl S
+LL | |
+LL | | where
+LL | |     PubTy: PrivTr
+   | |_________________^ implementation `S` is reachable at visibility `pub`
+   |
+note: but trait `PrivTr` is only usable at visibility `pub(crate)`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:10:1
+   |
+LL | trait PrivTr {}
+   | ^^^^^^^^^^^^
+
+warning: trait `PrivTr` is more private than the item `S::f`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:46:5
+   |
 LL | /     pub fn f()
 LL | |
 LL | |     where
 LL | |         PubTy: PrivTr
-   | |_____________________^ can't leak private trait
+   | |_____________________^ associated function `S::f` is reachable at visibility `pub`
+   |
+note: but trait `PrivTr` is only usable at visibility `pub(crate)`
+  --> $DIR/where-pub-type-impls-priv-trait.rs:10:1
+   |
+LL | trait PrivTr {}
+   | ^^^^^^^^^^^^
 
-error: aborting due to 5 previous errors
+warning: 5 warnings emitted
 
-For more information about this error, try `rustc --explain E0445`.

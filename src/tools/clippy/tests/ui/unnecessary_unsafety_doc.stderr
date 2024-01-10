@@ -5,6 +5,7 @@ LL | pub fn apocalypse(universe: &mut ()) {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: `-D clippy::unnecessary-safety-doc` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::unnecessary_safety_doc)]`
 
 error: safe function's docs have unnecessary `# Safety` section
   --> $DIR/unnecessary_unsafety_doc.rs:45:5
@@ -42,7 +43,7 @@ LL | very_safe!();
    = note: this error originates in the macro `very_safe` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: docs for safe trait have unnecessary `# Safety` section
-  --> $DIR/unnecessary_unsafety_doc.rs:147:1
+  --> $DIR/unnecessary_unsafety_doc.rs:151:1
    |
 LL | pub trait DocumentedSafeTraitWithImplementationHeader {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

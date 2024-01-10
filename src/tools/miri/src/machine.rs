@@ -2,19 +2,22 @@
 //! `Machine` trait.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::path::Path;
+use std::process;
 
+use either::Either;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 use rustc_ast::ast::Mutability;
-use rustc_const_eval::const_eval::CheckAlignment;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 #[allow(unused)]
 use rustc_data_structures::static_assert_size;
 use rustc_middle::{
     mir,
+    query::TyCtxtAt,
     ty::{
         self,
         layout::{LayoutCx, LayoutError, LayoutOf, TyAndLayout},
@@ -22,7 +25,7 @@ use rustc_middle::{
     },
 };
 use rustc_span::def_id::{CrateNum, DefId};
-use rustc_span::Symbol;
+use rustc_span::{Span, SpanData, Symbol};
 use rustc_target::abi::{Align, Size};
 use rustc_target::spec::abi::Abi;
 
@@ -32,13 +35,19 @@ use crate::{
     *,
 };
 
-/// The number of the available real-time signal with the lowest priority.
-/// Dummy constant related to epoll, must be between 32 and 64.
+/// First real-time signal.
+/// `signal(7)` says this must be between 32 and 64 and specifies 34 or 35
+/// as typical values.
+pub const SIGRTMIN: i32 = 34;
+
+/// Last real-time signal.
+/// `signal(7)` says it must be between 32 and 64 and specifies
+/// `SIGRTMAX` - `SIGRTMIN` >= 8 (which is the value of `_POSIX_RTSIG_MAX`)
 pub const SIGRTMAX: i32 = 42;
 
 /// Extra data stored with each stack frame
 pub struct FrameExtra<'tcx> {
-    /// Extra data for Stacked Borrows.
+    /// Extra data for the Borrow Tracker.
     pub borrow_tracker: Option<borrow_tracker::FrameState>,
 
     /// If this is Some(), then this is a special "catch unwind" frame (the frame of `try_fn`
@@ -69,12 +78,12 @@ impl<'tcx> std::fmt::Debug for FrameExtra<'tcx> {
     }
 }
 
-impl VisitTags for FrameExtra<'_> {
-    fn visit_tags(&self, visit: &mut dyn FnMut(BorTag)) {
+impl VisitProvenance for FrameExtra<'_> {
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         let FrameExtra { catch_unwind, borrow_tracker, timing: _, is_user_relevant: _ } = self;
 
-        catch_unwind.visit_tags(visit);
-        borrow_tracker.visit_tags(visit);
+        catch_unwind.visit_provenance(visit);
+        borrow_tracker.visit_provenance(visit);
     }
 }
 
@@ -104,6 +113,8 @@ pub enum MiriMemoryKind {
     /// Memory for thread-local statics.
     /// This memory may leak.
     Tls,
+    /// Memory mapped directly by the program
+    Mmap,
 }
 
 impl From<MiriMemoryKind> for MemoryKind<MiriMemoryKind> {
@@ -119,7 +130,20 @@ impl MayLeak for MiriMemoryKind {
         use self::MiriMemoryKind::*;
         match self {
             Rust | Miri | C | WinHeap | Runtime => false,
-            Machine | Global | ExternStatic | Tls => true,
+            Machine | Global | ExternStatic | Tls | Mmap => true,
+        }
+    }
+}
+
+impl MiriMemoryKind {
+    /// Whether we have a useful allocation span for an allocation of this kind.
+    fn should_save_allocation_span(self) -> bool {
+        use self::MiriMemoryKind::*;
+        match self {
+            // Heap allocations are fine since the `Allocation` is created immediately.
+            Rust | Miri | C | WinHeap | Mmap => true,
+            // Everything else is unclear, let's not show potentially confusing spans.
+            Machine | Global | ExternStatic | Tls | Runtime => false,
         }
     }
 }
@@ -137,6 +161,7 @@ impl fmt::Display for MiriMemoryKind {
             Global => write!(f, "global (static or const)"),
             ExternStatic => write!(f, "extern static"),
             Tls => write!(f, "thread-local static"),
+            Mmap => write!(f, "mmap"),
         }
     }
 }
@@ -144,11 +169,29 @@ impl fmt::Display for MiriMemoryKind {
 /// Pointer provenance.
 #[derive(Clone, Copy)]
 pub enum Provenance {
+    /// For pointers with concrete provenance. we exactly know which allocation they are attached to
+    /// and what their borrow tag is.
     Concrete {
         alloc_id: AllocId,
-        /// Stacked Borrows tag.
+        /// Borrow Tracker tag.
         tag: BorTag,
     },
+    /// Pointers with wildcard provenance are created on int-to-ptr casts. According to the
+    /// specification, we should at that point angelically "guess" a provenance that will make all
+    /// future uses of this pointer work, if at all possible. Of course such a semantics cannot be
+    /// actually implemented in Miri. So instead, we approximate this, erroring on the side of
+    /// accepting too much code rather than rejecting correct code: a pointer with wildcard
+    /// provenance "acts like" any previously exposed pointer. Each time it is used, we check
+    /// whether *some* exposed pointer could have done what we want to do, and if the answer is yes
+    /// then we allow the access. This allows too much code in two ways:
+    /// - The same wildcard pointer can "take the role" of multiple different exposed pointers on
+    ///   subsequenct memory accesses.
+    /// - In the aliasing model, we don't just have to know the borrow tag of the pointer used for
+    ///   the access, we also have to update the aliasing state -- and that update can be very
+    ///   different depending on which borrow tag we pick! Stacked Borrows has support for this by
+    ///   switching to a stack that is only approximately known, i.e. we overapproximate the effect
+    ///   of using *any* exposed pointer for this access, and only keep information about the borrow
+    ///   stack that would be true with all possible choices.
     Wildcard,
 }
 
@@ -195,7 +238,7 @@ impl fmt::Debug for Provenance {
                 } else {
                     write!(f, "[{alloc_id:?}]")?;
                 }
-                // Print Stacked Borrows tag.
+                // Print Borrow Tracker tag.
                 write!(f, "{tag:?}")?;
             }
             Provenance::Wildcard => {
@@ -215,6 +258,17 @@ impl interpret::Provenance for Provenance {
             Provenance::Concrete { alloc_id, .. } => Some(alloc_id),
             Provenance::Wildcard => None,
         }
+    }
+
+    fn fmt(ptr: &Pointer<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (prov, addr) = ptr.into_parts(); // address is absolute
+        write!(f, "{:#x}", addr.bytes())?;
+        if f.alternate() {
+            write!(f, "{prov:#?}")?;
+        } else {
+            write!(f, "{prov:?}")?;
+        }
+        Ok(())
     }
 
     fn join(left: Option<Self>, right: Option<Self>) -> Option<Self> {
@@ -253,24 +307,38 @@ impl ProvenanceExtra {
 
 /// Extra per-allocation data
 #[derive(Debug, Clone)]
-pub struct AllocExtra {
+pub struct AllocExtra<'tcx> {
     /// Global state of the borrow tracker, if enabled.
     pub borrow_tracker: Option<borrow_tracker::AllocState>,
-    /// Data race detection via the use of a vector-clock,
-    ///  this is only added if it is enabled.
+    /// Data race detection via the use of a vector-clock.
+    /// This is only added if it is enabled.
     pub data_race: Option<data_race::AllocState>,
-    /// Weak memory emulation via the use of store buffers,
-    ///  this is only added if it is enabled.
+    /// Weak memory emulation via the use of store buffers.
+    /// This is only added if it is enabled.
     pub weak_memory: Option<weak_memory::AllocState>,
+    /// A backtrace to where this allocation was allocated.
+    /// As this is recorded for leak reports, it only exists
+    /// if this allocation is leakable. The backtrace is not
+    /// pruned yet; that should be done before printing it.
+    pub backtrace: Option<Vec<FrameInfo<'tcx>>>,
+    /// An offset inside this allocation that was deemed aligned even for symbolic alignment checks.
+    /// Invariant: the promised alignment will never be less than the native alignment of this allocation.
+    pub symbolic_alignment: Cell<Option<(Size, Align)>>,
 }
 
-impl VisitTags for AllocExtra {
-    fn visit_tags(&self, visit: &mut dyn FnMut(BorTag)) {
-        let AllocExtra { borrow_tracker, data_race, weak_memory } = self;
+impl VisitProvenance for AllocExtra<'_> {
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
+        let AllocExtra {
+            borrow_tracker,
+            data_race,
+            weak_memory,
+            backtrace: _,
+            symbolic_alignment: _,
+        } = self;
 
-        borrow_tracker.visit_tags(visit);
-        data_race.visit_tags(visit);
-        weak_memory.visit_tags(visit);
+        borrow_tracker.visit_provenance(visit);
+        data_race.visit_provenance(visit);
+        weak_memory.visit_provenance(visit);
     }
 }
 
@@ -295,12 +363,14 @@ pub struct PrimitiveLayouts<'tcx> {
 }
 
 impl<'mir, 'tcx: 'mir> PrimitiveLayouts<'tcx> {
-    fn new(layout_cx: LayoutCx<'tcx, TyCtxt<'tcx>>) -> Result<Self, LayoutError<'tcx>> {
+    fn new(layout_cx: LayoutCx<'tcx, TyCtxt<'tcx>>) -> Result<Self, &'tcx LayoutError<'tcx>> {
         let tcx = layout_cx.tcx;
-        let mut_raw_ptr = tcx.mk_ptr(TypeAndMut { ty: tcx.types.unit, mutbl: Mutability::Mut });
-        let const_raw_ptr = tcx.mk_ptr(TypeAndMut { ty: tcx.types.unit, mutbl: Mutability::Not });
+        let mut_raw_ptr =
+            Ty::new_ptr(tcx, TypeAndMut { ty: tcx.types.unit, mutbl: Mutability::Mut });
+        let const_raw_ptr =
+            Ty::new_ptr(tcx, TypeAndMut { ty: tcx.types.unit, mutbl: Mutability::Not });
         Ok(Self {
-            unit: layout_cx.layout_of(tcx.mk_unit())?,
+            unit: layout_cx.layout_of(Ty::new_unit(tcx))?,
             i8: layout_cx.layout_of(tcx.types.i8)?,
             i16: layout_cx.layout_of(tcx.types.i16)?,
             i32: layout_cx.layout_of(tcx.types.i32)?,
@@ -364,14 +434,14 @@ pub struct MiriMachine<'mir, 'tcx> {
     pub(crate) env_vars: EnvVars<'tcx>,
 
     /// Return place of the main function.
-    pub(crate) main_fn_ret_place: Option<MemPlace<Provenance>>,
+    pub(crate) main_fn_ret_place: Option<MPlaceTy<'tcx, Provenance>>,
 
     /// Program arguments (`Option` because we can only initialize them after creating the ecx).
     /// These are *pointers* to argc/argv because macOS.
     /// We also need the full command line as one string because of Windows.
-    pub(crate) argc: Option<MemPlace<Provenance>>,
-    pub(crate) argv: Option<MemPlace<Provenance>>,
-    pub(crate) cmd_line: Option<MemPlace<Provenance>>,
+    pub(crate) argc: Option<Pointer<Option<Provenance>>>,
+    pub(crate) argv: Option<Pointer<Option<Provenance>>>,
+    pub(crate) cmd_line: Option<Pointer<Option<Provenance>>>,
 
     /// TLS state.
     pub(crate) tls: TlsData<'tcx>,
@@ -408,7 +478,7 @@ pub struct MiriMachine<'mir, 'tcx> {
     /// the emulated program.
     profiler: Option<measureme::Profiler>,
     /// Used with `profiler` to cache the `StringId`s for event names
-    /// uesd with `measureme`.
+    /// used with `measureme`.
     string_cache: FxHashMap<String, measureme::StringId>,
 
     /// Cache of `Instance` exported under the given `Symbol` name.
@@ -467,12 +537,21 @@ pub struct MiriMachine<'mir, 'tcx> {
     pub(crate) gc_interval: u32,
     /// The number of blocks that passed since the last BorTag GC pass.
     pub(crate) since_gc: u32,
+
     /// The number of CPUs to be reported by miri.
     pub(crate) num_cpus: u32,
+
     /// Determines Miri's page size and associated values
     pub(crate) page_size: u64,
     pub(crate) stack_addr: u64,
     pub(crate) stack_size: u64,
+
+    /// Whether to collect a backtrace when each allocation is created, just in case it leaks.
+    pub(crate) collect_leak_backtraces: bool,
+
+    /// The spans we will use to report where an allocation was created and deallocated in
+    /// diagnostics.
+    pub(crate) allocation_spans: RefCell<FxHashMap<AllocId, (Span, Option<Span>)>>,
 }
 
 impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
@@ -482,12 +561,26 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
         let layouts =
             PrimitiveLayouts::new(layout_cx).expect("Couldn't get layouts of primitive types");
         let profiler = config.measureme_out.as_ref().map(|out| {
-            measureme::Profiler::new(out).expect("Couldn't create `measureme` profiler")
+            let crate_name = layout_cx
+                .tcx
+                .sess
+                .opts
+                .crate_name
+                .clone()
+                .unwrap_or_else(|| "unknown-crate".to_string());
+            let pid = process::id();
+            // We adopt the same naming scheme for the profiler output that rustc uses. In rustc,
+            // the PID is padded so that the nondeterministic value of the PID does not spread
+            // nondeterminism to the allocator. In Miri we are not aiming for such performance
+            // control, we just pad for consistency with rustc.
+            let filename = format!("{crate_name}-{pid:07}");
+            let path = Path::new(out).join(filename);
+            measureme::Profiler::new(path).expect("Couldn't create `measureme` profiler")
         });
         let rng = StdRng::seed_from_u64(config.seed.unwrap_or(0));
-        let borrow_tracker = config.borrow_tracker.map(|bt| bt.instanciate_global_state(config));
+        let borrow_tracker = config.borrow_tracker.map(|bt| bt.instantiate_global_state(config));
         let data_race = config.data_race_detector.then(|| data_race::GlobalState::new(config));
-        // Determinine page size, stack address, and stack size.
+        // Determine page size, stack address, and stack size.
         // These values are mostly meaningless, but the stack address is also where we start
         // allocating physical integer addresses for all allocations.
         let page_size = if let Some(page_size) = config.page_size {
@@ -496,7 +589,7 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
             let target = &tcx.sess.target;
             match target.arch.as_ref() {
                 "wasm32" | "wasm64" => 64 * 1024, // https://webassembly.github.io/spec/core/exec/runtime.html#memory-instances
-                "aarch64" =>
+                "aarch64" => {
                     if target.options.vendor.as_ref() == "apple" {
                         // No "definitive" source, but see:
                         // https://www.wwdcnotes.com/notes/wwdc20/10214/
@@ -504,7 +597,8 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
                         16 * 1024
                     } else {
                         4 * 1024
-                    },
+                    }
+                }
                 _ => 4 * 1024,
             }
         };
@@ -581,6 +675,8 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
             page_size,
             stack_addr,
             stack_size,
+            collect_leak_backtraces: config.collect_leak_backtraces,
+            allocation_spans: RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -611,20 +707,24 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
         val: ImmTy<'tcx, Provenance>,
     ) -> InterpResult<'tcx> {
         let place = this.allocate(val.layout, MiriMemoryKind::ExternStatic.into())?;
-        this.write_immediate(*val, &place.into())?;
-        Self::add_extern_static(this, name, place.ptr);
+        this.write_immediate(*val, &place)?;
+        Self::add_extern_static(this, name, place.ptr());
         Ok(())
     }
 
     /// Sets up the "extern statics" for this machine.
     fn init_extern_statics(this: &mut MiriInterpCx<'mir, 'tcx>) -> InterpResult<'tcx> {
+        // "__rust_no_alloc_shim_is_unstable"
+        let val = ImmTy::from_int(0, this.machine.layouts.u8);
+        Self::alloc_extern_static(this, "__rust_no_alloc_shim_is_unstable", val)?;
+
         match this.tcx.sess.target.os.as_ref() {
             "linux" => {
                 // "environ"
                 Self::add_extern_static(
                     this,
                     "environ",
-                    this.machine.env_vars.environ.unwrap().ptr,
+                    this.machine.env_vars.environ.as_ref().unwrap().ptr(),
                 );
                 // A couple zero-initialized pointer-sized extern statics.
                 // Most of them are for weak symbols, which we all set to null (indicating that the
@@ -641,15 +741,14 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
                 Self::add_extern_static(
                     this,
                     "environ",
-                    this.machine.env_vars.environ.unwrap().ptr,
+                    this.machine.env_vars.environ.as_ref().unwrap().ptr(),
                 );
             }
             "android" => {
-                // "signal"
+                // "signal" -- just needs a non-zero pointer value (function does not even get called),
+                // but we arrange for this to be callable anyway (it will then do nothing).
                 let layout = this.machine.layouts.const_raw_ptr;
-                let dlsym = Dlsym::from_str("signal".as_bytes(), &this.tcx.sess.target.os)?
-                    .expect("`signal` must be an actual dlsym on android");
-                let ptr = this.create_fn_alloc_ptr(FnVal::Other(dlsym));
+                let ptr = this.fn_ptr(FnVal::Other(DynSym::from_str("signal")));
                 let val = ImmTy::from_scalar(Scalar::from_pointer(ptr, this), layout);
                 Self::alloc_extern_static(this, "signal", val)?;
                 // A couple zero-initialized pointer-sized extern statics.
@@ -680,10 +779,38 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
         let def_id = frame.instance.def_id();
         def_id.is_local() || self.local_crates.contains(&def_id.krate)
     }
+
+    /// Called when the interpreter is going to shut down abnormally, such as due to a Ctrl-C.
+    pub(crate) fn handle_abnormal_termination(&mut self) {
+        // All strings in the profile data are stored in a single string table which is not
+        // written to disk until the profiler is dropped. If the interpreter exits without dropping
+        // the profiler, it is not possible to interpret the profile data and all measureme tools
+        // will panic when given the file.
+        drop(self.profiler.take());
+    }
+
+    pub(crate) fn page_align(&self) -> Align {
+        Align::from_bytes(self.page_size).unwrap()
+    }
+
+    pub(crate) fn allocated_span(&self, alloc_id: AllocId) -> Option<SpanData> {
+        self.allocation_spans
+            .borrow()
+            .get(&alloc_id)
+            .map(|(allocated, _deallocated)| allocated.data())
+    }
+
+    pub(crate) fn deallocated_span(&self, alloc_id: AllocId) -> Option<SpanData> {
+        self.allocation_spans
+            .borrow()
+            .get(&alloc_id)
+            .and_then(|(_allocated, deallocated)| *deallocated)
+            .map(Span::data)
+    }
 }
 
-impl VisitTags for MiriMachine<'_, '_> {
-    fn visit_tags(&self, visit: &mut dyn FnMut(BorTag)) {
+impl VisitProvenance for MiriMachine<'_, '_> {
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         #[rustfmt::skip]
         let MiriMachine {
             threads,
@@ -728,22 +855,24 @@ impl VisitTags for MiriMachine<'_, '_> {
             page_size: _,
             stack_addr: _,
             stack_size: _,
+            collect_leak_backtraces: _,
+            allocation_spans: _,
         } = self;
 
-        threads.visit_tags(visit);
-        tls.visit_tags(visit);
-        env_vars.visit_tags(visit);
-        dir_handler.visit_tags(visit);
-        file_handler.visit_tags(visit);
-        data_race.visit_tags(visit);
-        borrow_tracker.visit_tags(visit);
-        intptrcast.visit_tags(visit);
-        main_fn_ret_place.visit_tags(visit);
-        argc.visit_tags(visit);
-        argv.visit_tags(visit);
-        cmd_line.visit_tags(visit);
+        threads.visit_provenance(visit);
+        tls.visit_provenance(visit);
+        env_vars.visit_provenance(visit);
+        dir_handler.visit_provenance(visit);
+        file_handler.visit_provenance(visit);
+        data_race.visit_provenance(visit);
+        borrow_tracker.visit_provenance(visit);
+        intptrcast.visit_provenance(visit);
+        main_fn_ret_place.visit_provenance(visit);
+        argc.visit_provenance(visit);
+        argv.visit_provenance(visit);
+        cmd_line.visit_provenance(visit);
         for ptr in extern_statics.values() {
-            ptr.visit_tags(visit);
+            ptr.visit_provenance(visit);
         }
     }
 }
@@ -770,10 +899,10 @@ impl<'mir, 'tcx> MiriInterpCxExt<'mir, 'tcx> for MiriInterpCx<'mir, 'tcx> {
 /// Machine hook implementations.
 impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
     type MemoryKind = MiriMemoryKind;
-    type ExtraFnVal = Dlsym;
+    type ExtraFnVal = DynSym;
 
     type FrameExtra = FrameExtra<'tcx>;
-    type AllocExtra = AllocExtra;
+    type AllocExtra = AllocExtra<'tcx>;
 
     type Provenance = Provenance;
     type ProvenanceExtra = ProvenanceExtra;
@@ -789,30 +918,54 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
     const PANIC_ON_ALLOC_FAIL: bool = false;
 
     #[inline(always)]
-    fn enforce_alignment(ecx: &MiriInterpCx<'mir, 'tcx>) -> CheckAlignment {
-        if ecx.machine.check_alignment == AlignmentCheck::None {
-            CheckAlignment::No
+    fn enforce_alignment(ecx: &MiriInterpCx<'mir, 'tcx>) -> bool {
+        ecx.machine.check_alignment != AlignmentCheck::None
+    }
+
+    #[inline(always)]
+    fn alignment_check(
+        ecx: &MiriInterpCx<'mir, 'tcx>,
+        alloc_id: AllocId,
+        alloc_align: Align,
+        alloc_kind: AllocKind,
+        offset: Size,
+        align: Align,
+    ) -> Option<Misalignment> {
+        if ecx.machine.check_alignment != AlignmentCheck::Symbolic {
+            // Just use the built-in check.
+            return None;
+        }
+        if alloc_kind != AllocKind::LiveData {
+            // Can't have any extra info here.
+            return None;
+        }
+        // Let's see which alignment we have been promised for this allocation.
+        let alloc_info = ecx.get_alloc_extra(alloc_id).unwrap(); // cannot fail since the allocation is live
+        let (promised_offset, promised_align) =
+            alloc_info.symbolic_alignment.get().unwrap_or((Size::ZERO, alloc_align));
+        if promised_align < align {
+            // Definitely not enough.
+            Some(Misalignment { has: promised_align, required: align })
         } else {
-            CheckAlignment::Error
+            // What's the offset between us and the promised alignment?
+            let distance = offset.bytes().wrapping_sub(promised_offset.bytes());
+            // That must also be aligned.
+            if distance % align.bytes() == 0 {
+                // All looking good!
+                None
+            } else {
+                // The biggest power of two through which `distance` is divisible.
+                let distance_pow2 = 1 << distance.trailing_zeros();
+                Some(Misalignment {
+                    has: Align::from_bytes(distance_pow2).unwrap(),
+                    required: align,
+                })
+            }
         }
     }
 
     #[inline(always)]
-    fn use_addr_for_alignment_check(ecx: &MiriInterpCx<'mir, 'tcx>) -> bool {
-        ecx.machine.check_alignment == AlignmentCheck::Int
-    }
-
-    fn alignment_check_failed(
-        _ecx: &InterpCx<'mir, 'tcx, Self>,
-        has: Align,
-        required: Align,
-        _check: CheckAlignment,
-    ) -> InterpResult<'tcx, ()> {
-        throw_ub!(AlignmentCheckFailed { has, required })
-    }
-
-    #[inline(always)]
-    fn enforce_validity(ecx: &MiriInterpCx<'mir, 'tcx>) -> bool {
+    fn enforce_validity(ecx: &MiriInterpCx<'mir, 'tcx>, _layout: TyAndLayout<'tcx>) -> bool {
         ecx.machine.validate
     }
 
@@ -822,7 +975,7 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
     }
 
     #[inline(always)]
-    fn ignore_checkable_overflow_assertions(ecx: &MiriInterpCx<'mir, 'tcx>) -> bool {
+    fn ignore_optional_overflow_checks(ecx: &MiriInterpCx<'mir, 'tcx>) -> bool {
         !ecx.tcx.sess.overflow_checks()
     }
 
@@ -831,10 +984,10 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
         ecx: &mut MiriInterpCx<'mir, 'tcx>,
         instance: ty::Instance<'tcx>,
         abi: Abi,
-        args: &[OpTy<'tcx, Provenance>],
+        args: &[FnArg<'tcx, Provenance>],
         dest: &PlaceTy<'tcx, Provenance>,
         ret: Option<mir::BasicBlock>,
-        unwind: StackPopUnwind,
+        unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx, Option<(&'mir mir::Body<'tcx>, ty::Instance<'tcx>)>> {
         ecx.find_mir_or_eval_fn(instance, abi, args, dest, ret, unwind)
     }
@@ -842,14 +995,15 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
     #[inline(always)]
     fn call_extra_fn(
         ecx: &mut MiriInterpCx<'mir, 'tcx>,
-        fn_val: Dlsym,
+        fn_val: DynSym,
         abi: Abi,
-        args: &[OpTy<'tcx, Provenance>],
+        args: &[FnArg<'tcx, Provenance>],
         dest: &PlaceTy<'tcx, Provenance>,
         ret: Option<mir::BasicBlock>,
-        _unwind: StackPopUnwind,
+        unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx> {
-        ecx.call_dlsym(fn_val, abi, args, dest, ret)
+        let args = ecx.copy_fn_args(args)?; // FIXME: Should `InPlace` arguments be reset to uninit?
+        ecx.emulate_dyn_sym(fn_val, abi, &args, dest, ret, unwind)
     }
 
     #[inline(always)]
@@ -859,7 +1013,7 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
         args: &[OpTy<'tcx, Provenance>],
         dest: &PlaceTy<'tcx, Provenance>,
         ret: Option<mir::BasicBlock>,
-        unwind: StackPopUnwind,
+        unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx> {
         ecx.call_intrinsic(instance, args, dest, ret, unwind)
     }
@@ -868,14 +1022,30 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
     fn assert_panic(
         ecx: &mut MiriInterpCx<'mir, 'tcx>,
         msg: &mir::AssertMessage<'tcx>,
-        unwind: Option<mir::BasicBlock>,
+        unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx> {
         ecx.assert_panic(msg, unwind)
     }
 
-    #[inline(always)]
-    fn abort(_ecx: &mut MiriInterpCx<'mir, 'tcx>, msg: String) -> InterpResult<'tcx, !> {
-        throw_machine_stop!(TerminationInfo::Abort(msg))
+    fn panic_nounwind(ecx: &mut InterpCx<'mir, 'tcx, Self>, msg: &str) -> InterpResult<'tcx> {
+        ecx.start_panic_nounwind(msg)
+    }
+
+    fn unwind_terminate(
+        ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        reason: mir::UnwindTerminateReason,
+    ) -> InterpResult<'tcx> {
+        // Call the lang item.
+        let panic = ecx.tcx.lang_items().get(reason.lang_item()).unwrap();
+        let panic = ty::Instance::mono(ecx.tcx.tcx, panic);
+        ecx.call_function(
+            panic,
+            Abi::Rust,
+            &[],
+            None,
+            StackPopCleanup::Goto { ret: None, unwind: mir::UnwindAction::Unreachable },
+        )?;
+        Ok(())
     }
 
     #[inline(always)]
@@ -884,8 +1054,19 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
         bin_op: mir::BinOp,
         left: &ImmTy<'tcx, Provenance>,
         right: &ImmTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, (Scalar<Provenance>, bool, Ty<'tcx>)> {
+    ) -> InterpResult<'tcx, (ImmTy<'tcx, Provenance>, bool)> {
         ecx.binary_ptr_op(bin_op, left, right)
+    }
+
+    #[inline(always)]
+    fn generate_nan<
+        F1: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F2>,
+        F2: rustc_apfloat::Float,
+    >(
+        ecx: &InterpCx<'mir, 'tcx, Self>,
+        inputs: &[F1],
+    ) -> F2 {
+        ecx.generate_nan(inputs)
     }
 
     fn thread_local_static_base_pointer(
@@ -908,7 +1089,7 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
                 panic!("extern_statics cannot contain wildcards")
             };
             let (shim_size, shim_align, _kind) = ecx.get_alloc_info(alloc_id);
-            let def_ty = ecx.tcx.type_of(def_id).subst_identity();
+            let def_ty = ecx.tcx.type_of(def_id).instantiate_identity();
             let extern_decl_layout = ecx.tcx.layout_of(ty::ParamEnv::empty().and(def_ty)).unwrap();
             if extern_decl_layout.size != shim_size || extern_decl_layout.align.abi != shim_align {
                 throw_unsup_format!(
@@ -967,21 +1148,45 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
             )
         });
         let buffer_alloc = ecx.machine.weak_memory.then(weak_memory::AllocState::new_allocation);
+
+        // If an allocation is leaked, we want to report a backtrace to indicate where it was
+        // allocated. We don't need to record a backtrace for allocations which are allowed to
+        // leak.
+        let backtrace = if kind.may_leak() || !ecx.machine.collect_leak_backtraces {
+            None
+        } else {
+            Some(ecx.generate_stacktrace())
+        };
+
         let alloc: Allocation<Provenance, Self::AllocExtra> = alloc.adjust_from_tcx(
             &ecx.tcx,
-            AllocExtra { borrow_tracker, data_race: race_alloc, weak_memory: buffer_alloc },
+            AllocExtra {
+                borrow_tracker,
+                data_race: race_alloc,
+                weak_memory: buffer_alloc,
+                backtrace,
+                symbolic_alignment: Cell::new(None),
+            },
             |ptr| ecx.global_base_pointer(ptr),
         )?;
+
+        if matches!(kind, MemoryKind::Machine(kind) if kind.should_save_allocation_span()) {
+            ecx.machine
+                .allocation_spans
+                .borrow_mut()
+                .insert(id, (ecx.machine.current_span(), None));
+        }
+
         Ok(Cow::Owned(alloc))
     }
 
     fn adjust_alloc_base_pointer(
         ecx: &MiriInterpCx<'mir, 'tcx>,
-        ptr: Pointer<AllocId>,
+        ptr: Pointer<CtfeProvenance>,
     ) -> InterpResult<'tcx, Pointer<Provenance>> {
+        let alloc_id = ptr.provenance.alloc_id();
         if cfg!(debug_assertions) {
             // The machine promises to never call us on thread-local or extern statics.
-            let alloc_id = ptr.provenance;
             match ecx.tcx.try_get_global_alloc(alloc_id) {
                 Some(GlobalAlloc::Static(def_id)) if ecx.tcx.is_thread_local_static(def_id) => {
                     panic!("adjust_alloc_base_pointer called on thread-local static")
@@ -992,34 +1197,34 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
                 _ => {}
             }
         }
-        let absolute_addr = intptrcast::GlobalStateInner::rel_ptr_to_addr(ecx, ptr)?;
+        // FIXME: can we somehow preserve the immutability of `ptr`?
         let tag = if let Some(borrow_tracker) = &ecx.machine.borrow_tracker {
-            borrow_tracker.borrow_mut().base_ptr_tag(ptr.provenance, &ecx.machine)
+            borrow_tracker.borrow_mut().base_ptr_tag(alloc_id, &ecx.machine)
         } else {
             // Value does not matter, SB is disabled
             BorTag::default()
         };
-        Ok(Pointer::new(
-            Provenance::Concrete { alloc_id: ptr.provenance, tag },
-            Size::from_bytes(absolute_addr),
-        ))
+        ecx.ptr_from_rel_ptr(ptr, tag)
     }
 
+    /// Called on `usize as ptr` casts.
     #[inline(always)]
     fn ptr_from_addr_cast(
         ecx: &MiriInterpCx<'mir, 'tcx>,
         addr: u64,
     ) -> InterpResult<'tcx, Pointer<Option<Self::Provenance>>> {
-        intptrcast::GlobalStateInner::ptr_from_addr_cast(ecx, addr)
+        ecx.ptr_from_addr_cast(addr)
     }
 
+    /// Called on `ptr as usize` casts.
+    /// (Actually computing the resulting `usize` doesn't need machine help,
+    /// that's just `Scalar::try_to_int`.)
     fn expose_ptr(
         ecx: &mut InterpCx<'mir, 'tcx, Self>,
         ptr: Pointer<Self::Provenance>,
     ) -> InterpResult<'tcx> {
         match ptr.provenance {
-            Provenance::Concrete { alloc_id, tag } =>
-                intptrcast::GlobalStateInner::expose_ptr(ecx, alloc_id, tag),
+            Provenance::Concrete { alloc_id, tag } => ecx.expose_ptr(alloc_id, tag),
             Provenance::Wildcard => {
                 // No need to do anything for wildcard pointers as
                 // their provenances have already been previously exposed.
@@ -1030,11 +1235,17 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
 
     /// Convert a pointer with provenance into an allocation-offset pair,
     /// or a `None` with an absolute address if that conversion is not possible.
+    ///
+    /// This is called when a pointer is about to be used for memory access,
+    /// an in-bounds check, or anything else that requires knowing which allocation it points to.
+    /// The resulting `AllocId` will just be used for that one step and the forgotten again
+    /// (i.e., we'll never turn the data returned here back into a `Pointer` that might be
+    /// stored in machine state).
     fn ptr_get_alloc(
         ecx: &MiriInterpCx<'mir, 'tcx>,
         ptr: Pointer<Self::Provenance>,
     ) -> Option<(AllocId, Size, Self::ProvenanceExtra)> {
-        let rel = intptrcast::GlobalStateInner::abs_ptr_to_rel(ecx, ptr);
+        let rel = ecx.ptr_get_alloc(ptr);
 
         rel.map(|(alloc_id, size)| {
             let tag = match ptr.provenance {
@@ -1047,9 +1258,9 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
 
     #[inline(always)]
     fn before_memory_read(
-        _tcx: TyCtxt<'tcx>,
+        _tcx: TyCtxtAt<'tcx>,
         machine: &Self,
-        alloc_extra: &AllocExtra,
+        alloc_extra: &AllocExtra<'tcx>,
         (alloc_id, prov_extra): (AllocId, Self::ProvenanceExtra),
         range: AllocRange,
     ) -> InterpResult<'tcx> {
@@ -1067,9 +1278,9 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
 
     #[inline(always)]
     fn before_memory_write(
-        _tcx: TyCtxt<'tcx>,
+        _tcx: TyCtxtAt<'tcx>,
         machine: &mut Self,
-        alloc_extra: &mut AllocExtra,
+        alloc_extra: &mut AllocExtra<'tcx>,
         (alloc_id, prov_extra): (AllocId, Self::ProvenanceExtra),
         range: AllocRange,
     ) -> InterpResult<'tcx> {
@@ -1087,9 +1298,9 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
 
     #[inline(always)]
     fn before_memory_deallocation(
-        _tcx: TyCtxt<'tcx>,
+        _tcx: TyCtxtAt<'tcx>,
         machine: &mut Self,
-        alloc_extra: &mut AllocExtra,
+        alloc_extra: &mut AllocExtra<'tcx>,
         (alloc_id, prove_extra): (AllocId, Self::ProvenanceExtra),
         range: AllocRange,
     ) -> InterpResult<'tcx> {
@@ -1102,6 +1313,11 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
         if let Some(borrow_tracker) = &mut alloc_extra.borrow_tracker {
             borrow_tracker.before_memory_deallocation(alloc_id, prove_extra, range, machine)?;
         }
+        if let Some((_, deallocated_at)) = machine.allocation_spans.borrow_mut().get_mut(&alloc_id)
+        {
+            *deallocated_at = Some(machine.current_span());
+        }
+        machine.intptrcast.get_mut().free_alloc_id(alloc_id);
         Ok(())
     }
 
@@ -1127,6 +1343,33 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
         if ecx.machine.borrow_tracker.is_some() {
             ecx.retag_place_contents(kind, place)?;
         }
+        Ok(())
+    }
+
+    fn protect_in_place_function_argument(
+        ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        place: &PlaceTy<'tcx, Provenance>,
+    ) -> InterpResult<'tcx> {
+        // If we have a borrow tracker, we also have it set up protection so that all reads *and
+        // writes* during this call are insta-UB.
+        let protected_place = if ecx.machine.borrow_tracker.is_some() {
+            // Have to do `to_op` first because a `Place::Local` doesn't imply the local doesn't have an address.
+            if let Either::Left(place) = ecx.place_to_op(place)?.as_mplace_or_imm() {
+                ecx.protect_place(&place)?.into()
+            } else {
+                // Locals that don't have their address taken are as protected as they can ever be.
+                place.clone()
+            }
+        } else {
+            // No borrow tracker.
+            place.clone()
+        };
+        // We do need to write `uninit` so that even after the call ends, the former contents of
+        // this place cannot be observed any more. We do the write after retagging so that for
+        // Tree Borrows, this is considered to activate the new tag.
+        // Conveniently this also ensures that the place actually points to suitable memory.
+        ecx.write_uninit(&protected_place)?;
+        // Now we throw away the protected place, ensuring its tag is never used again.
         Ok(())
     }
 
@@ -1192,7 +1435,7 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
         // where it mistakenly removes an important tag become visible.
         if ecx.machine.gc_interval > 0 && ecx.machine.since_gc >= ecx.machine.gc_interval {
             ecx.machine.since_gc = 0;
-            ecx.garbage_collect_tags()?;
+            ecx.run_provenance_gc();
         }
 
         // These are our preemption points.
@@ -1212,8 +1455,17 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
             let stack_len = ecx.active_thread_stack().len();
             ecx.active_thread_mut().set_top_user_relevant_frame(stack_len - 1);
         }
+        Ok(())
+    }
+
+    fn before_stack_pop(
+        ecx: &InterpCx<'mir, 'tcx, Self>,
+        frame: &Frame<'mir, 'tcx, Self::Provenance, Self::FrameExtra>,
+    ) -> InterpResult<'tcx> {
+        // We want this *before* the return value copy, because the return place itself is protected
+        // until we do `end_call` here.
         if ecx.machine.borrow_tracker.is_some() {
-            ecx.retag_return_place()?;
+            ecx.on_stack_pop(frame)?;
         }
         Ok(())
     }
@@ -1232,13 +1484,25 @@ impl<'mir, 'tcx> Machine<'mir, 'tcx> for MiriMachine<'mir, 'tcx> {
             ecx.active_thread_mut().recompute_top_user_relevant_frame();
         }
         let timing = frame.extra.timing.take();
-        if let Some(borrow_tracker) = &ecx.machine.borrow_tracker {
-            borrow_tracker.borrow_mut().end_call(&frame.extra);
-        }
         let res = ecx.handle_stack_pop_unwind(frame.extra, unwinding);
         if let Some(profiler) = ecx.machine.profiler.as_ref() {
             profiler.finish_recording_interval_event(timing.unwrap());
         }
         res
+    }
+
+    fn after_local_allocated(
+        ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        frame: usize,
+        local: mir::Local,
+        mplace: &MPlaceTy<'tcx, Provenance>,
+    ) -> InterpResult<'tcx> {
+        let Some(Provenance::Concrete { alloc_id, .. }) = mplace.ptr().provenance else {
+            panic!("after_local_allocated should only be called on fresh allocations");
+        };
+        let local_decl = &ecx.active_thread_stack()[frame].body.local_decls[local];
+        let span = local_decl.source_info.span;
+        ecx.machine.allocation_spans.borrow_mut().insert(alloc_id, (span, None));
+        Ok(())
     }
 }

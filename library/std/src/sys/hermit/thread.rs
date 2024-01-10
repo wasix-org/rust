@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use super::unsupported;
 use crate::ffi::CStr;
 use crate::io;
 use crate::mem;
@@ -104,7 +103,7 @@ impl Thread {
 }
 
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
-    unsupported()
+    unsafe { Ok(NonZeroUsize::new_unchecked(abi::get_processor_count())) }
 }
 
 pub mod guard {

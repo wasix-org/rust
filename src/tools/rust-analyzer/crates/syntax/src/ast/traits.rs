@@ -1,7 +1,7 @@
 //! Various traits that are implemented by ast nodes.
 //!
 //! The implementations are usually trivial, and live in generated.rs
-use itertools::Either;
+use either::Either;
 
 use crate::{
     ast::{self, support, AstChildren, AstNode, AstToken},
@@ -76,9 +76,6 @@ pub trait HasDocComments: HasAttrs {
     fn doc_comments(&self) -> DocCommentIter {
         DocCommentIter { iter: self.syntax().children_with_tokens() }
     }
-    fn doc_comments_and_attrs(&self) -> AttrDocCommentIter {
-        AttrDocCommentIter { iter: self.syntax().children_with_tokens() }
-    }
 }
 
 impl DocCommentIter {
@@ -134,3 +131,5 @@ impl Iterator for AttrDocCommentIter {
         })
     }
 }
+
+impl<A: HasName, B: HasName> HasName for Either<A, B> {}

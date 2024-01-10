@@ -645,24 +645,20 @@ note: inside `<i32 as Const>::CONSTANT`
 LL |     const CONSTANT: i32 = unsafe { fake_type() };
    |                                    ^^^^^^^^^^^
 
-note: erroneous constant used
+note: erroneous constant encountered
   --> $DIR/uninhabited-const-issue-61744.rs:18:10
    |
 LL |     dbg!(i32::CONSTANT);
    |          ^^^^^^^^^^^^^
 
-note: erroneous constant used
+note: erroneous constant encountered
   --> $DIR/uninhabited-const-issue-61744.rs:18:10
    |
 LL |     dbg!(i32::CONSTANT);
    |          ^^^^^^^^^^^^^
-
-note: erroneous constant used
-  --> $DIR/uninhabited-const-issue-61744.rs:18:10
    |
-LL |     dbg!(i32::CONSTANT);
-   |          ^^^^^^^^^^^^^
+   = note: duplicate diagnostic emitted due to `-Z deduplicate-diagnostics=no`
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0080`.

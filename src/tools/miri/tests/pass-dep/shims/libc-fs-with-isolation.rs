@@ -1,4 +1,5 @@
 //@ignore-target-windows: no libc on Windows
+//@ignore-target-freebsd: FIXME needs foreign function `stat@FBSD_1.0`
 //@compile-flags: -Zmiri-isolation-error=warn-nobacktrace
 //@normalize-stderr-test: "(stat(x)?)" -> "$$STAT"
 
@@ -7,10 +8,9 @@ use std::fs;
 use std::io::{Error, ErrorKind};
 
 fn main() {
-    // test `fcntl`
+    // test `fcntl(F_DUPFD): should work even with isolation.`
     unsafe {
-        assert_eq!(libc::fcntl(1, libc::F_DUPFD, 0), -1);
-        assert_eq!(Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+        assert!(libc::fcntl(1, libc::F_DUPFD, 0) >= 0);
     }
 
     // test `readlink`

@@ -20,7 +20,7 @@ impl<'tcx> MirPass<'tcx> for CtfeLimit {
             .filter_map(|(node, node_data)| {
                 if matches!(node_data.terminator().kind, TerminatorKind::Call { .. })
                     // Back edges in a CFG indicate loops
-                    || has_back_edge(&doms, node, &node_data)
+                    || has_back_edge(doms, node, node_data)
                 {
                     Some(node)
                 } else {
@@ -47,7 +47,7 @@ fn has_back_edge(
         return false;
     }
     // Check if any of the dominators of the node are also the node's successor.
-    doms.dominators(node).any(|dom| node_data.terminator().successors().any(|succ| succ == dom))
+    node_data.terminator().successors().any(|succ| doms.dominates(succ, node))
 }
 
 fn insert_counter(basic_block_data: &mut BasicBlockData<'_>) {

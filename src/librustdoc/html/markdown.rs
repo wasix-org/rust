@@ -20,12 +20,14 @@
 //!     edition: Edition::Edition2015,
 //!     playground: &None,
 //!     heading_offset: HeadingOffset::H2,
+//!     custom_code_classes_in_docs: true,
 //! };
 //! let html = md.into_string();
 //! // ... something using html
 //! ```
 
 use rustc_data_structures::fx::FxHashMap;
+use rustc_errors::{DiagnosticBuilder, DiagnosticMessage};
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
 pub(crate) use rustc_resolve::rustdoc::main_body_opts;
@@ -36,10 +38,10 @@ use rustc_span::{Span, Symbol};
 use once_cell::sync::Lazy;
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::default::Default;
 use std::fmt::Write;
+use std::iter::Peekable;
 use std::ops::{ControlFlow, Range};
-use std::str;
+use std::str::{self, CharIndices};
 
 use crate::clean::RenderedLink;
 use crate::doctest;
@@ -51,7 +53,7 @@ use crate::html::render::small_url_encode;
 use crate::html::toc::TocBuilder;
 
 use pulldown_cmark::{
-    html, BrokenLink, CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag,
+    html, BrokenLink, CodeBlockKind, CowStr, Event, LinkType, OffsetIter, Options, Parser, Tag,
 };
 
 #[cfg(test)]
@@ -94,6 +96,8 @@ pub struct Markdown<'a> {
     /// Offset at which we render headings.
     /// E.g. if `heading_offset: HeadingOffset::H2`, then `# something` renders an `<h2>`.
     pub heading_offset: HeadingOffset,
+    /// `true` if the `custom_code_classes_in_docs` feature is enabled.
+    pub custom_code_classes_in_docs: bool,
 }
 /// A struct like `Markdown` that renders the markdown with a table of contents.
 pub(crate) struct MarkdownWithToc<'a> {
@@ -102,6 +106,8 @@ pub(crate) struct MarkdownWithToc<'a> {
     pub(crate) error_codes: ErrorCodes,
     pub(crate) edition: Edition,
     pub(crate) playground: &'a Option<Playground>,
+    /// `true` if the `custom_code_classes_in_docs` feature is enabled.
+    pub(crate) custom_code_classes_in_docs: bool,
 }
 /// A tuple struct like `Markdown` that renders the markdown escaping HTML tags
 /// and includes no paragraph tags.
@@ -202,6 +208,7 @@ struct CodeBlocks<'p, 'a, I: Iterator<Item = Event<'a>>> {
     // Information about the playground if a URL has been specified, containing an
     // optional crate name and the URL.
     playground: &'p Option<Playground>,
+    custom_code_classes_in_docs: bool,
 }
 
 impl<'p, 'a, I: Iterator<Item = Event<'a>>> CodeBlocks<'p, 'a, I> {
@@ -210,8 +217,15 @@ impl<'p, 'a, I: Iterator<Item = Event<'a>>> CodeBlocks<'p, 'a, I> {
         error_codes: ErrorCodes,
         edition: Edition,
         playground: &'p Option<Playground>,
+        custom_code_classes_in_docs: bool,
     ) -> Self {
-        CodeBlocks { inner: iter, check_error_codes: error_codes, edition, playground }
+        CodeBlocks {
+            inner: iter,
+            check_error_codes: error_codes,
+            edition,
+            playground,
+            custom_code_classes_in_docs,
+        }
     }
 }
 
@@ -220,10 +234,6 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let event = self.inner.next();
-        let compile_fail;
-        let should_panic;
-        let ignore;
-        let edition;
         let Some(Event::Start(Tag::CodeBlock(kind))) = event else {
             return event;
         };
@@ -239,34 +249,43 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
             }
         }
 
-        let parse_result = match kind {
-            CodeBlockKind::Fenced(ref lang) => {
-                let parse_result =
-                    LangString::parse_without_check(lang, self.check_error_codes, false);
-                if !parse_result.rust {
-                    return Some(Event::Html(
-                        format!(
-                            "<div class=\"example-wrap\">\
-                                 <pre class=\"language-{}\"><code>{}</code></pre>\
+        let LangString { added_classes, compile_fail, should_panic, ignore, edition, .. } =
+            match kind {
+                CodeBlockKind::Fenced(ref lang) => {
+                    let parse_result = LangString::parse_without_check(
+                        lang,
+                        self.check_error_codes,
+                        false,
+                        self.custom_code_classes_in_docs,
+                    );
+                    if !parse_result.rust {
+                        let added_classes = parse_result.added_classes;
+                        let lang_string = if let Some(lang) = parse_result.unknown.first() {
+                            format!("language-{}", lang)
+                        } else {
+                            String::new()
+                        };
+                        let whitespace = if added_classes.is_empty() { "" } else { " " };
+                        return Some(Event::Html(
+                            format!(
+                                "<div class=\"example-wrap\">\
+                                 <pre class=\"{lang_string}{whitespace}{added_classes}\">\
+                                     <code>{text}</code>\
+                                 </pre>\
                              </div>",
-                            lang,
-                            Escape(&original_text),
-                        )
-                        .into(),
-                    ));
+                                added_classes = added_classes.join(" "),
+                                text = Escape(&original_text),
+                            )
+                            .into(),
+                        ));
+                    }
+                    parse_result
                 }
-                parse_result
-            }
-            CodeBlockKind::Indented => Default::default(),
-        };
+                CodeBlockKind::Indented => Default::default(),
+            };
 
         let lines = original_text.lines().filter_map(|l| map_line(l).for_html());
         let text = lines.intersperse("\n".into()).collect::<String>();
-
-        compile_fail = parse_result.compile_fail;
-        should_panic = parse_result.should_panic;
-        ignore = parse_result.ignore;
-        edition = parse_result.edition;
 
         let explicit_edition = edition.is_some();
         let edition = edition.unwrap_or(self.edition);
@@ -289,8 +308,9 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
 
             let test_escaped = small_url_encode(test);
             Some(format!(
-                r#"<a class="test-arrow" target="_blank" href="{}?code={}{}&amp;edition={}">Run</a>"#,
-                url, test_escaped, channel, edition,
+                "<a class=\"test-arrow\" \
+                    target=\"_blank\" \
+                    href=\"{url}?code={test_escaped}{channel}&amp;edition={edition}\">Run</a>",
             ))
         });
 
@@ -309,13 +329,14 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
         // insert newline to clearly separate it from the
         // previous block so we can shorten the html output
         let mut s = Buffer::new();
-        s.push_str("\n");
+        s.push('\n');
 
         highlight::render_example_with_highlighting(
             &text,
             &mut s,
             tooltip,
             playground_button.as_deref(),
+            &added_classes,
         );
         Some(Event::Html(s.into_inner().into()))
     }
@@ -350,7 +371,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for LinkReplacer<'a, I> {
                 dest,
                 title,
             ))) => {
-                debug!("saw start of shortcut link to {} with title {}", dest, title);
+                debug!("saw start of shortcut link to {dest} with title {title}");
                 // If this is a shortcut link, it was resolved by the broken_link_callback.
                 // So the URL will already be updated properly.
                 let link = self.links.iter().find(|&link| *link.href == **dest);
@@ -371,7 +392,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for LinkReplacer<'a, I> {
                 dest,
                 _,
             ))) => {
-                debug!("saw end of shortcut link to {}", dest);
+                debug!("saw end of shortcut link to {dest}");
                 if self.links.iter().any(|link| *link.href == **dest) {
                     assert!(self.shortcut_link.is_some(), "saw closing link without opening tag");
                     self.shortcut_link = None;
@@ -380,9 +401,8 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for LinkReplacer<'a, I> {
             // Handle backticks in inline code blocks, but only if we're in the middle of a shortcut link.
             // [`fn@f`]
             Some(Event::Code(text)) => {
-                trace!("saw code {}", text);
+                trace!("saw code {text}");
                 if let Some(link) = self.shortcut_link {
-                    trace!("original text was {}", link.original_text);
                     // NOTE: this only replaces if the code block is the *entire* text.
                     // If only part of the link has code highlighting, the disambiguator will not be removed.
                     // e.g. [fn@`f`]
@@ -391,9 +411,12 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for LinkReplacer<'a, I> {
                     // So we could never be sure we weren't replacing too much:
                     // [fn@my_`f`unc] is treated the same as [my_func()] in that pass.
                     //
-                    // NOTE: &[1..len() - 1] is to strip the backticks
-                    if **text == link.original_text[1..link.original_text.len() - 1] {
-                        debug!("replacing {} with {}", text, link.new_text);
+                    // NOTE: .get(1..len() - 1) is to strip the backticks
+                    if let Some(link) = self.links.iter().find(|l| {
+                        l.href == link.href
+                            && Some(&**text) == l.original_text.get(1..l.original_text.len() - 1)
+                    }) {
+                        debug!("replacing {text} with {new_text}", new_text = link.new_text);
                         *text = CowStr::Borrowed(&link.new_text);
                     }
                 }
@@ -401,12 +424,15 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for LinkReplacer<'a, I> {
             // Replace plain text in links, but only in the middle of a shortcut link.
             // [fn@f]
             Some(Event::Text(text)) => {
-                trace!("saw text {}", text);
+                trace!("saw text {text}");
                 if let Some(link) = self.shortcut_link {
-                    trace!("original text was {}", link.original_text);
                     // NOTE: same limitations as `Event::Code`
-                    if **text == *link.original_text {
-                        debug!("replacing {} with {}", text, link.new_text);
+                    if let Some(link) = self
+                        .links
+                        .iter()
+                        .find(|l| l.href == link.href && **text == *l.original_text)
+                    {
+                        debug!("replacing {text} with {new_text}", new_text = link.new_text);
                         *text = CowStr::Borrowed(&link.new_text);
                     }
                 }
@@ -518,18 +544,16 @@ impl<'a, 'b, 'ids, I: Iterator<Item = SpannedEvent<'a>>> Iterator
                 let mut html_header = String::new();
                 html::push_html(&mut html_header, self.buf.iter().map(|(ev, _)| ev.clone()));
                 let sec = builder.push(level as u32, html_header, id.clone());
-                self.buf.push_front((Event::Html(format!("{} ", sec).into()), 0..0));
+                self.buf.push_front((Event::Html(format!("{sec} ").into()), 0..0));
             }
 
             let level =
                 std::cmp::min(level as u32 + (self.heading_offset as u32), MAX_HEADER_LEVEL);
-            self.buf.push_back((Event::Html(format!("</a></h{}>", level).into()), 0..0));
+            self.buf.push_back((Event::Html(format!("</a></h{level}>").into()), 0..0));
 
             let start_tags = format!(
                 "<h{level} id=\"{id}\">\
                     <a href=\"#{id}\">",
-                id = id,
-                level = level
             );
             return Some((Event::Html(start_tags.into()), 0..0));
         }
@@ -552,11 +576,27 @@ impl<'a, I: Iterator<Item = Event<'a>>> SummaryLine<'a, I> {
 }
 
 fn check_if_allowed_tag(t: &Tag<'_>) -> bool {
-    matches!(t, Tag::Paragraph | Tag::Emphasis | Tag::Strong | Tag::Link(..) | Tag::BlockQuote)
+    matches!(
+        t,
+        Tag::Paragraph
+            | Tag::Emphasis
+            | Tag::Strong
+            | Tag::Strikethrough
+            | Tag::Link(..)
+            | Tag::BlockQuote
+    )
 }
 
 fn is_forbidden_tag(t: &Tag<'_>) -> bool {
-    matches!(t, Tag::CodeBlock(_) | Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell)
+    matches!(
+        t,
+        Tag::CodeBlock(_)
+            | Tag::Table(_)
+            | Tag::TableHead
+            | Tag::TableRow
+            | Tag::TableCell
+            | Tag::FootnoteDefinition(_)
+    )
 }
 
 impl<'a, I: Iterator<Item = Event<'a>>> Iterator for SummaryLine<'a, I> {
@@ -588,6 +628,10 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for SummaryLine<'a, I> {
                     self.depth -= 1;
                     is_start = false;
                     check_if_allowed_tag(c)
+                }
+                Event::FootnoteReference(_) => {
+                    self.skipped_tags += 1;
+                    false
                 }
                 _ => true,
             };
@@ -659,14 +703,14 @@ impl<'a, I: Iterator<Item = SpannedEvent<'a>>> Iterator for Footnotes<'a, I> {
                         v.sort_by(|a, b| a.1.cmp(&b.1));
                         let mut ret = String::from("<div class=\"footnotes\"><hr><ol>");
                         for (mut content, id) in v {
-                            write!(ret, "<li id=\"fn{}\">", id).unwrap();
+                            write!(ret, "<li id=\"fn{id}\">").unwrap();
                             let mut is_paragraph = false;
                             if let Some(&Event::End(Tag::Paragraph)) = content.last() {
                                 content.pop();
                                 is_paragraph = true;
                             }
                             html::push_html(&mut ret, content.into_iter());
-                            write!(ret, "&nbsp;<a href=\"#fnref{}\">↩</a>", id).unwrap();
+                            write!(ret, "&nbsp;<a href=\"#fnref{id}\">↩</a>").unwrap();
                             if is_paragraph {
                                 ret.push_str("</p>");
                             }
@@ -689,6 +733,27 @@ pub(crate) fn find_testable_code<T: doctest::Tester>(
     error_codes: ErrorCodes,
     enable_per_target_ignores: bool,
     extra_info: Option<&ExtraInfo<'_>>,
+    custom_code_classes_in_docs: bool,
+) {
+    find_codes(
+        doc,
+        tests,
+        error_codes,
+        enable_per_target_ignores,
+        extra_info,
+        false,
+        custom_code_classes_in_docs,
+    )
+}
+
+pub(crate) fn find_codes<T: doctest::Tester>(
+    doc: &str,
+    tests: &mut T,
+    error_codes: ErrorCodes,
+    enable_per_target_ignores: bool,
+    extra_info: Option<&ExtraInfo<'_>>,
+    include_non_rust: bool,
+    custom_code_classes_in_docs: bool,
 ) {
     let mut parser = Parser::new(doc).into_offset_iter();
     let mut prev_offset = 0;
@@ -707,12 +772,13 @@ pub(crate) fn find_testable_code<T: doctest::Tester>(
                                 error_codes,
                                 enable_per_target_ignores,
                                 extra_info,
+                                custom_code_classes_in_docs,
                             )
                         }
                     }
                     CodeBlockKind::Indented => Default::default(),
                 };
-                if !block_info.rust {
+                if !include_non_rust && !block_info.rust {
                     continue;
                 }
 
@@ -762,14 +828,30 @@ impl<'tcx> ExtraInfo<'tcx> {
         ExtraInfo { def_id, sp, tcx }
     }
 
-    fn error_invalid_codeblock_attr(&self, msg: &str, help: &str) {
+    fn error_invalid_codeblock_attr(&self, msg: impl Into<DiagnosticMessage>) {
         if let Some(def_id) = self.def_id.as_local() {
             self.tcx.struct_span_lint_hir(
                 crate::lint::INVALID_CODEBLOCK_ATTRIBUTES,
-                self.tcx.hir().local_def_id_to_hir_id(def_id),
+                self.tcx.local_def_id_to_hir_id(def_id),
                 self.sp,
                 msg,
-                |lint| lint.help(help),
+                |_| {},
+            );
+        }
+    }
+
+    fn error_invalid_codeblock_attr_with_help(
+        &self,
+        msg: impl Into<DiagnosticMessage>,
+        f: impl for<'a, 'b> FnOnce(&'b mut DiagnosticBuilder<'a, ()>),
+    ) {
+        if let Some(def_id) = self.def_id.as_local() {
+            self.tcx.struct_span_lint_hir(
+                crate::lint::INVALID_CODEBLOCK_ATTRIBUTES,
+                self.tcx.local_def_id_to_hir_id(def_id),
+                self.sp,
+                msg,
+                f,
             );
         }
     }
@@ -777,7 +859,7 @@ impl<'tcx> ExtraInfo<'tcx> {
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub(crate) struct LangString {
-    original: String,
+    pub(crate) original: String,
     pub(crate) should_panic: bool,
     pub(crate) no_run: bool,
     pub(crate) ignore: Ignore,
@@ -786,6 +868,8 @@ pub(crate) struct LangString {
     pub(crate) compile_fail: bool,
     pub(crate) error_codes: Vec<String>,
     pub(crate) edition: Option<Edition>,
+    pub(crate) added_classes: Vec<String>,
+    pub(crate) unknown: Vec<String>,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -793,6 +877,317 @@ pub(crate) enum Ignore {
     All,
     None,
     Some(Vec<String>),
+}
+
+/// This is the parser for fenced codeblocks attributes. It implements the following eBNF:
+///
+/// ```eBNF
+/// lang-string = *(token-list / delimited-attribute-list / comment)
+///
+/// bareword = LEADINGCHAR *(CHAR)
+/// bareword-without-leading-char = CHAR *(CHAR)
+/// quoted-string = QUOTE *(NONQUOTE) QUOTE
+/// token = bareword / quoted-string
+/// token-without-leading-char = bareword-without-leading-char / quoted-string
+/// sep = COMMA/WS *(COMMA/WS)
+/// attribute = (DOT token)/(token EQUAL token-without-leading-char)
+/// attribute-list = [sep] attribute *(sep attribute) [sep]
+/// delimited-attribute-list = OPEN-CURLY-BRACKET attribute-list CLOSE-CURLY-BRACKET
+/// token-list = [sep] token *(sep token) [sep]
+/// comment = OPEN_PAREN *(all characters) CLOSE_PAREN
+///
+/// OPEN_PAREN = "("
+/// CLOSE_PARENT = ")"
+/// OPEN-CURLY-BRACKET = "{"
+/// CLOSE-CURLY-BRACKET = "}"
+/// LEADINGCHAR = ALPHA | DIGIT | "_" | "-" | ":"
+/// ; All ASCII punctuation except comma, quote, equals, backslash, grave (backquote) and braces.
+/// ; Comma is used to separate language tokens, so it can't be used in one.
+/// ; Quote is used to allow otherwise-disallowed characters in language tokens.
+/// ; Equals is used to make key=value pairs in attribute blocks.
+/// ; Backslash and grave are special Markdown characters.
+/// ; Braces are used to start an attribute block.
+/// CHAR = ALPHA | DIGIT | "_" | "-" | ":" | "." | "!" | "#" | "$" | "%" | "&" | "*" | "+" | "/" |
+///        ";" | "<" | ">" | "?" | "@" | "^" | "|" | "~"
+/// NONQUOTE = %x09 / %x20 / %x21 / %x23-7E ; TAB / SPACE / all printable characters except `"`
+/// COMMA = ","
+/// DOT = "."
+/// EQUAL = "="
+///
+/// ALPHA = %x41-5A / %x61-7A ; A-Z / a-z
+/// DIGIT = %x30-39
+/// WS = %x09 / " "
+/// ```
+pub(crate) struct TagIterator<'a, 'tcx> {
+    inner: Peekable<CharIndices<'a>>,
+    data: &'a str,
+    is_in_attribute_block: bool,
+    extra: Option<&'a ExtraInfo<'tcx>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LangStringToken<'a> {
+    LangToken(&'a str),
+    ClassAttribute(&'a str),
+    KeyValueAttribute(&'a str, &'a str),
+}
+
+fn is_leading_char(c: char) -> bool {
+    c == '_' || c == '-' || c == ':' || c.is_ascii_alphabetic() || c.is_ascii_digit()
+}
+fn is_bareword_char(c: char) -> bool {
+    is_leading_char(c) || ".!#$%&*+/;<>?@^|~".contains(c)
+}
+fn is_separator(c: char) -> bool {
+    c == ' ' || c == ',' || c == '\t'
+}
+
+struct Indices {
+    start: usize,
+    end: usize,
+}
+
+impl<'a, 'tcx> TagIterator<'a, 'tcx> {
+    pub(crate) fn new(data: &'a str, extra: Option<&'a ExtraInfo<'tcx>>) -> Self {
+        Self { inner: data.char_indices().peekable(), data, is_in_attribute_block: false, extra }
+    }
+
+    fn emit_error(&self, err: impl Into<DiagnosticMessage>) {
+        if let Some(extra) = self.extra {
+            extra.error_invalid_codeblock_attr(err);
+        }
+    }
+
+    fn skip_separators(&mut self) -> Option<usize> {
+        while let Some((pos, c)) = self.inner.peek() {
+            if !is_separator(*c) {
+                return Some(*pos);
+            }
+            self.inner.next();
+        }
+        None
+    }
+
+    fn parse_string(&mut self, start: usize) -> Option<Indices> {
+        while let Some((pos, c)) = self.inner.next() {
+            if c == '"' {
+                return Some(Indices { start: start + 1, end: pos });
+            }
+        }
+        self.emit_error("unclosed quote string `\"`");
+        None
+    }
+
+    fn parse_class(&mut self, start: usize) -> Option<LangStringToken<'a>> {
+        while let Some((pos, c)) = self.inner.peek().copied() {
+            if is_bareword_char(c) {
+                self.inner.next();
+            } else {
+                let class = &self.data[start + 1..pos];
+                if class.is_empty() {
+                    self.emit_error(format!("unexpected `{c}` character after `.`"));
+                    return None;
+                } else if self.check_after_token() {
+                    return Some(LangStringToken::ClassAttribute(class));
+                } else {
+                    return None;
+                }
+            }
+        }
+        let class = &self.data[start + 1..];
+        if class.is_empty() {
+            self.emit_error("missing character after `.`");
+            None
+        } else if self.check_after_token() {
+            Some(LangStringToken::ClassAttribute(class))
+        } else {
+            None
+        }
+    }
+
+    fn parse_token(&mut self, start: usize) -> Option<Indices> {
+        while let Some((pos, c)) = self.inner.peek() {
+            if !is_bareword_char(*c) {
+                return Some(Indices { start, end: *pos });
+            }
+            self.inner.next();
+        }
+        self.emit_error("unexpected end");
+        None
+    }
+
+    fn parse_key_value(&mut self, c: char, start: usize) -> Option<LangStringToken<'a>> {
+        let key_indices =
+            if c == '"' { self.parse_string(start)? } else { self.parse_token(start)? };
+        if key_indices.start == key_indices.end {
+            self.emit_error("unexpected empty string as key");
+            return None;
+        }
+
+        if let Some((_, c)) = self.inner.next() {
+            if c != '=' {
+                self.emit_error(format!("expected `=`, found `{}`", c));
+                return None;
+            }
+        } else {
+            self.emit_error("unexpected end");
+            return None;
+        }
+        let value_indices = match self.inner.next() {
+            Some((pos, '"')) => self.parse_string(pos)?,
+            Some((pos, c)) if is_bareword_char(c) => self.parse_token(pos)?,
+            Some((_, c)) => {
+                self.emit_error(format!("unexpected `{c}` character after `=`"));
+                return None;
+            }
+            None => {
+                self.emit_error("expected value after `=`");
+                return None;
+            }
+        };
+        if value_indices.start == value_indices.end {
+            self.emit_error("unexpected empty string as value");
+            None
+        } else if self.check_after_token() {
+            Some(LangStringToken::KeyValueAttribute(
+                &self.data[key_indices.start..key_indices.end],
+                &self.data[value_indices.start..value_indices.end],
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Returns `false` if an error was emitted.
+    fn check_after_token(&mut self) -> bool {
+        if let Some((_, c)) = self.inner.peek().copied() {
+            if c == '}' || is_separator(c) || c == '(' {
+                true
+            } else {
+                self.emit_error(format!("unexpected `{c}` character"));
+                false
+            }
+        } else {
+            // The error will be caught on the next iteration.
+            true
+        }
+    }
+
+    fn parse_in_attribute_block(&mut self) -> Option<LangStringToken<'a>> {
+        if let Some((pos, c)) = self.inner.next() {
+            if c == '}' {
+                self.is_in_attribute_block = false;
+                return self.next();
+            } else if c == '.' {
+                return self.parse_class(pos);
+            } else if c == '"' || is_leading_char(c) {
+                return self.parse_key_value(c, pos);
+            } else {
+                self.emit_error(format!("unexpected character `{c}`"));
+                return None;
+            }
+        }
+        self.emit_error("unclosed attribute block (`{}`): missing `}` at the end");
+        None
+    }
+
+    /// Returns `false` if an error was emitted.
+    fn skip_paren_block(&mut self) -> bool {
+        while let Some((_, c)) = self.inner.next() {
+            if c == ')' {
+                return true;
+            }
+        }
+        self.emit_error("unclosed comment: missing `)` at the end");
+        false
+    }
+
+    fn parse_outside_attribute_block(&mut self, start: usize) -> Option<LangStringToken<'a>> {
+        while let Some((pos, c)) = self.inner.next() {
+            if c == '"' {
+                if pos != start {
+                    self.emit_error("expected ` `, `{` or `,` found `\"`");
+                    return None;
+                }
+                let indices = self.parse_string(pos)?;
+                if let Some((_, c)) = self.inner.peek().copied()
+                    && c != '{'
+                    && !is_separator(c)
+                    && c != '('
+                {
+                    self.emit_error(format!("expected ` `, `{{` or `,` after `\"`, found `{c}`"));
+                    return None;
+                }
+                return Some(LangStringToken::LangToken(&self.data[indices.start..indices.end]));
+            } else if c == '{' {
+                self.is_in_attribute_block = true;
+                return self.next();
+            } else if is_separator(c) {
+                if pos != start {
+                    return Some(LangStringToken::LangToken(&self.data[start..pos]));
+                }
+                return self.next();
+            } else if c == '(' {
+                if !self.skip_paren_block() {
+                    return None;
+                }
+                if pos != start {
+                    return Some(LangStringToken::LangToken(&self.data[start..pos]));
+                }
+                return self.next();
+            } else if pos == start && is_leading_char(c) {
+                continue;
+            } else if pos != start && is_bareword_char(c) {
+                continue;
+            } else {
+                self.emit_error(format!("unexpected character `{c}`"));
+                return None;
+            }
+        }
+        let token = &self.data[start..];
+        if token.is_empty() { None } else { Some(LangStringToken::LangToken(&self.data[start..])) }
+    }
+}
+
+impl<'a, 'tcx> Iterator for TagIterator<'a, 'tcx> {
+    type Item = LangStringToken<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Some(start) = self.skip_separators() else {
+            if self.is_in_attribute_block {
+                self.emit_error("unclosed attribute block (`{}`): missing `}` at the end");
+            }
+            return None;
+        };
+        if self.is_in_attribute_block {
+            self.parse_in_attribute_block()
+        } else {
+            self.parse_outside_attribute_block(start)
+        }
+    }
+}
+
+fn tokens(string: &str) -> impl Iterator<Item = LangStringToken<'_>> {
+    // Pandoc, which Rust once used for generating documentation,
+    // expects lang strings to be surrounded by `{}` and for each token
+    // to be proceeded by a `.`. Since some of these lang strings are still
+    // loose in the wild, we strip a pair of surrounding `{}` from the lang
+    // string and a leading `.` from each token.
+
+    let string = string.trim();
+
+    let first = string.chars().next();
+    let last = string.chars().last();
+
+    let string =
+        if first == Some('{') && last == Some('}') { &string[1..string.len() - 1] } else { string };
+
+    string
+        .split(|c| c == ',' || c == ' ' || c == '\t')
+        .map(str::trim)
+        .map(|token| token.strip_prefix('.').unwrap_or(token))
+        .filter(|token| !token.is_empty())
+        .map(|token| LangStringToken::LangToken(token))
 }
 
 impl Default for LangString {
@@ -807,6 +1202,8 @@ impl Default for LangString {
             compile_fail: false,
             error_codes: Vec::new(),
             edition: None,
+            added_classes: Vec::new(),
+            unknown: Vec::new(),
         }
     }
 }
@@ -816,33 +1213,15 @@ impl LangString {
         string: &str,
         allow_error_code_check: ErrorCodes,
         enable_per_target_ignores: bool,
-    ) -> LangString {
-        Self::parse(string, allow_error_code_check, enable_per_target_ignores, None)
-    }
-
-    fn tokens(string: &str) -> impl Iterator<Item = &str> {
-        // Pandoc, which Rust once used for generating documentation,
-        // expects lang strings to be surrounded by `{}` and for each token
-        // to be proceeded by a `.`. Since some of these lang strings are still
-        // loose in the wild, we strip a pair of surrounding `{}` from the lang
-        // string and a leading `.` from each token.
-
-        let string = string.trim();
-
-        let first = string.chars().next();
-        let last = string.chars().last();
-
-        let string = if first == Some('{') && last == Some('}') {
-            &string[1..string.len() - 1]
-        } else {
-            string
-        };
-
-        string
-            .split(|c| c == ',' || c == ' ' || c == '\t')
-            .map(str::trim)
-            .map(|token| token.strip_prefix('.').unwrap_or(token))
-            .filter(|token| !token.is_empty())
+        custom_code_classes_in_docs: bool,
+    ) -> Self {
+        Self::parse(
+            string,
+            allow_error_code_check,
+            enable_per_target_ignores,
+            None,
+            custom_code_classes_in_docs,
+        )
     }
 
     fn parse(
@@ -850,102 +1229,161 @@ impl LangString {
         allow_error_code_check: ErrorCodes,
         enable_per_target_ignores: bool,
         extra: Option<&ExtraInfo<'_>>,
-    ) -> LangString {
+        custom_code_classes_in_docs: bool,
+    ) -> Self {
         let allow_error_code_check = allow_error_code_check.as_bool();
         let mut seen_rust_tags = false;
         let mut seen_other_tags = false;
+        let mut seen_custom_tag = false;
         let mut data = LangString::default();
         let mut ignores = vec![];
 
         data.original = string.to_owned();
 
-        for token in Self::tokens(string) {
-            match token {
-                "should_panic" => {
-                    data.should_panic = true;
-                    seen_rust_tags = !seen_other_tags;
-                }
-                "no_run" => {
-                    data.no_run = true;
-                    seen_rust_tags = !seen_other_tags;
-                }
-                "ignore" => {
-                    data.ignore = Ignore::All;
-                    seen_rust_tags = !seen_other_tags;
-                }
-                x if x.starts_with("ignore-") => {
-                    if enable_per_target_ignores {
-                        ignores.push(x.trim_start_matches("ignore-").to_owned());
+        let mut call = |tokens: &mut dyn Iterator<Item = LangStringToken<'_>>| {
+            for token in tokens {
+                match token {
+                    LangStringToken::LangToken("should_panic") => {
+                        data.should_panic = true;
                         seen_rust_tags = !seen_other_tags;
                     }
-                }
-                "rust" => {
-                    data.rust = true;
-                    seen_rust_tags = true;
-                }
-                "test_harness" => {
-                    data.test_harness = true;
-                    seen_rust_tags = !seen_other_tags || seen_rust_tags;
-                }
-                "compile_fail" => {
-                    data.compile_fail = true;
-                    seen_rust_tags = !seen_other_tags || seen_rust_tags;
-                    data.no_run = true;
-                }
-                x if x.starts_with("edition") => {
-                    data.edition = x[7..].parse::<Edition>().ok();
-                }
-                x if allow_error_code_check && x.starts_with('E') && x.len() == 5 => {
-                    if x[1..].parse::<u32>().is_ok() {
-                        data.error_codes.push(x.to_owned());
-                        seen_rust_tags = !seen_other_tags || seen_rust_tags;
-                    } else {
-                        seen_other_tags = true;
+                    LangStringToken::LangToken("no_run") => {
+                        data.no_run = true;
+                        seen_rust_tags = !seen_other_tags;
                     }
-                }
-                x if extra.is_some() => {
-                    let s = x.to_lowercase();
-                    if let Some((flag, help)) = if s == "compile-fail"
-                        || s == "compile_fail"
-                        || s == "compilefail"
+                    LangStringToken::LangToken("ignore") => {
+                        data.ignore = Ignore::All;
+                        seen_rust_tags = !seen_other_tags;
+                    }
+                    LangStringToken::LangToken(x) if x.starts_with("ignore-") => {
+                        if enable_per_target_ignores {
+                            ignores.push(x.trim_start_matches("ignore-").to_owned());
+                            seen_rust_tags = !seen_other_tags;
+                        }
+                    }
+                    LangStringToken::LangToken("rust") => {
+                        data.rust = true;
+                        seen_rust_tags = true;
+                    }
+                    LangStringToken::LangToken("custom") => {
+                        if custom_code_classes_in_docs {
+                            seen_custom_tag = true;
+                        } else {
+                            seen_other_tags = true;
+                        }
+                    }
+                    LangStringToken::LangToken("test_harness") => {
+                        data.test_harness = true;
+                        seen_rust_tags = !seen_other_tags || seen_rust_tags;
+                    }
+                    LangStringToken::LangToken("compile_fail") => {
+                        data.compile_fail = true;
+                        seen_rust_tags = !seen_other_tags || seen_rust_tags;
+                        data.no_run = true;
+                    }
+                    LangStringToken::LangToken(x) if x.starts_with("edition") => {
+                        data.edition = x[7..].parse::<Edition>().ok();
+                    }
+                    LangStringToken::LangToken(x)
+                        if x.starts_with("rust") && x[4..].parse::<Edition>().is_ok() =>
                     {
-                        Some((
-                            "compile_fail",
-                            "the code block will either not be tested if not marked as a rust one \
-                             or won't fail if it compiles successfully",
-                        ))
-                    } else if s == "should-panic" || s == "should_panic" || s == "shouldpanic" {
-                        Some((
-                            "should_panic",
-                            "the code block will either not be tested if not marked as a rust one \
-                             or won't fail if it doesn't panic when running",
-                        ))
-                    } else if s == "no-run" || s == "no_run" || s == "norun" {
-                        Some((
-                            "no_run",
-                            "the code block will either not be tested if not marked as a rust one \
-                             or will be run (which you might not want)",
-                        ))
-                    } else if s == "test-harness" || s == "test_harness" || s == "testharness" {
-                        Some((
-                            "test_harness",
-                            "the code block will either not be tested if not marked as a rust one \
-                             or the code will be wrapped inside a main function",
-                        ))
-                    } else {
-                        None
-                    } {
                         if let Some(extra) = extra {
-                            extra.error_invalid_codeblock_attr(
-                                &format!("unknown attribute `{}`. Did you mean `{}`?", x, flag),
-                                help,
+                            extra.error_invalid_codeblock_attr_with_help(
+                                format!("unknown attribute `{x}`"),
+                                |lint| {
+                                    lint.help(format!(
+                                        "there is an attribute with a similar name: `edition{}`",
+                                        &x[4..],
+                                    ));
+                                },
                             );
                         }
                     }
-                    seen_other_tags = true;
+                    LangStringToken::LangToken(x)
+                        if allow_error_code_check && x.starts_with('E') && x.len() == 5 =>
+                    {
+                        if x[1..].parse::<u32>().is_ok() {
+                            data.error_codes.push(x.to_owned());
+                            seen_rust_tags = !seen_other_tags || seen_rust_tags;
+                        } else {
+                            seen_other_tags = true;
+                        }
+                    }
+                    LangStringToken::LangToken(x) if extra.is_some() => {
+                        let s = x.to_lowercase();
+                        if let Some((flag, help)) = if s == "compile-fail"
+                            || s == "compile_fail"
+                            || s == "compilefail"
+                        {
+                            Some((
+                                "compile_fail",
+                                "the code block will either not be tested if not marked as a rust one \
+                                 or won't fail if it compiles successfully",
+                            ))
+                        } else if s == "should-panic" || s == "should_panic" || s == "shouldpanic" {
+                            Some((
+                                "should_panic",
+                                "the code block will either not be tested if not marked as a rust one \
+                                 or won't fail if it doesn't panic when running",
+                            ))
+                        } else if s == "no-run" || s == "no_run" || s == "norun" {
+                            Some((
+                                "no_run",
+                                "the code block will either not be tested if not marked as a rust one \
+                                 or will be run (which you might not want)",
+                            ))
+                        } else if s == "test-harness" || s == "test_harness" || s == "testharness" {
+                            Some((
+                                "test_harness",
+                                "the code block will either not be tested if not marked as a rust one \
+                                 or the code will be wrapped inside a main function",
+                            ))
+                        } else {
+                            None
+                        } {
+                            if let Some(extra) = extra {
+                                extra.error_invalid_codeblock_attr_with_help(
+                                    format!("unknown attribute `{x}`"),
+                                    |lint| {
+                                        lint.help(format!(
+                                            "there is an attribute with a similar name: `{flag}`"
+                                        ))
+                                        .help(help);
+                                    },
+                                );
+                            }
+                        }
+                        seen_other_tags = true;
+                        data.unknown.push(x.to_owned());
+                    }
+                    LangStringToken::LangToken(x) => {
+                        seen_other_tags = true;
+                        data.unknown.push(x.to_owned());
+                    }
+                    LangStringToken::KeyValueAttribute(key, value) => {
+                        if custom_code_classes_in_docs {
+                            if key == "class" {
+                                data.added_classes.push(value.to_owned());
+                            } else if let Some(extra) = extra {
+                                extra.error_invalid_codeblock_attr(format!(
+                                    "unsupported attribute `{key}`"
+                                ));
+                            }
+                        } else {
+                            seen_other_tags = true;
+                        }
+                    }
+                    LangStringToken::ClassAttribute(class) => {
+                        data.added_classes.push(class.to_owned());
+                    }
                 }
-                _ => seen_other_tags = true,
             }
+        };
+
+        if custom_code_classes_in_docs {
+            call(&mut TagIterator::new(string, extra))
+        } else {
+            call(&mut tokens(string))
         }
 
         // ignore-foo overrides ignore
@@ -953,7 +1391,7 @@ impl LangString {
             data.ignore = Ignore::Some(ignores);
         }
 
-        data.rust &= !seen_other_tags || seen_rust_tags;
+        data.rust &= !seen_custom_tag && (!seen_other_tags || seen_rust_tags);
 
         data
     }
@@ -969,6 +1407,7 @@ impl Markdown<'_> {
             edition,
             playground,
             heading_offset,
+            custom_code_classes_in_docs,
         } = self;
 
         // This is actually common enough to special-case
@@ -991,7 +1430,7 @@ impl Markdown<'_> {
         let p = Footnotes::new(p);
         let p = LinkReplacer::new(p.map(|(ev, _)| ev), links);
         let p = TableWrapper::new(p);
-        let p = CodeBlocks::new(p, codes, edition, playground);
+        let p = CodeBlocks::new(p, codes, edition, playground, custom_code_classes_in_docs);
         html::push_html(&mut s, p);
 
         s
@@ -1000,7 +1439,14 @@ impl Markdown<'_> {
 
 impl MarkdownWithToc<'_> {
     pub(crate) fn into_string(self) -> String {
-        let MarkdownWithToc { content: md, ids, error_codes: codes, edition, playground } = self;
+        let MarkdownWithToc {
+            content: md,
+            ids,
+            error_codes: codes,
+            edition,
+            playground,
+            custom_code_classes_in_docs,
+        } = self;
 
         let p = Parser::new_ext(md, main_body_opts()).into_offset_iter();
 
@@ -1012,11 +1458,11 @@ impl MarkdownWithToc<'_> {
             let p = HeadingLinks::new(p, Some(&mut toc), ids, HeadingOffset::H1);
             let p = Footnotes::new(p);
             let p = TableWrapper::new(p.map(|(ev, _)| ev));
-            let p = CodeBlocks::new(p, codes, edition, playground);
+            let p = CodeBlocks::new(p, codes, edition, playground, custom_code_classes_in_docs);
             html::push_html(&mut s, p);
         }
 
-        format!("<nav id=\"TOC\">{}</nav>{}", toc.into_toc().print(), s)
+        format!("<nav id=\"TOC\">{toc}</nav>{s}", toc = toc.into_toc().print())
     }
 }
 
@@ -1218,11 +1664,32 @@ pub(crate) fn plain_text_summary(md: &str, link_names: &[RenderedLink]) -> Strin
 pub(crate) struct MarkdownLink {
     pub kind: LinkType,
     pub link: String,
-    pub range: Range<usize>,
+    pub display_text: Option<String>,
+    pub range: MarkdownLinkRange,
 }
 
-pub(crate) fn markdown_links<R>(
-    md: &str,
+#[derive(Clone, Debug)]
+pub(crate) enum MarkdownLinkRange {
+    /// Normally, markdown link warnings point only at the destination.
+    Destination(Range<usize>),
+    /// In some cases, it's not possible to point at the destination.
+    /// Usually, this happens because backslashes `\\` are used.
+    /// When that happens, point at the whole link, and don't provide structured suggestions.
+    WholeLink(Range<usize>),
+}
+
+impl MarkdownLinkRange {
+    /// Extracts the inner range.
+    pub fn inner_range(&self) -> &Range<usize> {
+        match self {
+            MarkdownLinkRange::Destination(range) => range,
+            MarkdownLinkRange::WholeLink(range) => range,
+        }
+    }
+}
+
+pub(crate) fn markdown_links<'md, R>(
+    md: &'md str,
     preprocess_link: impl Fn(MarkdownLink) -> Option<R>,
 ) -> Vec<R> {
     if md.is_empty() {
@@ -1238,9 +1705,9 @@ pub(crate) fn markdown_links<R>(
         if md_start <= s_start && s_end <= md_end {
             let start = s_start.offset_from(md_start) as usize;
             let end = s_end.offset_from(md_start) as usize;
-            start..end
+            MarkdownLinkRange::Destination(start..end)
         } else {
-            fallback
+            MarkdownLinkRange::WholeLink(fallback)
         }
     };
 
@@ -1248,6 +1715,7 @@ pub(crate) fn markdown_links<R>(
         // For diagnostics, we want to underline the link's definition but `span` will point at
         // where the link is used. This is a problem for reference-style links, where the definition
         // is separate from the usage.
+
         match link {
             // `Borrowed` variant means the string (the link's destination) may come directly from
             // the markdown text and we can locate the original link destination.
@@ -1256,27 +1724,166 @@ pub(crate) fn markdown_links<R>(
             CowStr::Borrowed(s) => locate(s, span),
 
             // For anything else, we can only use the provided range.
-            CowStr::Boxed(_) | CowStr::Inlined(_) => span,
+            CowStr::Boxed(_) | CowStr::Inlined(_) => MarkdownLinkRange::WholeLink(span),
         }
     };
 
-    Parser::new_with_broken_link_callback(
+    let span_for_offset_backward = |span: Range<usize>, open: u8, close: u8| {
+        let mut open_brace = !0;
+        let mut close_brace = !0;
+        for (i, b) in md.as_bytes()[span.clone()].iter().copied().enumerate().rev() {
+            let i = i + span.start;
+            if b == close {
+                close_brace = i;
+                break;
+            }
+        }
+        if close_brace < span.start || close_brace >= span.end {
+            return MarkdownLinkRange::WholeLink(span);
+        }
+        let mut nesting = 1;
+        for (i, b) in md.as_bytes()[span.start..close_brace].iter().copied().enumerate().rev() {
+            let i = i + span.start;
+            if b == close {
+                nesting += 1;
+            }
+            if b == open {
+                nesting -= 1;
+            }
+            if nesting == 0 {
+                open_brace = i;
+                break;
+            }
+        }
+        assert!(open_brace != close_brace);
+        if open_brace < span.start || open_brace >= span.end {
+            return MarkdownLinkRange::WholeLink(span);
+        }
+        // do not actually include braces in the span
+        let range = (open_brace + 1)..close_brace;
+        MarkdownLinkRange::Destination(range)
+    };
+
+    let span_for_offset_forward = |span: Range<usize>, open: u8, close: u8| {
+        let mut open_brace = !0;
+        let mut close_brace = !0;
+        for (i, b) in md.as_bytes()[span.clone()].iter().copied().enumerate() {
+            let i = i + span.start;
+            if b == open {
+                open_brace = i;
+                break;
+            }
+        }
+        if open_brace < span.start || open_brace >= span.end {
+            return MarkdownLinkRange::WholeLink(span);
+        }
+        let mut nesting = 0;
+        for (i, b) in md.as_bytes()[open_brace..span.end].iter().copied().enumerate() {
+            let i = i + open_brace;
+            if b == close {
+                nesting -= 1;
+            }
+            if b == open {
+                nesting += 1;
+            }
+            if nesting == 0 {
+                close_brace = i;
+                break;
+            }
+        }
+        assert!(open_brace != close_brace);
+        if open_brace < span.start || open_brace >= span.end {
+            return MarkdownLinkRange::WholeLink(span);
+        }
+        // do not actually include braces in the span
+        let range = (open_brace + 1)..close_brace;
+        MarkdownLinkRange::Destination(range)
+    };
+
+    let mut broken_link_callback = |link: BrokenLink<'md>| Some((link.reference, "".into()));
+    let mut event_iter = Parser::new_with_broken_link_callback(
         md,
         main_body_opts(),
-        Some(&mut |link: BrokenLink<'_>| Some((link.reference, "".into()))),
+        Some(&mut broken_link_callback),
     )
-    .into_offset_iter()
-    .filter_map(|(event, span)| match event {
-        Event::Start(Tag::Link(link_type, dest, _)) if may_be_doc_link(link_type) => {
-            preprocess_link(MarkdownLink {
-                kind: link_type,
-                range: span_for_link(&dest, span),
-                link: dest.into_string(),
-            })
+    .into_offset_iter();
+    let mut links = Vec::new();
+
+    while let Some((event, span)) = event_iter.next() {
+        match event {
+            Event::Start(Tag::Link(link_type, dest, _)) if may_be_doc_link(link_type) => {
+                let range = match link_type {
+                    // Link is pulled from the link itself.
+                    LinkType::ReferenceUnknown | LinkType::ShortcutUnknown => {
+                        span_for_offset_backward(span, b'[', b']')
+                    }
+                    LinkType::CollapsedUnknown => span_for_offset_forward(span, b'[', b']'),
+                    LinkType::Inline => span_for_offset_backward(span, b'(', b')'),
+                    // Link is pulled from elsewhere in the document.
+                    LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
+                        span_for_link(&dest, span)
+                    }
+                    LinkType::Autolink | LinkType::Email => unreachable!(),
+                };
+
+                let display_text = if matches!(
+                    link_type,
+                    LinkType::Inline
+                        | LinkType::ReferenceUnknown
+                        | LinkType::Reference
+                        | LinkType::Shortcut
+                        | LinkType::ShortcutUnknown
+                ) {
+                    collect_link_data(&mut event_iter)
+                } else {
+                    None
+                };
+
+                if let Some(link) = preprocess_link(MarkdownLink {
+                    kind: link_type,
+                    link: dest.into_string(),
+                    display_text,
+                    range,
+                }) {
+                    links.push(link);
+                }
+            }
+            _ => {}
         }
-        _ => None,
-    })
-    .collect()
+    }
+
+    links
+}
+
+/// Collects additional data of link.
+fn collect_link_data<'input, 'callback>(
+    event_iter: &mut OffsetIter<'input, 'callback>,
+) -> Option<String> {
+    let mut display_text: Option<String> = None;
+    let mut append_text = |text: CowStr<'_>| {
+        if let Some(display_text) = &mut display_text {
+            display_text.push_str(&text);
+        } else {
+            display_text = Some(text.to_string());
+        }
+    };
+
+    while let Some((event, _span)) = event_iter.next() {
+        match event {
+            Event::Text(text) => {
+                append_text(text);
+            }
+            Event::Code(code) => {
+                append_text(code);
+            }
+            Event::End(_) => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    display_text
 }
 
 #[derive(Debug)]
@@ -1292,7 +1899,11 @@ pub(crate) struct RustCodeBlock {
 
 /// Returns a range of bytes for each code block in the markdown that is tagged as `rust` or
 /// untagged (and assumed to be rust).
-pub(crate) fn rust_code_blocks(md: &str, extra_info: &ExtraInfo<'_>) -> Vec<RustCodeBlock> {
+pub(crate) fn rust_code_blocks(
+    md: &str,
+    extra_info: &ExtraInfo<'_>,
+    custom_code_classes_in_docs: bool,
+) -> Vec<RustCodeBlock> {
     let mut code_blocks = vec![];
 
     if md.is_empty() {
@@ -1309,7 +1920,13 @@ pub(crate) fn rust_code_blocks(md: &str, extra_info: &ExtraInfo<'_>) -> Vec<Rust
                     let lang_string = if syntax.is_empty() {
                         Default::default()
                     } else {
-                        LangString::parse(&*syntax, ErrorCodes::Yes, false, Some(extra_info))
+                        LangString::parse(
+                            &*syntax,
+                            ErrorCodes::Yes,
+                            false,
+                            Some(extra_info),
+                            custom_code_classes_in_docs,
+                        )
                     };
                     if !lang_string.rust {
                         continue;
@@ -1381,7 +1998,7 @@ static DEFAULT_ID_MAP: Lazy<FxHashMap<Cow<'static, str>, usize>> = Lazy::new(|| 
 
 fn init_id_map() -> FxHashMap<Cow<'static, str>, usize> {
     let mut map = FxHashMap::default();
-    // This is the list of IDs used in Javascript.
+    // This is the list of IDs used in JavaScript.
     map.insert("help".into(), 1);
     map.insert("settings".into(), 1);
     map.insert("not-displayed".into(), 1);
@@ -1391,15 +2008,14 @@ fn init_id_map() -> FxHashMap<Cow<'static, str>, usize> {
     map.insert("crate-search-div".into(), 1);
     // This is the list of IDs used in HTML generated in Rust (including the ones
     // used in tera template files).
-    map.insert("mainThemeStyle".into(), 1);
     map.insert("themeStyle".into(), 1);
     map.insert("settings-menu".into(), 1);
     map.insert("help-button".into(), 1);
+    map.insert("sidebar-button".into(), 1);
     map.insert("main-content".into(), 1);
     map.insert("toggle-all-docs".into(), 1);
     map.insert("all-types".into(), 1);
     map.insert("default-settings".into(), 1);
-    map.insert("rustdoc-vars".into(), 1);
     map.insert("sidebar-vars".into(), 1);
     map.insert("copy-path".into(), 1);
     map.insert("TOC".into(), 1);
@@ -1420,6 +2036,7 @@ fn init_id_map() -> FxHashMap<Cow<'static, str>, usize> {
     map.insert("required-associated-consts".into(), 1);
     map.insert("required-methods".into(), 1);
     map.insert("provided-methods".into(), 1);
+    map.insert("object-safety".into(), 1);
     map.insert("implementors".into(), 1);
     map.insert("synthetic-implementors".into(), 1);
     map.insert("implementations-list".into(), 1);
@@ -1428,6 +2045,7 @@ fn init_id_map() -> FxHashMap<Cow<'static, str>, usize> {
     map.insert("blanket-implementations-list".into(), 1);
     map.insert("deref-methods".into(), 1);
     map.insert("layout".into(), 1);
+    map.insert("aliased-type".into(), 1);
     map
 }
 

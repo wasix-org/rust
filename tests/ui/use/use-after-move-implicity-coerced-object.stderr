@@ -8,7 +8,7 @@ LL |     l.push(n);
    |            - value moved here
 LL |
 LL |     let x = n.to_string();
-   |             ^^^^^^^^^^^^^ value borrowed here after move
+   |             ^ value borrowed here after move
    |
 note: consider changing this parameter type in method `push` to borrow instead if owning the value isn't necessary
   --> $DIR/use-after-move-implicity-coerced-object.rs:17:27
@@ -18,6 +18,6 @@ LL |     fn push(&mut self, n: Box<dyn ToString + 'static>) {
    |        |
    |        in this method
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0382`.

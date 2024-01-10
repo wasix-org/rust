@@ -1,7 +1,7 @@
 use rustc_data_structures::fx::FxHashSet;
 use rustc_middle::ty::visit::{TypeSuperVisitable, TypeVisitable, TypeVisitor};
 use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_span::source_map::Span;
+use rustc_span::Span;
 use std::ops::ControlFlow;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -13,8 +13,8 @@ impl From<ty::ParamTy> for Parameter {
     }
 }
 
-impl From<ty::EarlyBoundRegion> for Parameter {
-    fn from(param: ty::EarlyBoundRegion) -> Self {
+impl From<ty::EarlyParamRegion> for Parameter {
+    fn from(param: ty::EarlyParamRegion) -> Self {
         Parameter(param.index)
     }
 }
@@ -59,7 +59,7 @@ struct ParameterCollector {
 impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for ParameterCollector {
     fn visit_ty(&mut self, t: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
         match *t.kind() {
-            ty::Alias(ty::Projection, ..) if !self.include_nonconstraining => {
+            ty::Alias(..) if !self.include_nonconstraining => {
                 // projections are not injective
                 return ControlFlow::Continue(());
             }
@@ -73,7 +73,7 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for ParameterCollector {
     }
 
     fn visit_region(&mut self, r: ty::Region<'tcx>) -> ControlFlow<Self::BreakTy> {
-        if let ty::ReEarlyBound(data) = *r {
+        if let ty::ReEarlyParam(data) = *r {
             self.parameters.push(Parameter::from(data));
         }
         ControlFlow::Continue(())
@@ -151,7 +151,7 @@ pub fn identify_constrained_generic_params<'tcx>(
 /// think of any.
 pub fn setup_constraining_predicates<'tcx>(
     tcx: TyCtxt<'tcx>,
-    predicates: &mut [(ty::Predicate<'tcx>, Span)],
+    predicates: &mut [(ty::Clause<'tcx>, Span)],
     impl_trait_ref: Option<ty::TraitRef<'tcx>>,
     input_parameters: &mut FxHashSet<Parameter>,
 ) {
@@ -187,9 +187,7 @@ pub fn setup_constraining_predicates<'tcx>(
         for j in i..predicates.len() {
             // Note that we don't have to care about binders here,
             // as the impl trait ref never contains any late-bound regions.
-            if let ty::PredicateKind::Clause(ty::Clause::Projection(projection)) =
-                predicates[j].0.kind().skip_binder()
-            {
+            if let ty::ClauseKind::Projection(projection) = predicates[j].0.kind().skip_binder() {
                 // Special case: watch out for some kind of sneaky attempt
                 // to project out an associated type defined by this very
                 // trait.

@@ -5,8 +5,8 @@ use std::mem;
 use either::Either;
 use hir::{InFile, Semantics};
 use ide_db::{
-    active_parameter::ActiveParameter, base_db::FileId, defs::Definition, rust_doc::is_rust_fence,
-    SymbolKind,
+    active_parameter::ActiveParameter, base_db::FileId, defs::Definition,
+    documentation::docs_with_rangemap, rust_doc::is_rust_fence, SymbolKind,
 };
 use syntax::{
     ast::{self, AstNode, IsString, QuoteOffsets},
@@ -52,7 +52,11 @@ pub(super) fn ra_fixture(
 
         if let Some(next) = text.strip_prefix(marker) {
             if let Some(range) = literal.map_range_up(TextRange::at(offset, TextSize::of(marker))) {
-                hl.add(HlRange { range, highlight: HlTag::Keyword.into(), binding_hash: None });
+                hl.add(HlRange {
+                    range,
+                    highlight: HlTag::Keyword | HlMod::Injected,
+                    binding_hash: None,
+                });
             }
 
             text = next;
@@ -66,7 +70,16 @@ pub(super) fn ra_fixture(
 
     for mut hl_range in analysis
         .highlight(
-            HighlightConfig { syntactic_name_ref_highlighting: false, ..config },
+            HighlightConfig {
+                syntactic_name_ref_highlighting: false,
+                punctuation: true,
+                operator: true,
+                strings: true,
+                specialize_punctuation: config.specialize_punctuation,
+                specialize_operator: config.operator,
+                inject_doc_comment: config.inject_doc_comment,
+                macro_bang: config.macro_bang,
+            },
             tmp_file_id,
         )
         .unwrap()
@@ -74,6 +87,7 @@ pub(super) fn ra_fixture(
         for range in inj.map_range_up(hl_range.range) {
             if let Some(range) = literal.map_range_up(range) {
                 hl_range.range = range;
+                hl_range.highlight |= HlMod::Injected;
                 hl.add(hl_range);
             }
         }
@@ -104,7 +118,7 @@ pub(super) fn doc_comment(
     let src_file_id = src_file_id.into();
 
     // Extract intra-doc links and emit highlights for them.
-    if let Some((docs, doc_mapping)) = attributes.docs_with_rangemap(sema.db) {
+    if let Some((docs, doc_mapping)) = docs_with_rangemap(sema.db, &attributes) {
         extract_definitions_from_docs(&docs)
             .into_iter()
             .filter_map(|(range, link, ns)| {
@@ -217,7 +231,16 @@ pub(super) fn doc_comment(
     if let Ok(ranges) = analysis.with_db(|db| {
         super::highlight(
             db,
-            HighlightConfig { syntactic_name_ref_highlighting: true, ..config },
+            HighlightConfig {
+                syntactic_name_ref_highlighting: true,
+                punctuation: true,
+                operator: true,
+                strings: true,
+                specialize_punctuation: config.specialize_punctuation,
+                specialize_operator: config.operator,
+                inject_doc_comment: config.inject_doc_comment,
+                macro_bang: config.macro_bang,
+            },
             tmp_file_id,
             None,
         )
@@ -265,7 +288,7 @@ fn find_doc_string_in_attr(attr: &hir::Attr, it: &ast::Attr) -> Option<ast::Stri
 
 fn module_def_to_hl_tag(def: Definition) -> HlTag {
     let symbol = match def {
-        Definition::Module(_) => SymbolKind::Module,
+        Definition::Module(_) | Definition::ExternCrateDecl(_) => SymbolKind::Module,
         Definition::Function(_) => SymbolKind::Function,
         Definition::Adt(hir::Adt::Struct(_)) => SymbolKind::Struct,
         Definition::Adt(hir::Adt::Enum(_)) => SymbolKind::Enum,
@@ -274,10 +297,11 @@ fn module_def_to_hl_tag(def: Definition) -> HlTag {
         Definition::Const(_) => SymbolKind::Const,
         Definition::Static(_) => SymbolKind::Static,
         Definition::Trait(_) => SymbolKind::Trait,
+        Definition::TraitAlias(_) => SymbolKind::TraitAlias,
         Definition::TypeAlias(_) => SymbolKind::TypeAlias,
         Definition::BuiltinType(_) => return HlTag::BuiltinType,
         Definition::Macro(_) => SymbolKind::Macro,
-        Definition::Field(_) => SymbolKind::Field,
+        Definition::Field(_) | Definition::TupleField(_) => SymbolKind::Field,
         Definition::SelfType(_) => SymbolKind::Impl,
         Definition::Local(_) => SymbolKind::Local,
         Definition::GenericParam(gp) => match gp {

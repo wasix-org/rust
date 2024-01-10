@@ -223,8 +223,6 @@ impl str {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```
     /// let s = "this is a string";
     /// let boxed_str = s.to_owned().into_boxed_str();
@@ -256,7 +254,7 @@ impl str {
     /// assert_eq!("than an old", s.replace("is", "an"));
     /// ```
     ///
-    /// When the pattern doesn't match:
+    /// When the pattern doesn't match, it returns this string slice as [`String`]:
     ///
     /// ```
     /// let s = "this is old";
@@ -297,7 +295,7 @@ impl str {
     /// assert_eq!("foo foo new23 foo", s.replacen(char::is_numeric, "new", 1));
     /// ```
     ///
-    /// When the pattern doesn't match:
+    /// When the pattern doesn't match, it returns this string slice as [`String`]:
     ///
     /// ```
     /// let s = "this is old";
@@ -404,12 +402,12 @@ impl str {
             // See https://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G33992
             // for the definition of `Final_Sigma`.
             debug_assert!('Σ'.len_utf8() == 2);
-            let is_word_final = case_ignoreable_then_cased(from[..i].chars().rev())
-                && !case_ignoreable_then_cased(from[i + 2..].chars());
+            let is_word_final = case_ignorable_then_cased(from[..i].chars().rev())
+                && !case_ignorable_then_cased(from[i + 2..].chars());
             to.push_str(if is_word_final { "ς" } else { "σ" });
         }
 
-        fn case_ignoreable_then_cased<I: Iterator<Item = char>>(iter: I) -> bool {
+        fn case_ignorable_then_cased<I: Iterator<Item = char>>(iter: I) -> bool {
             use core::unicode::{Case_Ignorable, Cased};
             match iter.skip_while(|&c| Case_Ignorable(c)).next() {
                 Some(c) => Cased(c),
@@ -486,8 +484,6 @@ impl str {
     /// Converts a [`Box<str>`] into a [`String`] without copying or allocating.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```
     /// let string = String::from("birthday gift");
@@ -602,8 +598,6 @@ impl str {
 ///
 /// # Examples
 ///
-/// Basic usage:
-///
 /// ```
 /// let smile_utf8 = Box::new([226, 152, 186]);
 /// let smile = unsafe { std::str::from_boxed_utf8_unchecked(smile_utf8) };
@@ -618,7 +612,7 @@ pub unsafe fn from_boxed_utf8_unchecked(v: Box<[u8]>) -> Box<str> {
 }
 
 /// Converts the bytes while the bytes are still ascii.
-/// For better average performance, this is happens in chunks of `2*size_of::<usize>()`.
+/// For better average performance, this happens in chunks of `2*size_of::<usize>()`.
 /// Returns a vec with the converted bytes.
 #[inline]
 #[cfg(not(test))]

@@ -1,25 +1,21 @@
-use clippy_utils::higher;
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::source::{reindent_multiline, snippet_indent, snippet_with_applicability, snippet_with_context};
 use clippy_utils::{
-    can_move_expr_to_closure_no_visit,
-    diagnostics::span_lint_and_sugg,
-    is_expr_final_block_expr, is_expr_used_or_unified, match_def_path, paths, peel_hir_expr_while,
-    source::{reindent_multiline, snippet_indent, snippet_with_applicability, snippet_with_context},
-    SpanlessEq,
+    can_move_expr_to_closure_no_visit, higher, is_expr_final_block_expr, is_expr_used_or_unified, match_def_path,
+    paths, peel_hir_expr_while, SpanlessEq,
 };
 use core::fmt::{self, Write};
 use rustc_errors::Applicability;
-use rustc_hir::{
-    hir_id::HirIdSet,
-    intravisit::{walk_expr, Visitor},
-    Block, Expr, ExprKind, Guard, HirId, Let, Pat, Stmt, StmtKind, UnOp,
-};
+use rustc_hir::hir_id::HirIdSet;
+use rustc_hir::intravisit::{walk_expr, Visitor};
+use rustc_hir::{Block, Expr, ExprKind, HirId, Pat, Stmt, StmtKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::{Span, SyntaxContext, DUMMY_SP};
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for uses of `contains_key` + `insert` on `HashMap`
+    /// Checks for usage of `contains_key` + `insert` on `HashMap`
     /// or `BTreeMap`.
     ///
     /// ### Why is this bad?
@@ -27,7 +23,7 @@ declare_clippy_lint! {
     ///
     /// ### Known problems
     /// The suggestion may have type inference errors in some cases. e.g.
-    /// ```rust
+    /// ```no_run
     /// let mut map = std::collections::HashMap::new();
     /// let _ = if !map.contains_key(&0) {
     ///     map.insert(0, 0)
@@ -37,7 +33,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::HashMap;
     /// # let mut map = HashMap::new();
     /// # let k = 1;
@@ -47,7 +43,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::HashMap;
     /// # let mut map = HashMap::new();
     /// # let k = 1;
@@ -69,16 +65,21 @@ impl<'tcx> LateLintPass<'tcx> for HashMapPass {
             return;
         }
 
-        let Some(higher::If { cond: cond_expr, then: then_expr, r#else: else_expr }) = higher::If::hir(expr) else {
-            return
+        let Some(higher::If {
+            cond: cond_expr,
+            then: then_expr,
+            r#else: else_expr,
+        }) = higher::If::hir(expr)
+        else {
+            return;
         };
 
         let Some((map_ty, contains_expr)) = try_parse_contains(cx, cond_expr) else {
-            return
+            return;
         };
 
         let Some(then_search) = find_insert_calls(cx, &contains_expr, then_expr) else {
-            return
+            return;
         };
 
         let mut app = Applicability::MachineApplicable;
@@ -186,7 +187,7 @@ impl<'tcx> LateLintPass<'tcx> for HashMapPass {
             MAP_ENTRY,
             expr.span,
             &format!("usage of `contains_key` followed by `insert` on a `{}`", map_ty.name()),
-            "try this",
+            "try",
             sugg,
             app,
         );
@@ -240,7 +241,7 @@ fn try_parse_contains<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'_>) -> Optio
                 },
             ],
             _,
-        ) if key_span.ctxt() == expr.span.ctxt() => {
+        ) if key_span.eq_ctxt(expr.span) => {
             let id = cx.typeck_results().type_dependent_def_id(expr.hir_id)?;
             let expr = ContainsExpr {
                 negated,
@@ -464,7 +465,7 @@ impl<'tcx> Visitor<'tcx> for InsertSearcher<'_, 'tcx> {
                     let mut is_map_used = self.is_map_used;
                     for arm in arms {
                         self.visit_pat(arm.pat);
-                        if let Some(Guard::If(guard) | Guard::IfLet(&Let { init: guard, .. })) = arm.guard {
+                        if let Some(guard) = arm.guard {
                             self.visit_non_tail_expr(guard);
                         }
                         is_map_used |= self.visit_cond_arm(arm.body);

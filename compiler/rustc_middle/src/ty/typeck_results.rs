@@ -4,14 +4,12 @@ use crate::{
     traits::ObligationCause,
     ty::{
         self, tls, BindingMode, BoundVar, CanonicalPolyFnSig, ClosureSizeProfileData,
-        GenericArgKind, InternalSubsts, SubstsRef, Ty, UserSubsts,
+        GenericArgKind, GenericArgs, GenericArgsRef, Ty, UserArgs,
     },
 };
 use rustc_data_structures::{
-    fx::FxHashMap,
-    sync::Lrc,
-    unord::{UnordItems, UnordSet},
-    vec_map::VecMap,
+    fx::FxIndexMap,
+    unord::{ExtendUnord, UnordItems, UnordSet},
 };
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
@@ -21,11 +19,12 @@ use rustc_hir::{
     hir_id::OwnerId,
     HirId, ItemLocalId, ItemLocalMap, ItemLocalSet,
 };
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_index::{Idx, IndexVec};
 use rustc_macros::HashStable;
 use rustc_middle::mir::FakeReadCause;
 use rustc_session::Session;
 use rustc_span::Span;
+use rustc_target::abi::{FieldIdx, VariantIdx};
 use std::{collections::hash_map::Entry, hash::Hash, iter};
 
 use super::RvalueScopes;
@@ -43,7 +42,7 @@ pub struct TypeckResults<'tcx> {
     /// or patterns (`S { field }`). The index is often useful by itself, but to learn more
     /// about the field you also need definition of the variant to which the field
     /// belongs, but it may not exist if it's a tuple field (`tuple.0`).
-    field_indices: ItemLocalMap<usize>,
+    field_indices: ItemLocalMap<FieldIdx>,
 
     /// Stores the types for various nodes in the AST. Note that this table
     /// is not guaranteed to be populated outside inference. See
@@ -54,7 +53,7 @@ pub struct TypeckResults<'tcx> {
     /// of this node. This only applies to nodes that refer to entities
     /// parameterized by type parameters, such as generic fns, types, or
     /// other items.
-    node_substs: ItemLocalMap<SubstsRef<'tcx>>,
+    node_args: ItemLocalMap<GenericArgsRef<'tcx>>,
 
     /// This will either store the canonicalized types provided by the user
     /// or the substitutions that the user explicitly gave (if any) attached
@@ -127,7 +126,7 @@ pub struct TypeckResults<'tcx> {
     /// fn(&'a u32) -> u32
     /// ```
     ///
-    /// Note that `'a` is not bound (it would be an `ReFree`) and
+    /// Note that `'a` is not bound (it would be an `ReLateParam`) and
     /// that the `Foo` opaque type is replaced by its hidden type.
     liberated_fn_sigs: ItemLocalMap<ty::FnSig<'tcx>>,
 
@@ -145,17 +144,17 @@ pub struct TypeckResults<'tcx> {
     /// This is used for warning unused imports. During type
     /// checking, this `Lrc` should not be cloned: it must have a ref-count
     /// of 1 so that we can insert things into the set mutably.
-    pub used_trait_imports: Lrc<UnordSet<LocalDefId>>,
+    pub used_trait_imports: UnordSet<LocalDefId>,
 
     /// If any errors occurred while type-checking this body,
     /// this field will be set to `Some(ErrorGuaranteed)`.
     pub tainted_by_errors: Option<ErrorGuaranteed>,
 
-    /// All the opaque types that have hidden types set
-    /// by this function. We also store the
-    /// type here, so that mir-borrowck can use it as a hint for figuring out hidden types,
-    /// even if they are only set in dead code (which doesn't show up in MIR).
-    pub concrete_opaque_types: VecMap<LocalDefId, ty::OpaqueHiddenType<'tcx>>,
+    /// All the opaque types that have hidden types set by this function.
+    /// We also store the type here, so that the compiler can use it as a hint
+    /// for figuring out hidden types, even if they are only set in dead code
+    /// (which doesn't show up in MIR).
+    pub concrete_opaque_types: FxIndexMap<ty::OpaqueTypeKey<'tcx>, ty::OpaqueHiddenType<'tcx>>,
 
     /// Tracks the minimum captures required for a closure;
     /// see `MinCaptureInformationMap` for more details.
@@ -166,7 +165,7 @@ pub struct TypeckResults<'tcx> {
     /// reading places that are mentioned in a closure (because of _ patterns). However,
     /// to ensure the places are initialized, we introduce fake reads.
     /// Consider these two examples:
-    /// ``` (discriminant matching with only wildcard arm)
+    /// ```ignore (discriminant matching with only wildcard arm)
     /// let x: u8;
     /// let c = || match x { _ => () };
     /// ```
@@ -174,7 +173,7 @@ pub struct TypeckResults<'tcx> {
     /// want to capture it. However, we do still want an error here, because `x` should have
     /// to be initialized at the point where c is created. Therefore, we add a "fake read"
     /// instead.
-    /// ``` (destructured assignments)
+    /// ```ignore (destructured assignments)
     /// let c = || {
     ///     let (t1, t2) = t;
     /// }
@@ -183,21 +182,17 @@ pub struct TypeckResults<'tcx> {
     /// we never capture `t`. This becomes an issue when we build MIR as we require
     /// information on `t` in order to create place `t.0` and `t.1`. We can solve this
     /// issue by fake reading `t`.
-    pub closure_fake_reads: FxHashMap<LocalDefId, Vec<(HirPlace<'tcx>, FakeReadCause, hir::HirId)>>,
+    pub closure_fake_reads: LocalDefIdMap<Vec<(HirPlace<'tcx>, FakeReadCause, hir::HirId)>>,
 
     /// Tracks the rvalue scoping rules which defines finer scoping for rvalue expressions
     /// by applying extended parameter rules.
     /// Details may be find in `rustc_hir_analysis::check::rvalue_scopes`.
     pub rvalue_scopes: RvalueScopes,
 
-    /// Stores the type, expression, span and optional scope span of all types
-    /// that are live across the yield of this generator (if a generator).
-    pub generator_interior_types: ty::Binder<'tcx, Vec<GeneratorInteriorTypeCause<'tcx>>>,
-
-    /// Stores the predicates that apply on generator witness types.
-    /// formatting modified file tests/ui/generator/retain-resume-ref.rs
-    pub generator_interior_predicates:
-        FxHashMap<LocalDefId, Vec<(ty::Predicate<'tcx>, ObligationCause<'tcx>)>>,
+    /// Stores the predicates that apply on coroutine witness types.
+    /// formatting modified file tests/ui/coroutine/retain-resume-ref.rs
+    pub coroutine_interior_predicates:
+        LocalDefIdMap<Vec<(ty::Predicate<'tcx>, ObligationCause<'tcx>)>>,
 
     /// We sometimes treat byte string literals (which are of type `&[u8; N]`)
     /// as `&[u8]`, depending on the pattern in which they are used.
@@ -207,50 +202,10 @@ pub struct TypeckResults<'tcx> {
 
     /// Contains the data for evaluating the effect of feature `capture_disjoint_fields`
     /// on closure size.
-    pub closure_size_eval: FxHashMap<LocalDefId, ClosureSizeProfileData<'tcx>>,
-}
+    pub closure_size_eval: LocalDefIdMap<ClosureSizeProfileData<'tcx>>,
 
-/// Whenever a value may be live across a generator yield, the type of that value winds up in the
-/// `GeneratorInteriorTypeCause` struct. This struct adds additional information about such
-/// captured types that can be useful for diagnostics. In particular, it stores the span that
-/// caused a given type to be recorded, along with the scope that enclosed the value (which can
-/// be used to find the await that the value is live across).
-///
-/// For example:
-///
-/// ```ignore (pseudo-Rust)
-/// async move {
-///     let x: T = expr;
-///     foo.await
-///     ...
-/// }
-/// ```
-///
-/// Here, we would store the type `T`, the span of the value `x`, the "scope-span" for
-/// the scope that contains `x`, the expr `T` evaluated from, and the span of `foo.await`.
-#[derive(TyEncodable, TyDecodable, Clone, Debug, Eq, Hash, PartialEq, HashStable)]
-#[derive(TypeFoldable, TypeVisitable)]
-pub struct GeneratorInteriorTypeCause<'tcx> {
-    /// Type of the captured binding.
-    pub ty: Ty<'tcx>,
-    /// Span of the binding that was captured.
-    pub span: Span,
-    /// Span of the scope of the captured binding.
-    pub scope_span: Option<Span>,
-    /// Span of `.await` or `yield` expression.
-    pub yield_span: Span,
-    /// Expr which the type evaluated from.
-    pub expr: Option<hir::HirId>,
-}
-
-// This type holds diagnostic information on generators and async functions across crate boundaries
-// and is used to provide better error messages
-#[derive(TyEncodable, TyDecodable, Clone, Debug, HashStable)]
-pub struct GeneratorDiagnosticData<'tcx> {
-    pub generator_interior_types: ty::Binder<'tcx, Vec<GeneratorInteriorTypeCause<'tcx>>>,
-    pub hir_owner: DefId,
-    pub nodes_types: ItemLocalMap<Ty<'tcx>>,
-    pub adjustments: ItemLocalMap<Vec<ty::adjustment::Adjustment<'tcx>>>,
+    /// Container types and field indices of `offset_of!` expressions
+    offset_of_data: ItemLocalMap<(Ty<'tcx>, Vec<(VariantIdx, FieldIdx)>)>,
 }
 
 impl<'tcx> TypeckResults<'tcx> {
@@ -262,7 +217,7 @@ impl<'tcx> TypeckResults<'tcx> {
             user_provided_types: Default::default(),
             user_provided_sigs: Default::default(),
             node_types: Default::default(),
-            node_substs: Default::default(),
+            node_args: Default::default(),
             adjustments: Default::default(),
             pat_binding_modes: Default::default(),
             pat_adjustments: Default::default(),
@@ -270,23 +225,23 @@ impl<'tcx> TypeckResults<'tcx> {
             liberated_fn_sigs: Default::default(),
             fru_field_types: Default::default(),
             coercion_casts: Default::default(),
-            used_trait_imports: Lrc::new(Default::default()),
+            used_trait_imports: Default::default(),
             tainted_by_errors: None,
             concrete_opaque_types: Default::default(),
             closure_min_captures: Default::default(),
             closure_fake_reads: Default::default(),
             rvalue_scopes: Default::default(),
-            generator_interior_types: ty::Binder::dummy(Default::default()),
-            generator_interior_predicates: Default::default(),
+            coroutine_interior_predicates: Default::default(),
             treat_byte_string_as_slice: Default::default(),
             closure_size_eval: Default::default(),
+            offset_of_data: Default::default(),
         }
     }
 
     /// Returns the final resolution of a `QPath` in an `Expr` or `Pat` node.
     pub fn qpath_res(&self, qpath: &hir::QPath<'_>, id: hir::HirId) -> Res {
         match *qpath {
-            hir::QPath::Resolved(_, ref path) => path.res,
+            hir::QPath::Resolved(_, path) => path.res,
             hir::QPath::TypeRelative(..) | hir::QPath::LangItem(..) => self
                 .type_dependent_def(id)
                 .map_or(Res::Err, |(kind, def_id)| Res::Def(kind, def_id)),
@@ -314,19 +269,19 @@ impl<'tcx> TypeckResults<'tcx> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.type_dependent_defs }
     }
 
-    pub fn field_indices(&self) -> LocalTableInContext<'_, usize> {
+    pub fn field_indices(&self) -> LocalTableInContext<'_, FieldIdx> {
         LocalTableInContext { hir_owner: self.hir_owner, data: &self.field_indices }
     }
 
-    pub fn field_indices_mut(&mut self) -> LocalTableInContextMut<'_, usize> {
+    pub fn field_indices_mut(&mut self) -> LocalTableInContextMut<'_, FieldIdx> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.field_indices }
     }
 
-    pub fn field_index(&self, id: hir::HirId) -> usize {
+    pub fn field_index(&self, id: hir::HirId) -> FieldIdx {
         self.field_indices().get(id).cloned().expect("no index for a field")
     }
 
-    pub fn opt_field_index(&self, id: hir::HirId) -> Option<usize> {
+    pub fn opt_field_index(&self, id: hir::HirId) -> Option<FieldIdx> {
         self.field_indices().get(id).cloned()
     }
 
@@ -348,28 +303,6 @@ impl<'tcx> TypeckResults<'tcx> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.node_types }
     }
 
-    pub fn get_generator_diagnostic_data(&self) -> GeneratorDiagnosticData<'tcx> {
-        let generator_interior_type = self.generator_interior_types.map_bound_ref(|vec| {
-            vec.iter()
-                .map(|item| {
-                    GeneratorInteriorTypeCause {
-                        ty: item.ty,
-                        span: item.span,
-                        scope_span: item.scope_span,
-                        yield_span: item.yield_span,
-                        expr: None, //FIXME: Passing expression over crate boundaries is impossible at the moment
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
-        GeneratorDiagnosticData {
-            generator_interior_types: generator_interior_type,
-            hir_owner: self.hir_owner.to_def_id(),
-            nodes_types: self.node_types.clone(),
-            adjustments: self.adjustments.clone(),
-        }
-    }
-
     pub fn node_type(&self, id: hir::HirId) -> Ty<'tcx> {
         self.node_type_opt(id).unwrap_or_else(|| {
             bug!("node_type: no type for node {}", tls::with(|tcx| tcx.hir().node_to_string(id)))
@@ -381,18 +314,18 @@ impl<'tcx> TypeckResults<'tcx> {
         self.node_types.get(&id.local_id).cloned()
     }
 
-    pub fn node_substs_mut(&mut self) -> LocalTableInContextMut<'_, SubstsRef<'tcx>> {
-        LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.node_substs }
+    pub fn node_args_mut(&mut self) -> LocalTableInContextMut<'_, GenericArgsRef<'tcx>> {
+        LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.node_args }
     }
 
-    pub fn node_substs(&self, id: hir::HirId) -> SubstsRef<'tcx> {
+    pub fn node_args(&self, id: hir::HirId) -> GenericArgsRef<'tcx> {
         validate_hir_id_for_typeck_results(self.hir_owner, id);
-        self.node_substs.get(&id.local_id).cloned().unwrap_or_else(|| InternalSubsts::empty())
+        self.node_args.get(&id.local_id).cloned().unwrap_or_else(|| GenericArgs::empty())
     }
 
-    pub fn node_substs_opt(&self, id: hir::HirId) -> Option<SubstsRef<'tcx>> {
+    pub fn node_args_opt(&self, id: hir::HirId) -> Option<GenericArgsRef<'tcx>> {
         validate_hir_id_for_typeck_results(self.hir_owner, id);
-        self.node_substs.get(&id.local_id).cloned()
+        self.node_args.get(&id.local_id).cloned()
     }
 
     /// Returns the type of a pattern as a monotype. Like [`expr_ty`], this function
@@ -458,7 +391,7 @@ impl<'tcx> TypeckResults<'tcx> {
 
     pub fn extract_binding_mode(&self, s: &Session, id: HirId, sp: Span) -> Option<BindingMode> {
         self.pat_binding_modes().get(id).copied().or_else(|| {
-            s.delay_span_bug(sp, "missing binding mode");
+            s.dcx().span_delayed_bug(sp, "missing binding mode");
             None
         })
     }
@@ -530,6 +463,18 @@ impl<'tcx> TypeckResults<'tcx> {
     pub fn coercion_casts(&self) -> &ItemLocalSet {
         &self.coercion_casts
     }
+
+    pub fn offset_of_data(
+        &self,
+    ) -> LocalTableInContext<'_, (Ty<'tcx>, Vec<(VariantIdx, FieldIdx)>)> {
+        LocalTableInContext { hir_owner: self.hir_owner, data: &self.offset_of_data }
+    }
+
+    pub fn offset_of_data_mut(
+        &mut self,
+    ) -> LocalTableInContextMut<'_, (Ty<'tcx>, Vec<(VariantIdx, FieldIdx)>)> {
+        LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.offset_of_data }
+    }
 }
 
 /// Validate that the given HirId (respectively its `local_id` part) can be
@@ -582,7 +527,7 @@ impl<'a, V> LocalTableInContext<'a, V> {
     }
 
     pub fn items_in_stable_order(&self) -> Vec<(ItemLocalId, &'a V)> {
-        self.data.to_sorted_stable_ord()
+        self.data.items().map(|(&k, v)| (k, v)).into_sorted_stable_ord_by_key(|(k, _)| k)
     }
 }
 
@@ -624,7 +569,7 @@ impl<'a, V> LocalTableInContextMut<'a, V> {
         &mut self,
         items: UnordItems<(hir::HirId, V), impl Iterator<Item = (hir::HirId, V)>>,
     ) {
-        self.data.extend(items.map(|(id, value)| {
+        self.data.extend_unord(items.map(|(id, value)| {
             validate_hir_id_for_typeck_results(self.hir_owner, id);
             (id.local_id, value)
         }))
@@ -633,6 +578,7 @@ impl<'a, V> LocalTableInContextMut<'a, V> {
 
 rustc_index::newtype_index! {
     #[derive(HashStable)]
+    #[encodable]
     #[debug_format = "UserType({})"]
     pub struct UserTypeAnnotationIndex {
         const START_INDEX = 0;
@@ -643,7 +589,7 @@ rustc_index::newtype_index! {
 pub type CanonicalUserTypeAnnotations<'tcx> =
     IndexVec<UserTypeAnnotationIndex, CanonicalUserTypeAnnotation<'tcx>>;
 
-#[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub struct CanonicalUserTypeAnnotation<'tcx> {
     pub user_ty: Box<CanonicalUserType<'tcx>>,
     pub span: Span,
@@ -653,18 +599,35 @@ pub struct CanonicalUserTypeAnnotation<'tcx> {
 /// Canonical user type annotation.
 pub type CanonicalUserType<'tcx> = Canonical<'tcx, UserType<'tcx>>;
 
-impl<'tcx> CanonicalUserType<'tcx> {
+/// A user-given type annotation attached to a constant. These arise
+/// from constants that are named via paths, like `Foo::<A>::new` and
+/// so forth.
+#[derive(Copy, Clone, Debug, PartialEq, TyEncodable, TyDecodable)]
+#[derive(Eq, Hash, HashStable, TypeFoldable, TypeVisitable)]
+pub enum UserType<'tcx> {
+    Ty(Ty<'tcx>),
+
+    /// The canonical type is the result of `type_of(def_id)` with the
+    /// given substitutions applied.
+    TypeOf(DefId, UserArgs<'tcx>),
+}
+
+pub trait IsIdentity {
+    fn is_identity(&self) -> bool;
+}
+
+impl<'tcx> IsIdentity for CanonicalUserType<'tcx> {
     /// Returns `true` if this represents a substitution of the form `[?0, ?1, ?2]`,
     /// i.e., each thing is mapped to a canonical variable with the same index.
-    pub fn is_identity(&self) -> bool {
+    fn is_identity(&self) -> bool {
         match self.value {
             UserType::Ty(_) => false,
-            UserType::TypeOf(_, user_substs) => {
-                if user_substs.user_self_ty.is_some() {
+            UserType::TypeOf(_, user_args) => {
+                if user_args.user_self_ty.is_some() {
                     return false;
                 }
 
-                iter::zip(user_substs.substs, BoundVar::new(0)..).all(|(kind, cvar)| {
+                iter::zip(user_args.args, BoundVar::new(0)..).all(|(kind, cvar)| {
                     match kind.unpack() {
                         GenericArgKind::Type(ty) => match ty.kind() {
                             ty::Bound(debruijn, b) => {
@@ -676,7 +639,7 @@ impl<'tcx> CanonicalUserType<'tcx> {
                         },
 
                         GenericArgKind::Lifetime(r) => match *r {
-                            ty::ReLateBound(debruijn, br) => {
+                            ty::ReBound(debruijn, br) => {
                                 // We only allow a `ty::INNERMOST` index in substitutions.
                                 assert_eq!(debruijn, ty::INNERMOST);
                                 cvar == br.var
@@ -699,15 +662,13 @@ impl<'tcx> CanonicalUserType<'tcx> {
     }
 }
 
-/// A user-given type annotation attached to a constant. These arise
-/// from constants that are named via paths, like `Foo::<A>::new` and
-/// so forth.
-#[derive(Copy, Clone, Debug, PartialEq, TyEncodable, TyDecodable)]
-#[derive(Eq, Hash, HashStable, TypeFoldable, TypeVisitable, Lift)]
-pub enum UserType<'tcx> {
-    Ty(Ty<'tcx>),
-
-    /// The canonical type is the result of `type_of(def_id)` with the
-    /// given substitutions applied.
-    TypeOf(DefId, UserSubsts<'tcx>),
+impl<'tcx> std::fmt::Display for UserType<'tcx> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ty(arg0) => {
+                ty::print::with_no_trimmed_paths!(write!(f, "Ty({})", arg0))
+            }
+            Self::TypeOf(arg0, arg1) => write!(f, "TypeOf({:?}, {:?})", arg0, arg1),
+        }
+    }
 }

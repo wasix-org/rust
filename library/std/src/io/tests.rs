@@ -26,6 +26,36 @@ fn read_until() {
 }
 
 #[test]
+fn skip_until() {
+    let bytes: &[u8] = b"read\0ignore\0read\0ignore\0read\0ignore\0";
+    let mut reader = BufReader::new(bytes);
+
+    // read from the bytes, alternating between
+    // consuming `read\0`s and skipping `ignore\0`s
+    loop {
+        // consume `read\0`
+        let mut out = Vec::new();
+        let read = reader.read_until(0, &mut out).unwrap();
+        if read == 0 {
+            // eof
+            break;
+        } else {
+            assert_eq!(out, b"read\0");
+            assert_eq!(read, b"read\0".len());
+        }
+
+        // skip past `ignore\0`
+        let skipped = reader.skip_until(0).unwrap();
+        assert_eq!(skipped, b"ignore\0".len());
+    }
+
+    // ensure we are at the end of the byte slice and that we can skip no further
+    // also ensure skip_until matches the behavior of read_until at EOF
+    let skipped = reader.skip_until(0).unwrap();
+    assert_eq!(skipped, 0);
+}
+
+#[test]
 fn split() {
     let buf = Cursor::new(&b"12"[..]);
     let mut s = buf.split(b'3');
@@ -314,7 +344,7 @@ fn bench_read_to_end(b: &mut test::Bencher) {
     b.iter(|| {
         let mut lr = repeat(1).take(10000000);
         let mut vec = Vec::with_capacity(1024);
-        super::default_read_to_end(&mut lr, &mut vec)
+        super::default_read_to_end(&mut lr, &mut vec, None)
     });
 }
 

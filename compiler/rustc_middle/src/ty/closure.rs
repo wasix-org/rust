@@ -5,13 +5,15 @@ use crate::{mir, ty};
 
 use std::fmt::Write;
 
-use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
-use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_hir::{self as hir, LangItem};
+use crate::query::Providers;
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_hir as hir;
+use rustc_hir::def_id::LocalDefId;
+use rustc_span::def_id::LocalDefIdMap;
 use rustc_span::symbol::Ident;
 use rustc_span::{Span, Symbol};
 
-use super::{Ty, TyCtxt};
+use super::TyCtxt;
 
 use self::BorrowKind::*;
 
@@ -55,12 +57,9 @@ pub enum UpvarCapture {
     ByRef(BorrowKind),
 }
 
-pub type UpvarListMap = FxHashMap<DefId, FxIndexMap<hir::HirId, UpvarId>>;
-pub type UpvarCaptureMap = FxHashMap<UpvarId, UpvarCapture>;
-
 /// Given the closure DefId this map provides a map of root variables to minimum
 /// set of `CapturedPlace`s that need to be tracked to support all captures of that closure.
-pub type MinCaptureInformationMap<'tcx> = FxHashMap<LocalDefId, RootVariableMinCaptureList<'tcx>>;
+pub type MinCaptureInformationMap<'tcx> = LocalDefIdMap<RootVariableMinCaptureList<'tcx>>;
 
 /// Part of `MinCaptureInformationMap`; Maps a root variable to the list of `CapturedPlace`.
 /// Used to track the minimum set of `Place`s that need to be captured to support all
@@ -72,58 +71,6 @@ pub type RootVariableMinCaptureList<'tcx> = FxIndexMap<hir::HirId, MinCaptureLis
 
 /// Part of `MinCaptureInformationMap`; List of `CapturePlace`s.
 pub type MinCaptureList<'tcx> = Vec<CapturedPlace<'tcx>>;
-
-/// Represents the various closure traits in the language. This
-/// will determine the type of the environment (`self`, in the
-/// desugaring) argument that the closure expects.
-///
-/// You can get the environment type of a closure using
-/// `tcx.closure_env_ty()`.
-#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
-#[derive(HashStable)]
-pub enum ClosureKind {
-    // Warning: Ordering is significant here! The ordering is chosen
-    // because the trait Fn is a subtrait of FnMut and so in turn, and
-    // hence we order it so that Fn < FnMut < FnOnce.
-    Fn,
-    FnMut,
-    FnOnce,
-}
-
-impl<'tcx> ClosureKind {
-    /// This is the initial value used when doing upvar inference.
-    pub const LATTICE_BOTTOM: ClosureKind = ClosureKind::Fn;
-
-    /// Returns `true` if a type that impls this closure kind
-    /// must also implement `other`.
-    pub fn extends(self, other: ty::ClosureKind) -> bool {
-        self <= other
-    }
-
-    /// Converts `self` to a [`DefId`] of the corresponding trait.
-    ///
-    /// Note: the inverse of this function is [`TyCtxt::fn_trait_kind_from_def_id`].
-    pub fn to_def_id(&self, tcx: TyCtxt<'_>) -> DefId {
-        tcx.require_lang_item(
-            match self {
-                ClosureKind::Fn => LangItem::Fn,
-                ClosureKind::FnMut => LangItem::FnMut,
-                ClosureKind::FnOnce => LangItem::FnOnce,
-            },
-            None,
-        )
-    }
-
-    /// Returns the representative scalar type for this closure kind.
-    /// See `Ty::to_opt_closure_kind` for more details.
-    pub fn to_ty(self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        match self {
-            ClosureKind::Fn => tcx.types.i8,
-            ClosureKind::FnMut => tcx.types.i16,
-            ClosureKind::FnOnce => tcx.types.i32,
-        }
-    }
-}
 
 /// A composite describing a `Place` that is captured by a closure.
 #[derive(PartialEq, Clone, Debug, TyEncodable, TyDecodable, HashStable)]
@@ -158,12 +105,12 @@ impl<'tcx> CapturedPlace<'tcx> {
         for proj in self.place.projections.iter() {
             match proj.kind {
                 HirProjectionKind::Field(idx, variant) => match ty.kind() {
-                    ty::Tuple(_) => write!(&mut symbol, "__{}", idx).unwrap(),
+                    ty::Tuple(_) => write!(&mut symbol, "__{}", idx.index()).unwrap(),
                     ty::Adt(def, ..) => {
                         write!(
                             &mut symbol,
                             "__{}",
-                            def.variant(variant).fields[idx as usize].name.as_str(),
+                            def.variant(variant).fields[idx].name.as_str(),
                         )
                         .unwrap();
                     }
@@ -175,6 +122,8 @@ impl<'tcx> CapturedPlace<'tcx> {
                 // Ignore derefs for now, as they are likely caused by
                 // autoderefs that don't appear in the original code.
                 HirProjectionKind::Deref => {}
+                // Just change the type to the hidden type, so we can actually project.
+                HirProjectionKind::OpaqueCast => {}
                 proj => bug!("Unexpected projection {:?} in captured place", proj),
             }
             ty = proj.ty;
@@ -231,6 +180,13 @@ impl<'tcx> CapturedPlace<'tcx> {
                 .span
         }
     }
+
+    pub fn is_by_ref(&self) -> bool {
+        match self.info.capture_kind {
+            ty::UpvarCapture::ByValue => false,
+            ty::UpvarCapture::ByRef(..) => true,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, HashStable)]
@@ -241,12 +197,12 @@ pub struct ClosureTypeInfo<'tcx> {
 }
 
 fn closure_typeinfo<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId) -> ClosureTypeInfo<'tcx> {
-    debug_assert!(tcx.is_closure(def.to_def_id()));
+    debug_assert!(tcx.is_closure_or_coroutine(def.to_def_id()));
     let typeck_results = tcx.typeck(def);
     let user_provided_sig = typeck_results.user_provided_sigs[&def];
     let captures = typeck_results.closure_min_captures_flattened(def);
     let captures = tcx.arena.alloc_from_iter(captures);
-    let hir_id = tcx.hir().local_def_id_to_hir_id(def);
+    let hir_id = tcx.local_def_id_to_hir_id(def);
     let kind_origin = typeck_results.closure_kind_origins().get(hir_id);
     ClosureTypeInfo { user_provided_sig, captures, kind_origin }
 }
@@ -261,7 +217,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn closure_captures(self, def_id: LocalDefId) -> &'tcx [&'tcx ty::CapturedPlace<'tcx>] {
-        if !self.is_closure(def_id.to_def_id()) {
+        if !self.is_closure_or_coroutine(def_id.to_def_id()) {
             return &[];
         };
         self.closure_typeinfo(def_id).captures
@@ -349,18 +305,18 @@ pub fn place_to_string_for_capture<'tcx>(tcx: TyCtxt<'tcx>, place: &HirPlace<'tc
     for (i, proj) in place.projections.iter().enumerate() {
         match proj.kind {
             HirProjectionKind::Deref => {
-                curr_string = format!("*{}", curr_string);
+                curr_string = format!("*{curr_string}");
             }
             HirProjectionKind::Field(idx, variant) => match place.ty_before_projection(i).kind() {
                 ty::Adt(def, ..) => {
                     curr_string = format!(
                         "{}.{}",
                         curr_string,
-                        def.variant(variant).fields[idx as usize].name.as_str()
+                        def.variant(variant).fields[idx].name.as_str()
                     );
                 }
                 ty::Tuple(_) => {
-                    curr_string = format!("{}.{}", curr_string, idx);
+                    curr_string = format!("{}.{}", curr_string, idx.index());
                 }
                 _ => {
                     bug!(
@@ -426,6 +382,8 @@ pub enum BorrowKind {
     /// immutable, but not aliasable. This solves the problem. For
     /// simplicity, we don't give users the way to express this
     /// borrow, it's just used when translating closures.
+    ///
+    /// FIXME: Rename this to indicate the borrow is actually not immutable.
     UniqueImmBorrow,
 
     /// Data is mutable and not aliasable.
@@ -457,6 +415,6 @@ impl BorrowKind {
     }
 }
 
-pub fn provide(providers: &mut ty::query::Providers) {
-    *providers = ty::query::Providers { closure_typeinfo, ..*providers }
+pub fn provide(providers: &mut Providers) {
+    *providers = Providers { closure_typeinfo, ..*providers }
 }

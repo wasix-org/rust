@@ -8,13 +8,12 @@ LL | fn main() { f(bar) }
    |
    = note: expected fn pointer `fn()`
                  found fn item `extern "C" fn() {bar}`
-   = note: when the arguments and return types match, functions can be coerced to function pointers
 note: function defined here
   --> $DIR/issue-10764.rs:1:4
    |
 LL | fn f(_: extern "Rust" fn()) {}
    |    ^ ---------------------
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0308`.

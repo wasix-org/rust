@@ -4,10 +4,7 @@ use clippy_utils::sugg;
 use rustc_errors::Applicability;
 use rustc_hir::Expr;
 use rustc_lint::LateContext;
-use rustc_middle::{
-    query::Key,
-    ty::{self, Ty},
-};
+use rustc_middle::ty::{self, Ty};
 use rustc_span::symbol::sym;
 
 /// Checks for `transmute_int_to_non_zero` lint.
@@ -19,10 +16,10 @@ pub(super) fn check<'tcx>(
     to_ty: Ty<'tcx>,
     arg: &'tcx Expr<'_>,
 ) -> bool {
-    let (ty::Int(_) | ty::Uint(_), Some(to_ty_id)) = (&from_ty.kind(), to_ty.ty_adt_id()) else {
+    let (ty::Int(_) | ty::Uint(_), Some(to_ty_adt)) = (&from_ty.kind(), to_ty.ty_adt_def()) else {
         return false;
     };
-    let Some(to_type_sym) = cx.tcx.get_diagnostic_name(to_ty_id) else {
+    let Some(to_type_sym) = cx.tcx.get_diagnostic_name(to_ty_adt.did()) else {
         return false;
     };
 

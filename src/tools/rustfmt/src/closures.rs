@@ -12,7 +12,7 @@ use crate::overflow::OverflowableItem;
 use crate::rewrite::{Rewrite, RewriteContext};
 use crate::shape::Shape;
 use crate::source_map::SpanUtils;
-use crate::types::rewrite_lifetime_param;
+use crate::types::rewrite_bound_params;
 use crate::utils::{last_line_width, left_most_sub_expr, stmt_expr, NodeIdExt};
 
 // This module is pretty messy because of the rules around closures and blocks:
@@ -29,7 +29,7 @@ pub(crate) fn rewrite_closure(
     binder: &ast::ClosureBinder,
     constness: ast::Const,
     capture: ast::CaptureBy,
-    is_async: &ast::Async,
+    coroutine_kind: &Option<ast::CoroutineKind>,
     movability: ast::Movability,
     fn_decl: &ast::FnDecl,
     body: &ast::Expr,
@@ -40,7 +40,16 @@ pub(crate) fn rewrite_closure(
     debug!("rewrite_closure {:?}", body);
 
     let (prefix, extra_offset) = rewrite_closure_fn_decl(
-        binder, constness, capture, is_async, movability, fn_decl, body, span, context, shape,
+        binder,
+        constness,
+        capture,
+        coroutine_kind,
+        movability,
+        fn_decl,
+        body,
+        span,
+        context,
+        shape,
     )?;
     // 1 = space between `|...|` and body.
     let body_shape = shape.offset_left(extra_offset)?;
@@ -175,7 +184,7 @@ fn rewrite_closure_with_block(
         shape,
         false,
     )?;
-    Some(format!("{} {}", prefix, block))
+    Some(format!("{prefix} {block}"))
 }
 
 // Rewrite closure with a single expression without wrapping its body with block.
@@ -188,14 +197,13 @@ fn rewrite_closure_expr(
     fn allow_multi_line(expr: &ast::Expr) -> bool {
         match expr.kind {
             ast::ExprKind::Match(..)
-            | ast::ExprKind::Async(..)
+            | ast::ExprKind::Gen(..)
             | ast::ExprKind::Block(..)
             | ast::ExprKind::TryBlock(..)
             | ast::ExprKind::Loop(..)
             | ast::ExprKind::Struct(..) => true,
 
             ast::ExprKind::AddrOf(_, _, ref expr)
-            | ast::ExprKind::Box(ref expr)
             | ast::ExprKind::Try(ref expr)
             | ast::ExprKind::Unary(_, ref expr)
             | ast::ExprKind::Cast(ref expr, _) => allow_multi_line(expr),
@@ -234,7 +242,7 @@ fn rewrite_closure_fn_decl(
     binder: &ast::ClosureBinder,
     constness: ast::Const,
     capture: ast::CaptureBy,
-    asyncness: &ast::Async,
+    coroutine_kind: &Option<ast::CoroutineKind>,
     movability: ast::Movability,
     fn_decl: &ast::FnDecl,
     body: &ast::Expr,
@@ -247,7 +255,7 @@ fn rewrite_closure_fn_decl(
             "for<> ".to_owned()
         }
         ast::ClosureBinder::For { generic_params, .. } => {
-            let lifetime_str = rewrite_lifetime_param(context, shape, generic_params)?;
+            let lifetime_str = rewrite_bound_params(context, shape, generic_params)?;
             format!("for<{lifetime_str}> ")
         }
         ast::ClosureBinder::NotPresent => "".to_owned(),
@@ -264,8 +272,13 @@ fn rewrite_closure_fn_decl(
     } else {
         ""
     };
-    let is_async = if asyncness.is_async() { "async " } else { "" };
-    let mover = if capture == ast::CaptureBy::Value {
+    let coro = match coroutine_kind {
+        Some(ast::CoroutineKind::Async { .. }) => "async ",
+        Some(ast::CoroutineKind::Gen { .. }) => "gen ",
+        Some(ast::CoroutineKind::AsyncGen { .. }) => "async gen ",
+        None => "",
+    };
+    let mover = if matches!(capture, ast::CaptureBy::Value { .. }) {
         "move "
     } else {
         ""
@@ -273,7 +286,7 @@ fn rewrite_closure_fn_decl(
     // 4 = "|| {".len(), which is overconservative when the closure consists of
     // a single expression.
     let nested_shape = shape
-        .shrink_left(binder.len() + const_.len() + immovable.len() + is_async.len() + mover.len())?
+        .shrink_left(binder.len() + const_.len() + immovable.len() + coro.len() + mover.len())?
         .sub_width(4)?;
 
     // 1 = |
@@ -311,10 +324,7 @@ fn rewrite_closure_fn_decl(
         .tactic(tactic)
         .preserve_newline(true);
     let list_str = write_list(&item_vec, &fmt)?;
-    let mut prefix = format!(
-        "{}{}{}{}{}|{}|",
-        binder, const_, immovable, is_async, mover, list_str
-    );
+    let mut prefix = format!("{binder}{const_}{immovable}{coro}{mover}|{list_str}|");
 
     if !ret_str.is_empty() {
         if prefix.contains('\n') {
@@ -343,7 +353,7 @@ pub(crate) fn rewrite_last_closure(
             ref binder,
             constness,
             capture_clause,
-            ref asyncness,
+            ref coroutine_kind,
             movability,
             ref fn_decl,
             ref body,
@@ -364,7 +374,7 @@ pub(crate) fn rewrite_last_closure(
             binder,
             constness,
             capture_clause,
-            asyncness,
+            coroutine_kind,
             movability,
             fn_decl,
             body,
@@ -438,10 +448,9 @@ fn is_block_closure_forced(context: &RewriteContext<'_>, expr: &ast::Expr) -> bo
 
 fn is_block_closure_forced_inner(expr: &ast::Expr, version: Version) -> bool {
     match expr.kind {
-        ast::ExprKind::If(..) | ast::ExprKind::While(..) | ast::ExprKind::ForLoop(..) => true,
+        ast::ExprKind::If(..) | ast::ExprKind::While(..) | ast::ExprKind::ForLoop { .. } => true,
         ast::ExprKind::Loop(..) if version == Version::Two => true,
         ast::ExprKind::AddrOf(_, _, ref expr)
-        | ast::ExprKind::Box(ref expr)
         | ast::ExprKind::Try(ref expr)
         | ast::ExprKind::Unary(_, ref expr)
         | ast::ExprKind::Cast(ref expr, _) => is_block_closure_forced_inner(expr, version),
@@ -464,7 +473,7 @@ fn expr_requires_semi_to_be_stmt(e: &ast::Expr) -> bool {
         | ast::ExprKind::Block(..)
         | ast::ExprKind::While(..)
         | ast::ExprKind::Loop(..)
-        | ast::ExprKind::ForLoop(..)
+        | ast::ExprKind::ForLoop { .. }
         | ast::ExprKind::TryBlock(..) => false,
         _ => true,
     }

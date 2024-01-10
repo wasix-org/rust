@@ -4,15 +4,15 @@
 //! The goal is to move the definition of `MetaItem` and things that don't need to be in `syntax`
 //! to this crate.
 
+#![allow(internal_features)]
+#![feature(rustdoc_internals)]
+#![doc(rust_logo)]
 #![feature(let_chains)]
 #![deny(rustc::untranslatable_diagnostic)]
 #![deny(rustc::diagnostic_outside_of_impl)]
 
 #[macro_use]
 extern crate rustc_macros;
-
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::fluent_messages;
 
 mod builtin;
 mod session_diagnostics;
@@ -24,6 +24,6 @@ pub use StabilityLevel::*;
 
 pub use rustc_ast::attr::*;
 
-pub(crate) use rustc_ast::HashStableContext;
+pub(crate) use rustc_session::HashStableContext;
 
-fluent_messages! { "../locales/en-US.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

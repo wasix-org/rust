@@ -242,7 +242,7 @@ use crate::slice;
 /// the same size, alignment, and ABI as `T`; it's just that the way `MaybeUninit` implements that
 /// guarantee may evolve.
 #[stable(feature = "maybe_uninit", since = "1.36.0")]
-// Lang item so we can wrap other types in it. This is useful for generators.
+// Lang item so we can wrap other types in it. This is useful for coroutines.
 #[lang = "maybe_uninit"]
 #[derive(Copy)]
 #[repr(transparent)]
@@ -374,6 +374,9 @@ impl<T> MaybeUninit<T> {
     /// assert_eq!(x, (0, false));
     /// ```
     ///
+    /// This can be used in const contexts, such as to indicate the end of static arrays for
+    /// plugin registration.
+    ///
     /// *Incorrect* usage of this function: calling `x.zeroed().assume_init()`
     /// when `0` is not a valid bit-pattern for the type:
     ///
@@ -387,17 +390,19 @@ impl<T> MaybeUninit<T> {
     /// // Inside a pair, we create a `NotZero` that does not have a valid discriminant.
     /// // This is undefined behavior. ⚠️
     /// ```
-    #[stable(feature = "maybe_uninit", since = "1.36.0")]
-    #[rustc_const_unstable(feature = "const_maybe_uninit_zeroed", issue = "91850")]
-    #[must_use]
     #[inline]
+    #[must_use]
     #[rustc_diagnostic_item = "maybe_uninit_zeroed"]
+    #[stable(feature = "maybe_uninit", since = "1.36.0")]
+    // These are OK to allow since we do not leak &mut to user-visible API
+    #[rustc_allow_const_fn_unstable(const_mut_refs)]
+    #[rustc_allow_const_fn_unstable(const_ptr_write)]
+    #[rustc_allow_const_fn_unstable(const_maybe_uninit_as_mut_ptr)]
+    #[rustc_const_stable(feature = "const_maybe_uninit_zeroed", since = "1.75.0")]
     pub const fn zeroed() -> MaybeUninit<T> {
         let mut u = MaybeUninit::<T>::uninit();
         // SAFETY: `u.as_mut_ptr()` points to allocated memory.
-        unsafe {
-            u.as_mut_ptr().write_bytes(0u8, 1);
-        }
+        unsafe { u.as_mut_ptr().write_bytes(0u8, 1) };
         u
     }
 
@@ -686,7 +691,7 @@ impl<T> MaybeUninit<T> {
     /// // they both get dropped!
     /// ```
     #[stable(feature = "maybe_uninit_extra", since = "1.60.0")]
-    #[rustc_const_unstable(feature = "const_maybe_uninit_assume_init_read", issue = "63567")]
+    #[rustc_const_stable(feature = "const_maybe_uninit_assume_init_read", since = "1.75.0")]
     #[inline(always)]
     #[track_caller]
     pub const unsafe fn assume_init_read(&self) -> T {
@@ -945,14 +950,10 @@ impl<T> MaybeUninit<T> {
         // * `MaybeUninit<T>` and T are guaranteed to have the same layout
         // * `MaybeUninit` does not drop, so there are no double-frees
         // And thus the conversion is safe
-        let ret = unsafe {
+        unsafe {
             intrinsics::assert_inhabited::<[T; N]>();
-            (&array as *const _ as *const [T; N]).read()
-        };
-
-        // FIXME: required to avoid `~const Destruct` bound
-        super::forget(array);
-        ret
+            intrinsics::transmute_unchecked(array)
+        }
     }
 
     /// Assuming all the elements are initialized, get a slice to them.
@@ -1241,13 +1242,9 @@ impl<T> MaybeUninit<T> {
     /// ```
     #[unstable(feature = "maybe_uninit_as_bytes", issue = "93092")]
     pub fn slice_as_bytes(this: &[MaybeUninit<T>]) -> &[MaybeUninit<u8>] {
+        let bytes = mem::size_of_val(this);
         // SAFETY: MaybeUninit<u8> is always valid, even for padding bytes
-        unsafe {
-            slice::from_raw_parts(
-                this.as_ptr() as *const MaybeUninit<u8>,
-                this.len() * mem::size_of::<T>(),
-            )
-        }
+        unsafe { slice::from_raw_parts(this.as_ptr() as *const MaybeUninit<u8>, bytes) }
     }
 
     /// Returns the contents of this mutable slice of `MaybeUninit` as a mutable slice of
@@ -1274,13 +1271,9 @@ impl<T> MaybeUninit<T> {
     /// ```
     #[unstable(feature = "maybe_uninit_as_bytes", issue = "93092")]
     pub fn slice_as_bytes_mut(this: &mut [MaybeUninit<T>]) -> &mut [MaybeUninit<u8>] {
+        let bytes = mem::size_of_val(this);
         // SAFETY: MaybeUninit<u8> is always valid, even for padding bytes
-        unsafe {
-            slice::from_raw_parts_mut(
-                this.as_mut_ptr() as *mut MaybeUninit<u8>,
-                this.len() * mem::size_of::<T>(),
-            )
-        }
+        unsafe { slice::from_raw_parts_mut(this.as_mut_ptr() as *mut MaybeUninit<u8>, bytes) }
     }
 }
 
@@ -1299,7 +1292,7 @@ impl<T, const N: usize> MaybeUninit<[T; N]> {
     #[inline]
     pub const fn transpose(self) -> [MaybeUninit<T>; N] {
         // SAFETY: T and MaybeUninit<T> have the same layout
-        unsafe { super::transmute_copy(&ManuallyDrop::new(self)) }
+        unsafe { intrinsics::transmute_unchecked(self) }
     }
 }
 
@@ -1319,6 +1312,6 @@ impl<T, const N: usize> [MaybeUninit<T>; N] {
     #[inline]
     pub const fn transpose(self) -> MaybeUninit<[T; N]> {
         // SAFETY: T and MaybeUninit<T> have the same layout
-        unsafe { super::transmute_copy(&ManuallyDrop::new(self)) }
+        unsafe { intrinsics::transmute_unchecked(self) }
     }
 }

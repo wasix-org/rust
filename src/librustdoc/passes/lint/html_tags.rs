@@ -2,9 +2,9 @@
 use crate::clean::*;
 use crate::core::DocContext;
 use crate::html::markdown::main_body_opts;
-use crate::passes::source_span_for_markdown_range;
 
 use pulldown_cmark::{BrokenLink, Event, LinkType, Parser, Tag};
+use rustc_resolve::rustdoc::source_span_for_markdown_range;
 
 use std::iter::Peekable;
 use std::ops::Range;
@@ -14,11 +14,14 @@ pub(crate) fn visit_item(cx: &DocContext<'_>, item: &Item) {
     let tcx = cx.tcx;
     let Some(hir_id) = DocContext::as_local_hir_id(tcx, item.item_id)
     // If non-local, no need to check anything.
-    else { return };
-    let dox = item.attrs.collapsed_doc_value().unwrap_or_default();
+    else {
+        return;
+    };
+    let dox = item.doc_value();
     if !dox.is_empty() {
-        let report_diag = |msg: &str, range: &Range<usize>, is_open_tag: bool| {
-            let sp = match source_span_for_markdown_range(tcx, &dox, range, &item.attrs) {
+        let report_diag = |msg: String, range: &Range<usize>, is_open_tag: bool| {
+            let sp = match source_span_for_markdown_range(tcx, &dox, range, &item.attrs.doc_strings)
+            {
                 Some(sp) => sp,
                 None => item.attr_span(tcx),
             };
@@ -53,7 +56,7 @@ pub(crate) fn visit_item(cx: &DocContext<'_>, item: &Item) {
                         tcx,
                         &dox,
                         &(generics_start..generics_end),
-                        &item.attrs,
+                        &item.attrs.doc_strings,
                     ) {
                         Some(sp) => sp,
                         None => item.attr_span(tcx),
@@ -86,7 +89,7 @@ pub(crate) fn visit_item(cx: &DocContext<'_>, item: &Item) {
                     if (generics_start > 0 && dox.as_bytes()[generics_start - 1] == b'<')
                         || (generics_end < dox.len() && dox.as_bytes()[generics_end] == b'>')
                     {
-                        return lint;
+                        return;
                     }
                     // multipart form is chosen here because ``Vec<i32>`` would be confusing.
                     lint.multipart_suggestion(
@@ -98,8 +101,6 @@ pub(crate) fn visit_item(cx: &DocContext<'_>, item: &Item) {
                         Applicability::MaybeIncorrect,
                     );
                 }
-
-                lint
             });
         };
 
@@ -147,11 +148,11 @@ pub(crate) fn visit_item(cx: &DocContext<'_>, item: &Item) {
             let t = t.to_lowercase();
             !ALLOWED_UNCLOSED.contains(&t.as_str())
         }) {
-            report_diag(&format!("unclosed HTML tag `{}`", tag), range, true);
+            report_diag(format!("unclosed HTML tag `{tag}`"), range, true);
         }
 
         if let Some(range) = is_in_comment {
-            report_diag("Unclosed HTML comment", &range, false);
+            report_diag("Unclosed HTML comment".to_string(), &range, false);
         }
     }
 }
@@ -165,7 +166,7 @@ fn drop_tag(
     tags: &mut Vec<(String, Range<usize>)>,
     tag_name: String,
     range: Range<usize>,
-    f: &impl Fn(&str, &Range<usize>, bool),
+    f: &impl Fn(String, &Range<usize>, bool),
 ) {
     let tag_name_low = tag_name.to_lowercase();
     if let Some(pos) = tags.iter().rposition(|(t, _)| t.to_lowercase() == tag_name_low) {
@@ -186,14 +187,14 @@ fn drop_tag(
             // `tags` is used as a queue, meaning that everything after `pos` is included inside it.
             // So `<h2><h3></h2>` will look like `["h2", "h3"]`. So when closing `h2`, we will still
             // have `h3`, meaning the tag wasn't closed as it should have.
-            f(&format!("unclosed HTML tag `{}`", last_tag_name), &last_tag_span, true);
+            f(format!("unclosed HTML tag `{last_tag_name}`"), &last_tag_span, true);
         }
         // Remove the `tag_name` that was originally closed
         tags.pop();
     } else {
         // It can happen for example in this case: `<h2></script></h2>` (the `h2` tag isn't required
         // but it helps for the visualization).
-        f(&format!("unopened HTML tag `{}`", tag_name), &range, false);
+        f(format!("unopened HTML tag `{tag_name}`"), &range, false);
     }
 }
 
@@ -210,7 +211,9 @@ fn extract_path_backwards(text: &str, end_pos: usize) -> Option<usize> {
             .take_while(|(_, c)| is_id_start(*c) || is_id_continue(*c))
             .reduce(|_accum, item| item)
             .and_then(|(new_pos, c)| is_id_start(c).then_some(new_pos));
-        if let Some(new_pos) = new_pos && current_pos != new_pos {
+        if let Some(new_pos) = new_pos
+            && current_pos != new_pos
+        {
             current_pos = new_pos;
             continue;
         }
@@ -261,7 +264,7 @@ fn extract_html_tag(
     range: &Range<usize>,
     start_pos: usize,
     iter: &mut Peekable<CharIndices<'_>>,
-    f: &impl Fn(&str, &Range<usize>, bool),
+    f: &impl Fn(String, &Range<usize>, bool),
 ) {
     let mut tag_name = String::new();
     let mut is_closing = false;
@@ -347,7 +350,7 @@ fn extract_html_tag(
                     if let Some(quote_pos) = quote_pos {
                         let qr = Range { start: quote_pos, end: quote_pos };
                         f(
-                            &format!("unclosed quoted HTML attribute on tag `{}`", tag_name),
+                            format!("unclosed quoted HTML attribute on tag `{tag_name}`"),
                             &qr,
                             false,
                         );
@@ -360,7 +363,7 @@ fn extract_html_tag(
                                 at == "svg" || at == "math"
                             });
                         if !valid {
-                            f(&format!("invalid self-closing HTML tag `{}`", tag_name), &r, false);
+                            f(format!("invalid self-closing HTML tag `{tag_name}`"), &r, false);
                         }
                     } else {
                         tags.push((tag_name, r));
@@ -378,7 +381,7 @@ fn extract_tags(
     text: &str,
     range: Range<usize>,
     is_in_comment: &mut Option<Range<usize>>,
-    f: &impl Fn(&str, &Range<usize>, bool),
+    f: &impl Fn(String, &Range<usize>, bool),
 ) {
     let mut iter = text.char_indices().peekable();
 

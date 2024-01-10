@@ -1,9 +1,17 @@
-// unit-test: ConstProp
-// compile-flags: -O -Zmir-opt-level=4
+// unit-test: GVN
 
-// EMIT_MIR boolean_identities.test.ConstProp.diff
+// EMIT_MIR boolean_identities.test.GVN.diff
 pub fn test(x: bool, y: bool) -> bool {
-    (y | true) & (x & false)
+    // CHECK-LABEL: fn test(
+    // CHECK: debug a => [[a:_.*]];
+    // CHECK: debug b => [[b:_.*]];
+    // FIXME(cjgillot) simplify algebraic identity
+    // CHECK-NOT: [[a]] = const true;
+    // CHECK-NOT: [[b]] = const false;
+    // CHECK-NOT: _0 = const false;
+    let a = (y | true);
+    let b = (x & false);
+    a & b
 }
 
 fn main() {

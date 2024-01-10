@@ -1,4 +1,4 @@
-use hir::Semantics;
+use hir::{DescendPreference, InFile, MacroFileIdExt, Semantics};
 use ide_db::{
     base_db::FileId, helpers::pick_best_token,
     syntax_helpers::insert_whitespace_into_node::insert_ws_into, RootDatabase,
@@ -14,12 +14,12 @@ pub struct ExpandedMacro {
 
 // Feature: Expand Macro Recursively
 //
-// Shows the full macro expansion of the macro at current cursor.
+// Shows the full macro expansion of the macro at the current caret position.
 //
 // |===
 // | Editor  | Action Name
 //
-// | VS Code | **rust-analyzer: Expand macro recursively**
+// | VS Code | **rust-analyzer: Expand macro recursively at caret**
 // |===
 //
 // image::https://user-images.githubusercontent.com/48062697/113020648-b3973180-917a-11eb-84a9-ecb921293dc5.gif[]
@@ -40,28 +40,37 @@ pub(crate) fn expand_macro(db: &RootDatabase, position: FilePosition) -> Option<
     // struct Bar;
     // ```
 
-    let derive = sema.descend_into_macros(tok.clone()).into_iter().find_map(|descended| {
-        let hir_file = sema.hir_file_for(&descended.parent()?);
-        if !hir_file.is_derive_attr_pseudo_expansion(db) {
-            return None;
-        }
+    let derive = sema
+        .descend_into_macros(DescendPreference::None, tok.clone())
+        .into_iter()
+        .find_map(|descended| {
+            let macro_file = sema.hir_file_for(&descended.parent()?).macro_file()?;
+            if !macro_file.is_derive_attr_pseudo_expansion(db) {
+                return None;
+            }
 
-        let name = descended.parent_ancestors().filter_map(ast::Path::cast).last()?.to_string();
-        // up map out of the #[derive] expansion
-        let token = hir::InFile::new(hir_file, descended).upmap(db)?.value;
-        let attr = token.parent_ancestors().find_map(ast::Attr::cast)?;
-        let expansions = sema.expand_derive_macro(&attr)?;
-        let idx = attr
-            .token_tree()?
-            .token_trees_and_tokens()
-            .filter_map(NodeOrToken::into_token)
-            .take_while(|it| it != &token)
-            .filter(|it| it.kind() == T![,])
-            .count();
-        let expansion =
-            format(db, SyntaxKind::MACRO_ITEMS, position.file_id, expansions.get(idx).cloned()?);
-        Some(ExpandedMacro { name, expansion })
-    });
+            let name = descended.parent_ancestors().filter_map(ast::Path::cast).last()?.to_string();
+            // up map out of the #[derive] expansion
+            let InFile { file_id, value: tokens } =
+                hir::InMacroFile::new(macro_file, descended).upmap_once(db);
+            let token = sema.parse_or_expand(file_id).covering_element(tokens[0]).into_token()?;
+            let attr = token.parent_ancestors().find_map(ast::Attr::cast)?;
+            let expansions = sema.expand_derive_macro(&attr)?;
+            let idx = attr
+                .token_tree()?
+                .token_trees_and_tokens()
+                .filter_map(NodeOrToken::into_token)
+                .take_while(|it| it != &token)
+                .filter(|it| it.kind() == T![,])
+                .count();
+            let expansion = format(
+                db,
+                SyntaxKind::MACRO_ITEMS,
+                position.file_id,
+                expansions.get(idx).cloned()?,
+            );
+            Some(ExpandedMacro { name, expansion })
+        });
 
     if derive.is_some() {
         return derive;
@@ -76,15 +85,17 @@ pub(crate) fn expand_macro(db: &RootDatabase, position: FilePosition) -> Option<
         if let Some(item) = ast::Item::cast(node.clone()) {
             if let Some(def) = sema.resolve_attr_macro_call(&item) {
                 break (
-                    def.name(db).to_string(),
+                    def.name(db).display(db).to_string(),
                     expand_attr_macro_recur(&sema, &item)?,
                     SyntaxKind::MACRO_ITEMS,
                 );
             }
         }
         if let Some(mac) = ast::MacroCall::cast(node) {
+            let mut name = mac.path()?.segment()?.name_ref()?.to_string();
+            name.push('!');
             break (
-                mac.path()?.segment()?.name_ref()?.to_string(),
+                name,
                 expand_macro_recur(&sema, &mac)?,
                 mac.syntax().parent().map(|it| it.kind()).unwrap_or(SyntaxKind::MACRO_ITEMS),
             );
@@ -149,9 +160,11 @@ fn _format(
     _db: &RootDatabase,
     _kind: SyntaxKind,
     _file_id: FileId,
-    _expansion: &str,
+    expansion: &str,
 ) -> Option<String> {
-    None
+    // remove trailing spaces for test
+    use itertools::Itertools;
+    Some(expansion.lines().map(|x| x.trim_end()).join("\n"))
 }
 
 #[cfg(not(any(test, target_arch = "wasm32", target_os = "emscripten")))]
@@ -235,7 +248,7 @@ fn main() {
 }
 "#,
             expect![[r#"
-                bar
+                bar!
                 5i64 as _"#]],
         );
     }
@@ -252,7 +265,7 @@ fn main() {
 }
 "#,
             expect![[r#"
-                bar
+                bar!
                 for _ in 0..42{}"#]],
         );
     }
@@ -273,9 +286,8 @@ macro_rules! baz {
 f$0oo!();
 "#,
             expect![[r#"
-                foo
-                fn b(){}
-            "#]],
+                foo!
+                fn b(){}"#]],
         );
     }
 
@@ -294,7 +306,7 @@ macro_rules! foo {
 f$0oo!();
         "#,
             expect![[r#"
-                foo
+                foo!
                 fn some_thing() -> u32 {
                   let a = 0;
                   a+10
@@ -328,16 +340,16 @@ fn main() {
 }
 "#,
             expect![[r#"
-       match_ast
-       {
-         if let Some(it) = ast::TraitDef::cast(container.clone()){}
-         else if let Some(it) = ast::ImplDef::cast(container.clone()){}
-         else {
-           {
-             continue
-           }
-         }
-       }"#]],
+                match_ast!
+                {
+                  if let Some(it) = ast::TraitDef::cast(container.clone()){}
+                  else if let Some(it) = ast::ImplDef::cast(container.clone()){}
+                  else {
+                    {
+                      continue
+                    }
+                  }
+                }"#]],
         );
     }
 
@@ -358,7 +370,7 @@ fn main() {
 }
 "#,
             expect![[r#"
-                match_ast
+                match_ast!
                 {}"#]],
         );
     }
@@ -383,7 +395,7 @@ fn main() {
 }
             "#,
             expect![[r#"
-                foo
+                foo!
                 {
                   macro_rules! bar {
                     () => {
@@ -411,7 +423,7 @@ fn main() {
 }
 "#,
             expect![[r#"
-                foo
+                foo!
             "#]],
         );
     }
@@ -433,7 +445,7 @@ fn main() {
 }
 "#,
             expect![[r#"
-                foo
+                foo!
                 0"#]],
         );
     }
@@ -451,7 +463,7 @@ fn main() {
 }
 "#,
             expect![[r#"
-                foo
+                foo!
                 fn f<T>(_: &dyn ::std::marker::Copy){}"#]],
         );
     }
@@ -469,8 +481,17 @@ struct Foo {}
 "#,
             expect![[r#"
                 Clone
-                impl < >core::clone::Clone for Foo< >{}
-            "#]],
+                impl < >core::clone::Clone for Foo< >where {
+                  fn clone(&self) -> Self {
+                    match self {
+                      Foo{}
+                       => Foo{}
+                      ,
+
+                      }
+                  }
+
+                  }"#]],
         );
     }
 
@@ -486,8 +507,7 @@ struct Foo {}
 "#,
             expect![[r#"
                 Copy
-                impl < >core::marker::Copy for Foo< >{}
-            "#]],
+                impl < >core::marker::Copy for Foo< >where{}"#]],
         );
     }
 
@@ -502,8 +522,7 @@ struct Foo {}
 "#,
             expect![[r#"
                 Copy
-                impl < >core::marker::Copy for Foo< >{}
-            "#]],
+                impl < >core::marker::Copy for Foo< >where{}"#]],
         );
         check(
             r#"
@@ -514,8 +533,17 @@ struct Foo {}
 "#,
             expect![[r#"
                 Clone
-                impl < >core::clone::Clone for Foo< >{}
-            "#]],
+                impl < >core::clone::Clone for Foo< >where {
+                  fn clone(&self) -> Self {
+                    match self {
+                      Foo{}
+                       => Foo{}
+                      ,
+
+                      }
+                  }
+
+                  }"#]],
         );
     }
 }

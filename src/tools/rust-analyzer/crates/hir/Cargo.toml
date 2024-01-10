@@ -12,12 +12,13 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-rustc-hash = "1.1.0"
-either = "1.7.0"
-arrayvec = "0.7.2"
-itertools = "0.10.5"
+rustc-hash.workspace = true
+either.workspace = true
+arrayvec.workspace = true
+itertools.workspace = true
 smallvec.workspace = true
-once_cell = "1.17.0"
+triomphe.workspace = true
+once_cell = "1.17.1"
 
 # local deps
 base-db.workspace = true
@@ -29,3 +30,9 @@ profile.workspace = true
 stdx.workspace = true
 syntax.workspace = true
 tt.workspace = true
+
+[features]
+in-rust-tree = []
+
+[lints]
+workspace = true

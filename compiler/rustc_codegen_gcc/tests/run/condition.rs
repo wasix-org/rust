@@ -5,7 +5,8 @@
 //   stdout: true
 //     1
 
-#![feature(arbitrary_self_types, auto_traits, lang_items, no_core, start, intrinsics)]
+#![feature(arbitrary_self_types, auto_traits, lang_items, no_core, start, intrinsics, rustc_attrs)]
+#![allow(internal_features)]
 
 #![no_std]
 #![no_core]
@@ -82,7 +83,7 @@ pub unsafe fn drop_in_place<T: ?Sized>(to_drop: *mut T) {
 #[lang = "panic"]
 #[track_caller]
 #[no_mangle]
-pub fn panic(_msg: &str) -> ! {
+pub fn panic(_msg: &'static str) -> ! {
     unsafe {
         libc::puts("Panicking\0" as *const str as *const u8);
         intrinsics::abort();
@@ -108,6 +109,7 @@ fn panic_bounds_check(index: usize, len: usize) -> ! {
 
 mod intrinsics {
     extern "rust-intrinsic" {
+        #[rustc_safe_intrinsic]
         pub fn abort() -> !;
     }
 }

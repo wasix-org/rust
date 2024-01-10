@@ -2,28 +2,28 @@
 
 use std::iter;
 
-use crate::type_ref::ConstScalarOrPath;
+use crate::{lower::LowerCtx, type_ref::ConstRef};
 
-use either::Either;
-use hir_expand::name::{name, AsName};
+use hir_expand::{
+    mod_path::resolve_crate_root,
+    name::{name, AsName},
+};
 use intern::Interned;
 use syntax::ast::{self, AstNode, HasTypeBounds};
 
-use super::AssociatedTypeBinding;
 use crate::{
-    body::LowerCtx,
-    path::{GenericArg, GenericArgs, ModPath, Path, PathKind},
+    path::{AssociatedTypeBinding, GenericArg, GenericArgs, ModPath, Path, PathKind},
     type_ref::{LifetimeRef, TypeBound, TypeRef},
 };
 
 /// Converts an `ast::Path` to `Path`. Works with use trees.
 /// It correctly handles `$crate` based path from macro call.
-pub(super) fn lower_path(mut path: ast::Path, ctx: &LowerCtx<'_>) -> Option<Path> {
+pub(super) fn lower_path(ctx: &LowerCtx<'_>, mut path: ast::Path) -> Option<Path> {
     let mut kind = PathKind::Plain;
     let mut type_anchor = None;
     let mut segments = Vec::new();
     let mut generic_args = Vec::new();
-    let hygiene = ctx.hygiene();
+    let span_map = ctx.span_map();
     loop {
         let segment = path.segment()?;
 
@@ -33,31 +33,31 @@ pub(super) fn lower_path(mut path: ast::Path, ctx: &LowerCtx<'_>) -> Option<Path
 
         match segment.kind()? {
             ast::PathSegmentKind::Name(name_ref) => {
-                // FIXME: this should just return name
-                match hygiene.name_ref_to_name(ctx.db.upcast(), name_ref) {
-                    Either::Left(name) => {
-                        let args = segment
-                            .generic_arg_list()
-                            .and_then(|it| lower_generic_args(ctx, it))
-                            .or_else(|| {
-                                lower_generic_args_from_fn_path(
-                                    ctx,
-                                    segment.param_list(),
-                                    segment.ret_type(),
-                                )
-                            })
-                            .map(Interned::new);
-                        if let Some(_) = args {
-                            generic_args.resize(segments.len(), None);
-                            generic_args.push(args);
-                        }
-                        segments.push(name);
-                    }
-                    Either::Right(crate_id) => {
-                        kind = PathKind::DollarCrate(crate_id);
-                        break;
-                    }
+                if name_ref.text() == "$crate" {
+                    break kind = resolve_crate_root(
+                        ctx.db.upcast(),
+                        span_map.span_for_range(name_ref.syntax().text_range()).ctx,
+                    )
+                    .map(PathKind::DollarCrate)
+                    .unwrap_or(PathKind::Crate);
                 }
+                let name = name_ref.as_name();
+                let args = segment
+                    .generic_arg_list()
+                    .and_then(|it| lower_generic_args(ctx, it))
+                    .or_else(|| {
+                        lower_generic_args_from_fn_path(
+                            ctx,
+                            segment.param_list(),
+                            segment.ret_type(),
+                        )
+                    })
+                    .map(Interned::new);
+                if let Some(_) = args {
+                    generic_args.resize(segments.len(), None);
+                    generic_args.push(args);
+                }
+                segments.push(name);
             }
             ast::PathSegmentKind::SelfTypeKw => {
                 segments.push(name![Self]);
@@ -75,8 +75,11 @@ pub(super) fn lower_path(mut path: ast::Path, ctx: &LowerCtx<'_>) -> Option<Path
                     }
                     // <T as Trait<A>>::Foo desugars to Trait<Self=T, A>::Foo
                     Some(trait_ref) => {
-                        let Path { mod_path, generic_args: path_generic_args, .. } =
-                            Path::from_src(trait_ref.path()?, ctx)?;
+                        let Path::Normal { mod_path, generic_args: path_generic_args, .. } =
+                            Path::from_src(ctx, trait_ref.path()?)?
+                        else {
+                            return None;
+                        };
                         let num_segments = mod_path.segments().len();
                         kind = mod_path.kind;
 
@@ -150,14 +153,20 @@ pub(super) fn lower_path(mut path: ast::Path, ctx: &LowerCtx<'_>) -> Option<Path
     // We follow what it did anyway :)
     if segments.len() == 1 && kind == PathKind::Plain {
         if let Some(_macro_call) = path.syntax().parent().and_then(ast::MacroCall::cast) {
-            if let Some(crate_id) = hygiene.local_inner_macros(ctx.db.upcast(), path) {
-                kind = PathKind::DollarCrate(crate_id);
+            let syn_ctxt = span_map.span_for_range(path.segment()?.syntax().text_range()).ctx;
+            if let Some(macro_call_id) = ctx.db.lookup_intern_syntax_context(syn_ctxt).outer_expn {
+                if ctx.db.lookup_intern_macro_call(macro_call_id).def.local_inner {
+                    kind = match resolve_crate_root(ctx.db.upcast(), syn_ctxt) {
+                        Some(crate_root) => PathKind::DollarCrate(crate_root),
+                        None => PathKind::Crate,
+                    }
+                }
             }
         }
     }
 
     let mod_path = Interned::new(ModPath::from_segments(kind, segments));
-    return Some(Path {
+    return Some(Path::Normal {
         type_anchor,
         mod_path,
         generic_args: if generic_args.is_empty() { None } else { Some(generic_args.into()) },
@@ -188,6 +197,10 @@ pub(super) fn lower_generic_args(
                 args.push(GenericArg::Type(type_ref));
             }
             ast::GenericArg::AssocTypeArg(assoc_type_arg) => {
+                if assoc_type_arg.param_list().is_some() {
+                    // We currently ignore associated return type bounds.
+                    continue;
+                }
                 if let Some(name_ref) = assoc_type_arg.name_ref() {
                     let name = name_ref.as_name();
                     let args = assoc_type_arg
@@ -212,7 +225,7 @@ pub(super) fn lower_generic_args(
                 }
             }
             ast::GenericArg::ConstArg(arg) => {
-                let arg = ConstScalarOrPath::from_expr_opt(arg.expr());
+                let arg = ConstRef::from_const_arg(lower_ctx, Some(arg));
                 args.push(GenericArg::Const(arg))
             }
         }

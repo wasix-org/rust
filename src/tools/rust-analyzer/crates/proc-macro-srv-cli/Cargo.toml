@@ -10,10 +10,16 @@ rust-version.workspace = true
 
 [dependencies]
 proc-macro-srv.workspace = true
+proc-macro-api.workspace = true
 
 [features]
 sysroot-abi = ["proc-macro-srv/sysroot-abi"]
+in-rust-tree = ["proc-macro-srv/in-rust-tree", "sysroot-abi"]
+
 
 [[bin]]
 name = "rust-analyzer-proc-macro-srv"
 path = "src/main.rs"
+
+[lints]
+workspace = true

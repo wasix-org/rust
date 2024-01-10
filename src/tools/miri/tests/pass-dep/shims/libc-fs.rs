@@ -4,12 +4,14 @@
 #![feature(io_error_more)]
 #![feature(io_error_uncategorized)]
 
-use std::convert::TryInto;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::CString;
 use std::fs::{canonicalize, remove_dir_all, remove_file, File};
 use std::io::{Error, ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+
+#[path = "../../utils/mod.rs"]
+mod utils;
 
 fn main() {
     test_dup_stdout_stderr();
@@ -20,33 +22,12 @@ fn main() {
     test_file_open_unix_extra_third_arg();
     #[cfg(target_os = "linux")]
     test_o_tmpfile_flag();
-}
-
-fn tmp() -> PathBuf {
-    let path = std::env::var("MIRI_TEMP")
-        .unwrap_or_else(|_| std::env::temp_dir().into_os_string().into_string().unwrap());
-    // These are host paths. We need to convert them to the target.
-    let path = CString::new(path).unwrap();
-    let mut out = Vec::with_capacity(1024);
-
-    unsafe {
-        extern "Rust" {
-            fn miri_host_to_target_path(
-                path: *const c_char,
-                out: *mut c_char,
-                out_size: usize,
-            ) -> usize;
-        }
-        let ret = miri_host_to_target_path(path.as_ptr(), out.as_mut_ptr(), out.capacity());
-        assert_eq!(ret, 0);
-        let out = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
-        PathBuf::from(out)
-    }
+    test_posix_mkstemp();
 }
 
 /// Prepare: compute filename and make sure the file does not exist.
 fn prepare(filename: &str) -> PathBuf {
-    let path = tmp().join(filename);
+    let path = utils::tmp().join(filename);
     // Clean the paths for robustness.
     remove_file(&path).ok();
     path
@@ -55,7 +36,7 @@ fn prepare(filename: &str) -> PathBuf {
 /// Prepare directory: compute directory name and make sure it does not exist.
 #[allow(unused)]
 fn prepare_dir(dirname: &str) -> PathBuf {
-    let path = tmp().join(&dirname);
+    let path = utils::tmp().join(&dirname);
     // Clean the directory for robustness.
     remove_dir_all(&path).ok();
     path
@@ -130,7 +111,7 @@ fn test_readlink() {
     let mut large_buf = vec![0xFF; expected_path.len() + 1];
     let res =
         unsafe { libc::readlink(symlink_c_ptr, large_buf.as_mut_ptr().cast(), large_buf.len()) };
-    // Check that the resovled path was properly written into the buf.
+    // Check that the resolved path was properly written into the buf.
     assert_eq!(&large_buf[..(large_buf.len() - 1)], expected_path);
     assert_eq!(large_buf.last(), Some(&0xFF));
     assert_eq!(res, large_buf.len() as isize - 1);
@@ -169,4 +150,46 @@ fn test_o_tmpfile_flag() {
             .unwrap_err()
             .raw_os_error(),
     );
+}
+
+fn test_posix_mkstemp() {
+    use std::ffi::OsStr;
+    use std::os::unix::io::FromRawFd;
+    use std::path::Path;
+
+    let valid_template = "fooXXXXXX";
+    // C needs to own this as `mkstemp(3)` says:
+    // "Since it will be modified, `template` must not be a string constant, but
+    // should be declared as a character array."
+    // There seems to be no `as_mut_ptr` on `CString` so we need to use `into_raw`.
+    let ptr = CString::new(valid_template).unwrap().into_raw();
+    let fd = unsafe { libc::mkstemp(ptr) };
+    // Take ownership back in Rust to not leak memory.
+    let slice = unsafe { CString::from_raw(ptr) };
+    assert!(fd > 0);
+    let osstr = OsStr::from_bytes(slice.to_bytes());
+    let path: &Path = osstr.as_ref();
+    let name = path.file_name().unwrap().to_string_lossy();
+    assert!(name.ne("fooXXXXXX"));
+    assert!(name.starts_with("foo"));
+    assert_eq!(name.len(), 9);
+    assert_eq!(
+        name.chars().skip(3).filter(char::is_ascii_alphanumeric).collect::<Vec<char>>().len(),
+        6
+    );
+    let file = unsafe { File::from_raw_fd(fd) };
+    assert!(file.set_len(0).is_ok());
+
+    let invalid_templates = vec!["foo", "barXX", "XXXXXXbaz", "whatXXXXXXever", "X"];
+    for t in invalid_templates {
+        let ptr = CString::new(t).unwrap().into_raw();
+        let fd = unsafe { libc::mkstemp(ptr) };
+        let _ = unsafe { CString::from_raw(ptr) };
+        // "On error, -1 is returned, and errno is set to
+        // indicate the error"
+        assert_eq!(fd, -1);
+        let e = std::io::Error::last_os_error();
+        assert_eq!(e.raw_os_error(), Some(libc::EINVAL));
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+    }
 }

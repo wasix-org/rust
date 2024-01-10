@@ -2,10 +2,8 @@ use std::fs::File;
 use std::io;
 use std::ops::{Deref, DerefMut};
 
-use crate::owning_ref::StableAddress;
-
-/// A trivial wrapper for [`memmap2::Mmap`] that implements [`StableAddress`].
-#[cfg(not(target_family = "wasm"))]
+/// A trivial wrapper for [`memmap2::Mmap`] (or `Vec<u8>` on WASM).
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Mmap(memmap2::Mmap);
 
 #[cfg(target_family = "wasm")]
@@ -13,9 +11,15 @@ pub struct Mmap(Vec<u8>);
 
 #[cfg(not(target_family = "wasm"))]
 impl Mmap {
+    /// # Safety
+    ///
+    /// The given file must not be mutated (i.e., not written, not truncated, ...) until the mapping is closed.
+    ///
+    /// However in practice most callers do not ensure this, so uses of this function are likely unsound.
     #[inline]
     pub unsafe fn map(file: File) -> io::Result<Self> {
-        memmap2::Mmap::map(&file).map(Mmap)
+        // Safety: the caller must ensure that this is safe.
+        unsafe { memmap2::Mmap::map(&file).map(Mmap) }
     }
 }
 
@@ -42,15 +46,9 @@ impl Deref for Mmap {
 
 impl AsRef<[u8]> for Mmap {
     fn as_ref(&self) -> &[u8] {
-        &*self.0
+        &self.0
     }
 }
-
-// SAFETY: On architectures other than WASM, mmap is used as backing storage. The address of this
-// memory map is stable. On WASM, `Vec<u8>` is used as backing storage. The `Mmap` type doesn't
-// export any function that can cause the `Vec` to be re-allocated. As such the address of the
-// bytes inside this `Vec` is stable.
-unsafe impl StableAddress for Mmap {}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub struct MmapMut(memmap2::MmapMut);

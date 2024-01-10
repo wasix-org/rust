@@ -1,9 +1,11 @@
+use crate::errors;
 use rustc_ast::ptr::P;
 use rustc_ast::visit::{self, Visitor};
-use rustc_ast::{self as ast, NodeId};
+use rustc_ast::{self as ast, attr, NodeId};
 use rustc_ast_pretty::pprust;
 use rustc_expand::base::{parse_macro_name_and_helper_attrs, ExtCtxt, ResolverExpand};
 use rustc_expand::expand::{AstFragment, ExpansionConfig};
+use rustc_feature::Features;
 use rustc_session::Session;
 use rustc_span::hygiene::AstPass;
 use rustc_span::source_map::SourceMap;
@@ -34,70 +36,64 @@ enum ProcMacro {
 }
 
 struct CollectProcMacros<'a> {
-    sess: &'a Session,
     macros: Vec<ProcMacro>,
     in_root: bool,
-    handler: &'a rustc_errors::Handler,
+    dcx: &'a rustc_errors::DiagCtxt,
     source_map: &'a SourceMap,
     is_proc_macro_crate: bool,
     is_test_crate: bool,
 }
 
 pub fn inject(
+    krate: &mut ast::Crate,
     sess: &Session,
+    features: &Features,
     resolver: &mut dyn ResolverExpand,
-    mut krate: ast::Crate,
     is_proc_macro_crate: bool,
     has_proc_macro_decls: bool,
     is_test_crate: bool,
-    handler: &rustc_errors::Handler,
-) -> ast::Crate {
-    let ecfg = ExpansionConfig::default("proc_macro".to_string());
+    dcx: &rustc_errors::DiagCtxt,
+) {
+    let ecfg = ExpansionConfig::default("proc_macro".to_string(), features);
     let mut cx = ExtCtxt::new(sess, ecfg, resolver, None);
 
     let mut collect = CollectProcMacros {
-        sess,
         macros: Vec::new(),
         in_root: true,
-        handler,
+        dcx,
         source_map: sess.source_map(),
         is_proc_macro_crate,
         is_test_crate,
     };
 
     if has_proc_macro_decls || is_proc_macro_crate {
-        visit::walk_crate(&mut collect, &krate);
+        visit::walk_crate(&mut collect, krate);
     }
     let macros = collect.macros;
 
     if !is_proc_macro_crate {
-        return krate;
+        return;
     }
 
     if is_test_crate {
-        return krate;
+        return;
     }
 
     let decls = mk_decls(&mut cx, &macros);
     krate.items.push(decls);
-
-    krate
 }
 
 impl<'a> CollectProcMacros<'a> {
     fn check_not_pub_in_root(&self, vis: &ast::Visibility, sp: Span) {
         if self.is_proc_macro_crate && self.in_root && vis.kind.is_pub() {
-            self.handler.span_err(
-                sp,
-                "`proc-macro` crate types currently cannot export any items other \
-                    than functions tagged with `#[proc_macro]`, `#[proc_macro_derive]`, \
-                    or `#[proc_macro_attribute]`",
-            );
+            self.dcx.emit_err(errors::ProcMacro { span: sp });
         }
     }
 
     fn collect_custom_derive(&mut self, item: &'a ast::Item, attr: &'a ast::Attribute) {
-        let Some((trait_name, proc_attrs)) = parse_macro_name_and_helper_attrs(self.handler, attr, "derive") else {
+        let Some((trait_name, proc_attrs)) =
+            parse_macro_name_and_helper_attrs(self.dcx, attr, "derive")
+        else {
             return;
         };
 
@@ -116,7 +112,7 @@ impl<'a> CollectProcMacros<'a> {
             } else {
                 "functions tagged with `#[proc_macro_derive]` must be `pub`"
             };
-            self.handler.span_err(self.source_map.guess_head_span(item.span), msg);
+            self.dcx.span_err(self.source_map.guess_head_span(item.span), msg);
         }
     }
 
@@ -134,7 +130,7 @@ impl<'a> CollectProcMacros<'a> {
             } else {
                 "functions tagged with `#[proc_macro_attribute]` must be `pub`"
             };
-            self.handler.span_err(self.source_map.guess_head_span(item.span), msg);
+            self.dcx.span_err(self.source_map.guess_head_span(item.span), msg);
         }
     }
 
@@ -152,7 +148,7 @@ impl<'a> CollectProcMacros<'a> {
             } else {
                 "functions tagged with `#[proc_macro]` must be `pub`"
             };
-            self.handler.span_err(self.source_map.guess_head_span(item.span), msg);
+            self.dcx.span_err(self.source_map.guess_head_span(item.span), msg);
         }
     }
 }
@@ -160,10 +156,10 @@ impl<'a> CollectProcMacros<'a> {
 impl<'a> Visitor<'a> for CollectProcMacros<'a> {
     fn visit_item(&mut self, item: &'a ast::Item) {
         if let ast::ItemKind::MacroDef(..) = item.kind {
-            if self.is_proc_macro_crate && self.sess.contains_name(&item.attrs, sym::macro_export) {
-                let msg =
-                    "cannot export macro_rules! macros from a `proc-macro` crate type currently";
-                self.handler.span_err(self.source_map.guess_head_span(item.span), msg);
+            if self.is_proc_macro_crate && attr::contains_name(&item.attrs, sym::macro_export) {
+                self.dcx.emit_err(errors::ExportMacroRules {
+                    span: self.source_map.guess_head_span(item.span),
+                });
             }
         }
 
@@ -176,7 +172,7 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
         let mut found_attr: Option<&'a ast::Attribute> = None;
 
         for attr in &item.attrs {
-            if self.sess.is_proc_macro_attr(&attr) {
+            if attr.is_proc_macro_attr() {
                 if let Some(prev_attr) = found_attr {
                     let prev_item = prev_attr.get_normal_item();
                     let item = attr.get_normal_item();
@@ -185,8 +181,7 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
                         == prev_item.path.segments[0].ident.name
                     {
                         format!(
-                            "only one `#[{}]` attribute is allowed on any given function",
-                            path_str,
+                            "only one `#[{path_str}]` attribute is allowed on any given function",
                         )
                     } else {
                         format!(
@@ -197,9 +192,9 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
                         )
                     };
 
-                    self.handler
-                        .struct_span_err(attr.span, &msg)
-                        .span_label(prev_attr.span, "previous attribute here")
+                    self.dcx
+                        .struct_span_err(attr.span, msg)
+                        .span_label_mv(prev_attr.span, "previous attribute here")
                         .emit();
 
                     return;
@@ -223,7 +218,7 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
                 pprust::path_to_string(&attr.get_normal_item().path),
             );
 
-            self.handler.span_err(attr.span, &msg);
+            self.dcx.span_err(attr.span, msg);
             return;
         }
 
@@ -237,7 +232,7 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
                 pprust::path_to_string(&attr.get_normal_item().path),
             );
 
-            self.handler.span_err(attr.span, &msg);
+            self.dcx.span_err(attr.span, msg);
             return;
         }
 

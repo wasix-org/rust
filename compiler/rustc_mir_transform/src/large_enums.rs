@@ -1,5 +1,4 @@
 use crate::rustc_middle::ty::util::IntTypeExt;
-use crate::MirPass;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::interpret::AllocId;
 use rustc_middle::mir::*;
@@ -10,7 +9,7 @@ use rustc_target::abi::{HasDataLayout, Size, TagEncoding, Variants};
 /// A pass that seeks to optimize unnecessary moves of large enum types, if there is a large
 /// enough discrepancy between them.
 ///
-/// i.e. If there is are two variants:
+/// i.e. If there are two variants:
 /// ```
 /// enum Example {
 ///   Small,
@@ -30,6 +29,9 @@ pub struct EnumSizeOpt {
 
 impl<'tcx> MirPass<'tcx> for EnumSizeOpt {
     fn is_enabled(&self, sess: &Session) -> bool {
+        // There are some differences in behavior on wasm and ARM that are not properly
+        // understood, so we conservatively treat this optimization as unsound:
+        // https://github.com/rust-lang/rust/pull/85158#issuecomment-1101836457
         sess.opts.unstable_opts.unsound_mir_opts || sess.mir_opt_level() >= 3
     }
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -48,17 +50,14 @@ impl EnumSizeOpt {
         alloc_cache: &mut FxHashMap<Ty<'tcx>, AllocId>,
     ) -> Option<(AdtDef<'tcx>, usize, AllocId)> {
         let adt_def = match ty.kind() {
-            ty::Adt(adt_def, _substs) if adt_def.is_enum() => adt_def,
+            ty::Adt(adt_def, _args) if adt_def.is_enum() => adt_def,
             _ => return None,
         };
         let layout = tcx.layout_of(param_env.and(ty)).ok()?;
         let variants = match &layout.variants {
             Variants::Single { .. } => return None,
-            Variants::Multiple { tag_encoding, .. }
-                if matches!(tag_encoding, TagEncoding::Niche { .. }) =>
-            {
-                return None;
-            }
+            Variants::Multiple { tag_encoding: TagEncoding::Niche { .. }, .. } => return None,
+
             Variants::Multiple { variants, .. } if variants.len() <= 1 => return None,
             Variants::Multiple { variants, .. } => variants,
         };
@@ -114,13 +113,13 @@ impl EnumSizeOpt {
             tcx.data_layout.ptr_sized_integer().align(&tcx.data_layout).abi,
             Mutability::Not,
         );
-        let alloc = tcx.create_memory_alloc(tcx.mk_const_alloc(alloc));
+        let alloc = tcx.reserve_and_set_memory_alloc(tcx.mk_const_alloc(alloc));
         Some((*adt_def, num_discrs, *alloc_cache.entry(ty).or_insert(alloc)))
     }
     fn optim<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         let mut alloc_cache = FxHashMap::default();
         let body_did = body.source.def_id();
-        let param_env = tcx.param_env(body_did);
+        let param_env = tcx.param_env_reveal_all_normalized(body_did);
 
         let blocks = body.basic_blocks.as_mut();
         let local_decls = &mut body.local_decls;
@@ -139,9 +138,8 @@ impl EnumSizeOpt {
 
                     let (adt_def, num_variants, alloc_id) =
                         self.candidate(tcx, param_env, ty, &mut alloc_cache)?;
-                    let alloc = tcx.global_alloc(alloc_id).unwrap_memory();
 
-                    let tmp_ty = tcx.mk_array(tcx.types.usize, num_variants as u64);
+                    let tmp_ty = Ty::new_array(tcx, tcx.types.usize, num_variants as u64);
 
                     let size_array_local = local_decls.push(LocalDecl::new(tmp_ty, span));
                     let store_live = Statement {
@@ -150,18 +148,20 @@ impl EnumSizeOpt {
                     };
 
                     let place = Place::from(size_array_local);
-                    let constant_vals = Constant {
+                    let constant_vals = ConstOperand {
                         span,
                         user_ty: None,
-                        literal: ConstantKind::Val(
-                            interpret::ConstValue::ByRef { alloc, offset: Size::ZERO },
+                        const_: Const::Val(
+                            ConstValue::Indirect { alloc_id, offset: Size::ZERO },
                             tmp_ty,
                         ),
                     };
-                    let rval = Rvalue::Use(Operand::Constant(box (constant_vals)));
+                    let rval = Rvalue::Use(Operand::Constant(Box::new(constant_vals)));
 
-                    let const_assign =
-                        Statement { source_info, kind: StatementKind::Assign(box (place, rval)) };
+                    let const_assign = Statement {
+                        source_info,
+                        kind: StatementKind::Assign(Box::new((place, rval))),
+                    };
 
                     let discr_place = Place::from(
                         local_decls
@@ -170,7 +170,10 @@ impl EnumSizeOpt {
 
                     let store_discr = Statement {
                         source_info,
-                        kind: StatementKind::Assign(box (discr_place, Rvalue::Discriminant(*rhs))),
+                        kind: StatementKind::Assign(Box::new((
+                            discr_place,
+                            Rvalue::Discriminant(*rhs),
+                        ))),
                     };
 
                     let discr_cast_place =
@@ -178,14 +181,14 @@ impl EnumSizeOpt {
 
                     let cast_discr = Statement {
                         source_info,
-                        kind: StatementKind::Assign(box (
+                        kind: StatementKind::Assign(Box::new((
                             discr_cast_place,
                             Rvalue::Cast(
                                 CastKind::IntToInt,
                                 Operand::Copy(discr_place),
                                 tcx.types.usize,
                             ),
-                        )),
+                        ))),
                     };
 
                     let size_place =
@@ -193,74 +196,76 @@ impl EnumSizeOpt {
 
                     let store_size = Statement {
                         source_info,
-                        kind: StatementKind::Assign(box (
+                        kind: StatementKind::Assign(Box::new((
                             size_place,
                             Rvalue::Use(Operand::Copy(Place {
                                 local: size_array_local,
                                 projection: tcx
                                     .mk_place_elems(&[PlaceElem::Index(discr_cast_place.local)]),
                             })),
-                        )),
+                        ))),
                     };
 
-                    let dst =
-                        Place::from(local_decls.push(LocalDecl::new(tcx.mk_mut_ptr(ty), span)));
+                    let dst = Place::from(
+                        local_decls.push(LocalDecl::new(Ty::new_mut_ptr(tcx, ty), span)),
+                    );
 
                     let dst_ptr = Statement {
                         source_info,
-                        kind: StatementKind::Assign(box (
+                        kind: StatementKind::Assign(Box::new((
                             dst,
                             Rvalue::AddressOf(Mutability::Mut, *lhs),
-                        )),
+                        ))),
                     };
 
-                    let dst_cast_ty = tcx.mk_mut_ptr(tcx.types.u8);
+                    let dst_cast_ty = Ty::new_mut_ptr(tcx, tcx.types.u8);
                     let dst_cast_place =
                         Place::from(local_decls.push(LocalDecl::new(dst_cast_ty, span)));
 
                     let dst_cast = Statement {
                         source_info,
-                        kind: StatementKind::Assign(box (
+                        kind: StatementKind::Assign(Box::new((
                             dst_cast_place,
                             Rvalue::Cast(CastKind::PtrToPtr, Operand::Copy(dst), dst_cast_ty),
-                        )),
+                        ))),
                     };
 
-                    let src =
-                        Place::from(local_decls.push(LocalDecl::new(tcx.mk_imm_ptr(ty), span)));
+                    let src = Place::from(
+                        local_decls.push(LocalDecl::new(Ty::new_imm_ptr(tcx, ty), span)),
+                    );
 
                     let src_ptr = Statement {
                         source_info,
-                        kind: StatementKind::Assign(box (
+                        kind: StatementKind::Assign(Box::new((
                             src,
                             Rvalue::AddressOf(Mutability::Not, *rhs),
-                        )),
+                        ))),
                     };
 
-                    let src_cast_ty = tcx.mk_imm_ptr(tcx.types.u8);
+                    let src_cast_ty = Ty::new_imm_ptr(tcx, tcx.types.u8);
                     let src_cast_place =
                         Place::from(local_decls.push(LocalDecl::new(src_cast_ty, span)));
 
                     let src_cast = Statement {
                         source_info,
-                        kind: StatementKind::Assign(box (
+                        kind: StatementKind::Assign(Box::new((
                             src_cast_place,
                             Rvalue::Cast(CastKind::PtrToPtr, Operand::Copy(src), src_cast_ty),
-                        )),
+                        ))),
                     };
 
                     let deinit_old =
-                        Statement { source_info, kind: StatementKind::Deinit(box dst) };
+                        Statement { source_info, kind: StatementKind::Deinit(Box::new(dst)) };
 
                     let copy_bytes = Statement {
                         source_info,
-                        kind: StatementKind::Intrinsic(
-                            box NonDivergingIntrinsic::CopyNonOverlapping(CopyNonOverlapping {
+                        kind: StatementKind::Intrinsic(Box::new(
+                            NonDivergingIntrinsic::CopyNonOverlapping(CopyNonOverlapping {
                                 src: Operand::Copy(src_cast_place),
                                 dst: Operand::Copy(dst_cast_place),
                                 count: Operand::Copy(size_place),
                             }),
-                        ),
+                        )),
                     };
 
                     let store_dead = Statement {

@@ -1,5 +1,7 @@
+//@compile-flags: -Cdebug-assertions=no
+
 #[repr(transparent)]
-struct HasDrop(u8);
+struct HasDrop(#[allow(dead_code)] u8);
 
 impl Drop for HasDrop {
     fn drop(&mut self) {}
@@ -11,7 +13,7 @@ struct PartialDrop {
     b: u8,
 }
 
-//@error-pattern: /alignment 2 is required/
+//@error-in-other-file: /required 2 byte alignment/
 fn main() {
     unsafe {
         // Create an unaligned pointer

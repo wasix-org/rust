@@ -17,12 +17,12 @@ where
     F: FnMut(&T) -> Option<T>,
 {
     // If this function returned `impl Iterator<Item=T>`
-    // it could be based on `unfold` and not need a dedicated type.
+    // it could be based on `from_fn` and not need a dedicated type.
     // However having a named `Successors<T, F>` type allows it to be `Clone` when `T` and `F` are.
     Successors { next: first, succ }
 }
 
-/// An new iterator where each successive item is computed based on the preceding one.
+/// A new iterator where each successive item is computed based on the preceding one.
 ///
 /// This `struct` is created by the [`iter::successors()`] function.
 /// See its documentation for more.

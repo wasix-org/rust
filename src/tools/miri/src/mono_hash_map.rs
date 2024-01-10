@@ -2,7 +2,7 @@
 //! otherwise mutated. We also box items in the map. This means we can safely provide
 //! shared references into existing items in the `FxHashMap`, because they will not be dropped
 //! (from being removed) or moved (because they are boxed).
-//! The API is is completely tailored to what `memory.rs` needs. It is still in
+//! The API is completely tailored to what `memory.rs` needs. It is still in
 //! a separate file to minimize the amount of code that has to care about the unsafety.
 
 use std::borrow::Borrow;
@@ -44,6 +44,14 @@ impl<K: Hash + Eq, V> AllocMap<K, V> for MonoHashMap<K, V> {
         K: Borrow<Q>,
     {
         self.0.get_mut().contains_key(k)
+    }
+
+    #[inline(always)]
+    fn contains_key_ref<Q: ?Sized + Hash + Eq>(&self, k: &Q) -> bool
+    where
+        K: Borrow<Q>,
+    {
+        self.0.borrow().contains_key(k)
     }
 
     #[inline(always)]

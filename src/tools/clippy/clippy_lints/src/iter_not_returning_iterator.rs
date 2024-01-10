@@ -1,7 +1,10 @@
-use clippy_utils::{diagnostics::span_lint, get_parent_node, ty::implements_trait};
-use rustc_hir::{def_id::LocalDefId, FnSig, ImplItem, ImplItemKind, Item, ItemKind, Node, TraitItem, TraitItemKind};
+use clippy_utils::diagnostics::span_lint;
+use clippy_utils::get_parent_node;
+use clippy_utils::ty::implements_trait;
+use rustc_hir::def_id::LocalDefId;
+use rustc_hir::{FnSig, ImplItem, ImplItemKind, Item, ItemKind, Node, TraitItem, TraitItemKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::symbol::sym;
 
 declare_clippy_lint! {
@@ -12,7 +15,7 @@ declare_clippy_lint! {
     /// Methods named `iter` or `iter_mut` conventionally return an `Iterator`.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// // `String` does not implement `Iterator`
     /// struct Data {}
     /// impl Data {
@@ -22,7 +25,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// use std::str::Chars;
     /// struct Data {}
     /// impl Data {
@@ -68,7 +71,7 @@ fn check_sig(cx: &LateContext<'_>, name: &str, sig: &FnSig<'_>, fn_id: LocalDefI
     if sig.decl.implicit_self.has_implicit_self() {
         let ret_ty = cx
             .tcx
-            .erase_late_bound_regions(cx.tcx.fn_sig(fn_id).subst_identity().output());
+            .instantiate_bound_regions_with_erased(cx.tcx.fn_sig(fn_id).instantiate_identity().output());
         let ret_ty = cx
             .tcx
             .try_normalize_erasing_regions(cx.param_env, ret_ty)

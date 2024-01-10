@@ -40,20 +40,18 @@ pub(crate) fn where_clauses(cx: &DocContext<'_>, clauses: Vec<WP>) -> ThinVec<WP
             WP::RegionPredicate { lifetime, bounds } => {
                 lifetimes.push((lifetime, bounds));
             }
-            WP::EqPredicate { lhs, rhs, bound_params } => equalities.push((lhs, rhs, bound_params)),
+            WP::EqPredicate { lhs, rhs } => equalities.push((lhs, rhs)),
         }
     }
 
     // Look for equality predicates on associated types that can be merged into
     // general bound predicates.
-    equalities.retain(|(lhs, rhs, bound_params)| {
-        let Some((ty, trait_did, name)) = lhs.projection() else { return true; };
+    equalities.retain(|(lhs, rhs)| {
+        let Some((ty, trait_did, name)) = lhs.projection() else {
+            return true;
+        };
         let Some((bounds, _)) = tybounds.get_mut(ty) else { return true };
-        let bound_params = bound_params
-            .into_iter()
-            .map(|param| clean::GenericParamDef::lifetime(param.0))
-            .collect();
-        merge_bounds(cx, bounds, bound_params, trait_did, name, rhs)
+        merge_bounds(cx, bounds, trait_did, name, rhs)
     });
 
     // And finally, let's reassemble everything
@@ -66,18 +64,13 @@ pub(crate) fn where_clauses(cx: &DocContext<'_>, clauses: Vec<WP>) -> ThinVec<WP
         bounds,
         bound_params,
     }));
-    clauses.extend(equalities.into_iter().map(|(lhs, rhs, bound_params)| WP::EqPredicate {
-        lhs,
-        rhs,
-        bound_params,
-    }));
+    clauses.extend(equalities.into_iter().map(|(lhs, rhs)| WP::EqPredicate { lhs, rhs }));
     clauses
 }
 
 pub(crate) fn merge_bounds(
     cx: &clean::DocContext<'_>,
     bounds: &mut Vec<clean::GenericBound>,
-    mut bound_params: Vec<clean::GenericParamDef>,
     trait_did: DefId,
     assoc: clean::PathSegment,
     rhs: &clean::Term,
@@ -94,12 +87,6 @@ pub(crate) fn merge_bounds(
             return false;
         }
         let last = trait_ref.trait_.segments.last_mut().expect("segments were empty");
-
-        trait_ref.generic_params.append(&mut bound_params);
-        // Sort parameters (likely) originating from a hashset alphabetically to
-        // produce predictable output (and to allow for full deduplication).
-        trait_ref.generic_params.sort_unstable_by(|p, q| p.name.as_str().cmp(q.name.as_str()));
-        trait_ref.generic_params.dedup_by_key(|p| p.name);
 
         match last.args {
             PP::AngleBracketed { ref mut bindings, .. } => {
@@ -132,11 +119,47 @@ fn trait_is_same_or_supertrait(cx: &DocContext<'_>, child: DefId, trait_: DefId)
         .predicates
         .iter()
         .filter_map(|(pred, _)| {
-            if let ty::PredicateKind::Clause(ty::Clause::Trait(pred)) = pred.kind().skip_binder() {
+            if let ty::ClauseKind::Trait(pred) = pred.kind().skip_binder() {
                 if pred.trait_ref.self_ty() == self_ty { Some(pred.def_id()) } else { None }
             } else {
                 None
             }
         })
         .any(|did| trait_is_same_or_supertrait(cx, did, trait_))
+}
+
+/// Move bounds that are (likely) directly attached to generic parameters from the where-clause to
+/// the respective parameter.
+///
+/// There is no guarantee that this is what the user actually wrote but we have no way of knowing.
+// FIXME(fmease): It'd make a lot of sense to just incorporate this logic into `clean_ty_generics`
+// making every of its users benefit from it.
+pub(crate) fn move_bounds_to_generic_parameters(generics: &mut clean::Generics) {
+    use clean::types::*;
+
+    let mut where_predicates = ThinVec::new();
+    for mut pred in generics.where_predicates.drain(..) {
+        if let WherePredicate::BoundPredicate { ty: Generic(arg), bounds, .. } = &mut pred
+            && let Some(GenericParamDef {
+                kind: GenericParamDefKind::Type { bounds: param_bounds, .. },
+                ..
+            }) = generics.params.iter_mut().find(|param| &param.name == arg)
+        {
+            param_bounds.extend(bounds.drain(..));
+        } else if let WherePredicate::RegionPredicate { lifetime: Lifetime(arg), bounds } =
+            &mut pred
+            && let Some(GenericParamDef {
+                kind: GenericParamDefKind::Lifetime { outlives: param_bounds },
+                ..
+            }) = generics.params.iter_mut().find(|param| &param.name == arg)
+        {
+            param_bounds.extend(bounds.drain(..).map(|bound| match bound {
+                GenericBound::Outlives(lifetime) => lifetime,
+                _ => unreachable!(),
+            }));
+        } else {
+            where_predicates.push(pred);
+        }
+    }
+    generics.where_predicates = where_predicates;
 }

@@ -1,6 +1,5 @@
 mod sip;
 
-use std::default::Default;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::ptr;
 use std::rc::Rc;
@@ -9,13 +8,13 @@ struct MyHasher {
     hash: u64,
 }
 
-impl const Default for MyHasher {
+impl Default for MyHasher {
     fn default() -> MyHasher {
         MyHasher { hash: 0 }
     }
 }
 
-impl const Hasher for MyHasher {
+impl Hasher for MyHasher {
     fn write(&mut self, buf: &[u8]) {
         // FIXME(const_trait_impl): change to for loop
         let mut i = 0;
@@ -35,13 +34,14 @@ impl const Hasher for MyHasher {
 
 #[test]
 fn test_writer_hasher() {
-    const fn hash<T: ~const Hash>(t: &T) -> u64 {
+    // FIXME(#110395)
+    /* const */ fn hash<T: Hash>(t: &T) -> u64 {
         let mut s = MyHasher { hash: 0 };
         t.hash(&mut s);
         s.finish()
     }
 
-    const {
+    /* const {
         // FIXME(fee1-dead): assert_eq
         assert!(hash(&()) == 0);
         assert!(hash(&5_u8) == 5);
@@ -52,7 +52,7 @@ fn test_writer_hasher() {
 
         let s: &str = "a";
         assert!(hash(&s) == 97 + 0xFF);
-    };
+    }; */
 
     assert_eq!(hash(&()), 0);
 
@@ -113,7 +113,7 @@ struct CustomHasher {
     output: u64,
 }
 
-impl const Hasher for CustomHasher {
+impl Hasher for CustomHasher {
     fn finish(&self) -> u64 {
         self.output
     }
@@ -125,21 +125,22 @@ impl const Hasher for CustomHasher {
     }
 }
 
-impl const Default for CustomHasher {
+impl Default for CustomHasher {
     fn default() -> CustomHasher {
         CustomHasher { output: 0 }
     }
 }
 
-impl const Hash for Custom {
-    fn hash<H: ~const Hasher>(&self, state: &mut H) {
+impl Hash for Custom {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(self.hash);
     }
 }
 
 #[test]
 fn test_custom_state() {
-    const fn hash<T: ~const Hash>(t: &T) -> u64 {
+    // FIXME(#110395)
+    /* const */ fn hash<T: Hash>(t: &T) -> u64 {
         let mut c = CustomHasher { output: 0 };
         t.hash(&mut c);
         c.finish()
@@ -147,7 +148,7 @@ fn test_custom_state() {
 
     assert_eq!(hash(&Custom { hash: 5 }), 5);
 
-    const { assert!(hash(&Custom { hash: 6 }) == 6) };
+    // const { assert!(hash(&Custom { hash: 6 }) == 6) };
 }
 
 // FIXME: Instantiated functions with i128 in the signature is not supported in Emscripten.
@@ -165,7 +166,7 @@ fn test_indirect_hasher() {
 
 #[test]
 fn test_build_hasher_object_safe() {
-    use std::collections::hash_map::{DefaultHasher, RandomState};
+    use std::hash::{DefaultHasher, RandomState};
 
     let _: &dyn BuildHasher<Hasher = DefaultHasher> = &RandomState::new();
 }

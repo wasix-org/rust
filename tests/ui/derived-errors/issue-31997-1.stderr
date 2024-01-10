@@ -6,9 +6,9 @@ LL |     let mut map = HashMap::new();
    |
 help: consider importing this struct
    |
-LL | use std::collections::HashMap;
+LL + use std::collections::HashMap;
    |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0433`.

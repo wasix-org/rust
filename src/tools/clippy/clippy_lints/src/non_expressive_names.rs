@@ -5,10 +5,9 @@ use rustc_ast::ast::{
 use rustc_ast::visit::{walk_block, walk_expr, walk_pat, Visitor};
 use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::source_map::Span;
-use rustc_span::sym;
+use rustc_session::impl_lint_pass;
 use rustc_span::symbol::{Ident, Symbol};
+use rustc_span::{sym, Span};
 use std::cmp::Ordering;
 
 declare_clippy_lint! {
@@ -63,7 +62,7 @@ declare_clippy_lint! {
     /// descriptive name.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let _1 = 1;
     /// let ___1 = 1;
     /// let __1___2 = 11;
@@ -91,7 +90,7 @@ struct ExistingName {
 struct SimilarNamesLocalVisitor<'a, 'tcx> {
     names: Vec<ExistingName>,
     cx: &'a EarlyContext<'tcx>,
-    lint: &'a NonExpressiveNames,
+    lint: NonExpressiveNames,
 
     /// A stack of scopes containing the single-character bindings in each scope.
     single_char_names: Vec<Vec<Ident>>,
@@ -342,7 +341,9 @@ impl<'a, 'tcx> Visitor<'tcx> for SimilarNamesLocalVisitor<'a, 'tcx> {
 
         self.apply(|this| {
             SimilarNamesNameVisitor(this).visit_pat(&arm.pat);
-            this.apply(|this| walk_expr(this, &arm.body));
+            if let Some(body) = &arm.body {
+                this.apply(|this| walk_expr(this, body));
+            }
         });
 
         self.check_single_char_names();
@@ -365,7 +366,7 @@ impl EarlyLintPass for NonExpressiveNames {
             ..
         }) = item.kind
         {
-            do_check(self, cx, &item.attrs, &sig.decl, blk);
+            do_check(*self, cx, &item.attrs, &sig.decl, blk);
         }
     }
 
@@ -380,12 +381,12 @@ impl EarlyLintPass for NonExpressiveNames {
             ..
         }) = item.kind
         {
-            do_check(self, cx, &item.attrs, &sig.decl, blk);
+            do_check(*self, cx, &item.attrs, &sig.decl, blk);
         }
     }
 }
 
-fn do_check(lint: &mut NonExpressiveNames, cx: &EarlyContext<'_>, attrs: &[Attribute], decl: &FnDecl, blk: &Block) {
+fn do_check(lint: NonExpressiveNames, cx: &EarlyContext<'_>, attrs: &[Attribute], decl: &FnDecl, blk: &Block) {
     if !attrs.iter().any(|attr| attr.has_name(sym::test)) {
         let mut visitor = SimilarNamesLocalVisitor {
             names: Vec::new(),

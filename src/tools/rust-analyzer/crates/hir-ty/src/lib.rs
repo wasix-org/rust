@@ -1,18 +1,16 @@
 //! The type system. We currently use this to infer types for completion, hover
 //! information and various assists.
-
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
+#![cfg_attr(feature = "in-rust-tree", feature(rustc_private))]
 
 #[allow(unused)]
 macro_rules! eprintln {
     ($($tt:tt)*) => { stdx::eprintln!($($tt)*) };
 }
 
-mod autoderef;
 mod builder;
 mod chalk_db;
 mod chalk_ext;
-pub mod consteval;
 mod infer;
 mod inhabitedness;
 mod interner;
@@ -20,57 +18,70 @@ mod lower;
 mod mapping;
 mod tls;
 mod utils;
+
+pub mod autoderef;
+pub mod consteval;
 pub mod db;
 pub mod diagnostics;
 pub mod display;
+pub mod lang_items;
+pub mod layout;
 pub mod method_resolution;
+pub mod mir;
 pub mod primitive;
 pub mod traits;
-pub mod layout;
-pub mod lang_items;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod test_db;
 
-use std::sync::Arc;
+use std::{
+    collections::hash_map::Entry,
+    hash::{BuildHasherDefault, Hash},
+};
 
 use chalk_ir::{
     fold::{Shift, TypeFoldable},
     interner::HasInterner,
     visit::{TypeSuperVisitable, TypeVisitable, TypeVisitor},
-    NoSolution, TyData,
+    NoSolution,
 };
-use hir_def::{expr::ExprId, type_ref::Rawness, TypeOrConstParamId};
+use either::Either;
+use hir_def::{hir::ExprId, type_ref::Rawness, GeneralConstId, TypeOrConstParamId};
 use hir_expand::name;
-use itertools::Either;
 use la_arena::{Arena, Idx};
-use rustc_hash::FxHashSet;
+use mir::{MirEvalError, VTableMap};
+use rustc_hash::{FxHashMap, FxHashSet};
+use syntax::ast::{make, ConstArg};
 use traits::FnTrait;
+use triomphe::Arc;
 use utils::Generics;
 
 use crate::{
-    consteval::unknown_const, db::HirDatabase, infer::unify::InferenceTable, utils::generics,
+    consteval::unknown_const, db::HirDatabase, display::HirDisplay, infer::unify::InferenceTable,
+    utils::generics,
 };
 
 pub use autoderef::autoderef;
 pub use builder::{ParamKind, TyBuilder};
 pub use chalk_ext::*;
 pub use infer::{
+    closure::{CaptureKind, CapturedItem},
     could_coerce, could_unify, Adjust, Adjustment, AutoBorrow, BindingMode, InferenceDiagnostic,
     InferenceResult, OverloadedDeref, PointerCast,
 };
 pub use interner::Interner;
 pub use lower::{
-    associated_type_shorthand_candidates, CallableDefId, ImplTraitLoweringMode, TyDefId,
-    TyLoweringContext, ValueTyDefId,
+    associated_type_shorthand_candidates, CallableDefId, ImplTraitLoweringMode, ParamLoweringMode,
+    TyDefId, TyLoweringContext, ValueTyDefId,
 };
 pub use mapping::{
     from_assoc_type_id, from_chalk_trait_id, from_foreign_def_id, from_placeholder_idx,
     lt_from_placeholder_idx, to_assoc_type_id, to_chalk_trait_id, to_foreign_def_id,
     to_placeholder_idx,
 };
+pub use method_resolution::check_orphan_rules;
 pub use traits::TraitEnvironment;
 pub use utils::{all_super_traits, is_fn_unsafe_to_call};
 
@@ -111,7 +122,7 @@ pub type TyKind = chalk_ir::TyKind<Interner>;
 pub type TypeFlags = chalk_ir::TypeFlags;
 pub type DynTy = chalk_ir::DynTy<Interner>;
 pub type FnPointer = chalk_ir::FnPointer<Interner>;
-// pub type FnSubst = chalk_ir::FnSubst<Interner>;
+// pub type FnSubst = chalk_ir::FnSubst<Interner>; // a re-export so we don't lose the tuple constructor
 pub use chalk_ir::FnSubst;
 pub type ProjectionTy = chalk_ir::ProjectionTy<Interner>;
 pub type AliasTy = chalk_ir::AliasTy<Interner>;
@@ -141,9 +152,125 @@ pub type DomainGoal = chalk_ir::DomainGoal<Interner>;
 pub type Goal = chalk_ir::Goal<Interner>;
 pub type AliasEq = chalk_ir::AliasEq<Interner>;
 pub type Solution = chalk_solve::Solution<Interner>;
+pub type Constraint = chalk_ir::Constraint<Interner>;
+pub type Constraints = chalk_ir::Constraints<Interner>;
 pub type ConstrainedSubst = chalk_ir::ConstrainedSubst<Interner>;
 pub type Guidance = chalk_solve::Guidance<Interner>;
 pub type WhereClause = chalk_ir::WhereClause<Interner>;
+
+pub type CanonicalVarKind = chalk_ir::CanonicalVarKind<Interner>;
+pub type GoalData = chalk_ir::GoalData<Interner>;
+pub type Goals = chalk_ir::Goals<Interner>;
+pub type ProgramClauseData = chalk_ir::ProgramClauseData<Interner>;
+pub type ProgramClause = chalk_ir::ProgramClause<Interner>;
+pub type ProgramClauses = chalk_ir::ProgramClauses<Interner>;
+pub type TyData = chalk_ir::TyData<Interner>;
+pub type Variances = chalk_ir::Variances<Interner>;
+
+/// A constant can have reference to other things. Memory map job is holding
+/// the necessary bits of memory of the const eval session to keep the constant
+/// meaningful.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum MemoryMap {
+    #[default]
+    Empty,
+    Simple(Box<[u8]>),
+    Complex(Box<ComplexMemoryMap>),
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ComplexMemoryMap {
+    memory: FxHashMap<usize, Box<[u8]>>,
+    vtable: VTableMap,
+}
+
+impl ComplexMemoryMap {
+    fn insert(&mut self, addr: usize, val: Box<[u8]>) {
+        match self.memory.entry(addr) {
+            Entry::Occupied(mut e) => {
+                if e.get().len() < val.len() {
+                    e.insert(val);
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(val);
+            }
+        }
+    }
+}
+
+impl MemoryMap {
+    pub fn vtable_ty(&self, id: usize) -> Result<&Ty, MirEvalError> {
+        match self {
+            MemoryMap::Empty | MemoryMap::Simple(_) => Err(MirEvalError::InvalidVTableId(id)),
+            MemoryMap::Complex(cm) => cm.vtable.ty(id),
+        }
+    }
+
+    fn simple(v: Box<[u8]>) -> Self {
+        MemoryMap::Simple(v)
+    }
+
+    /// This functions convert each address by a function `f` which gets the byte intervals and assign an address
+    /// to them. It is useful when you want to load a constant with a memory map in a new memory. You can pass an
+    /// allocator function as `f` and it will return a mapping of old addresses to new addresses.
+    fn transform_addresses(
+        &self,
+        mut f: impl FnMut(&[u8], usize) -> Result<usize, MirEvalError>,
+    ) -> Result<FxHashMap<usize, usize>, MirEvalError> {
+        let mut transform = |(addr, val): (&usize, &Box<[u8]>)| {
+            let addr = *addr;
+            let align = if addr == 0 { 64 } else { (addr - (addr & (addr - 1))).min(64) };
+            f(val, align).and_then(|it| Ok((addr, it)))
+        };
+        match self {
+            MemoryMap::Empty => Ok(Default::default()),
+            MemoryMap::Simple(m) => transform((&0, m)).map(|(addr, val)| {
+                let mut map = FxHashMap::with_capacity_and_hasher(1, BuildHasherDefault::default());
+                map.insert(addr, val);
+                map
+            }),
+            MemoryMap::Complex(cm) => cm.memory.iter().map(transform).collect(),
+        }
+    }
+
+    fn get(&self, addr: usize, size: usize) -> Option<&[u8]> {
+        if size == 0 {
+            Some(&[])
+        } else {
+            match self {
+                MemoryMap::Empty => Some(&[]),
+                MemoryMap::Simple(m) if addr == 0 => m.get(0..size),
+                MemoryMap::Simple(_) => None,
+                MemoryMap::Complex(cm) => cm.memory.get(&addr)?.get(0..size),
+            }
+        }
+    }
+}
+
+/// A concrete constant value
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstScalar {
+    Bytes(Box<[u8]>, MemoryMap),
+    // FIXME: this is a hack to get around chalk not being able to represent unevaluatable
+    // constants
+    UnevaluatedConst(GeneralConstId, Substitution),
+    /// Case of an unknown value that rustc might know but we don't
+    // FIXME: this is a hack to get around chalk not being able to represent unevaluatable
+    // constants
+    // https://github.com/rust-lang/rust-analyzer/pull/8813#issuecomment-840679177
+    // https://rust-lang.zulipchat.com/#narrow/stream/144729-wg-traits/topic/Handling.20non.20evaluatable.20constants'.20equality/near/238386348
+    Unknown,
+}
+
+impl Hash for ConstScalar {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        if let ConstScalar::Bytes(b, _) = self {
+            b.hash(state)
+        }
+    }
+}
 
 /// Return an index of a parameter in the generic type parameter list by it's id.
 pub fn param_idx(db: &dyn HirDatabase, id: TypeOrConstParamId) -> Option<usize> {
@@ -238,16 +365,17 @@ impl CallableSig {
     pub fn from_fn_ptr(fn_ptr: &FnPointer) -> CallableSig {
         CallableSig {
             // FIXME: what to do about lifetime params? -> return PolyFnSig
-            params_and_return: fn_ptr
-                .substitution
-                .clone()
-                .shifted_out_to(Interner, DebruijnIndex::ONE)
-                .expect("unexpected lifetime vars in fn ptr")
-                .0
-                .as_slice(Interner)
-                .iter()
-                .map(|arg| arg.assert_ty_ref(Interner).clone())
-                .collect(),
+            params_and_return: Arc::from_iter(
+                fn_ptr
+                    .substitution
+                    .clone()
+                    .shifted_out_to(Interner, DebruijnIndex::ONE)
+                    .expect("unexpected lifetime vars in fn ptr")
+                    .0
+                    .as_slice(Interner)
+                    .iter()
+                    .map(|arg| arg.assert_ty_ref(Interner).clone()),
+            ),
             is_varargs: fn_ptr.sig.variadic,
             safety: fn_ptr.sig.safety,
         }
@@ -531,15 +659,19 @@ where
 }
 
 pub fn callable_sig_from_fnonce(
-    self_ty: &Ty,
+    mut self_ty: &Ty,
     env: Arc<TraitEnvironment>,
     db: &dyn HirDatabase,
 ) -> Option<CallableSig> {
+    if let Some((ty, _, _)) = self_ty.as_reference() {
+        // This will happen when it implements fn or fn mut, since we add a autoborrow adjustment
+        self_ty = ty;
+    }
     let krate = env.krate;
     let fn_once_trait = FnTrait::FnOnce.get_id(db, krate)?;
     let output_assoc_type = db.trait_data(fn_once_trait).associated_type_by_name(&name![Output])?;
 
-    let mut table = InferenceTable::new(db, env.clone());
+    let mut table = InferenceTable::new(db, env);
     let b = TyBuilder::trait_ref(db, fn_once_trait);
     if b.remaining() != 2 {
         return None;
@@ -631,4 +763,17 @@ where
     let mut collector = PlaceholderCollector { db, placeholders: FxHashSet::default() };
     value.visit_with(&mut collector, DebruijnIndex::INNERMOST);
     collector.placeholders.into_iter().collect()
+}
+
+pub fn known_const_to_ast(konst: &Const, db: &dyn HirDatabase) -> Option<ConstArg> {
+    if let ConstValue::Concrete(c) = &konst.interned().value {
+        match c.interned {
+            ConstScalar::UnevaluatedConst(GeneralConstId::InTypeConstId(cid), _) => {
+                return Some(cid.source(db.upcast()));
+            }
+            ConstScalar::Unknown => return None,
+            _ => (),
+        }
+    }
+    Some(make::expr_const_value(konst.display(db).to_string().as_str()))
 }

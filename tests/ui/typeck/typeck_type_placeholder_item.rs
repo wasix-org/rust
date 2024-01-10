@@ -190,23 +190,24 @@ trait Qux {
     type B = _;
     //~^ ERROR the placeholder `_` is not allowed within types on item signatures for associated types
     const C: _;
-    //~^ ERROR the placeholder `_` is not allowed within types on item signatures for constants
+    //~^ ERROR the placeholder `_` is not allowed within types on item signatures for associated constants
     const D: _ = 42;
-    //~^ ERROR the placeholder `_` is not allowed within types on item signatures for constants
+    //~^ ERROR the placeholder `_` is not allowed within types on item signatures for associated constants
     // type E: _; // FIXME: make the parser propagate the existence of `B`
     type F: std::ops::Fn(_);
     //~^ ERROR the placeholder `_` is not allowed within types on item signatures for associated types
 }
 impl Qux for Struct {
+    //~^ ERROR: not all trait items implemented, missing: `F`
     type A = _;
     //~^ ERROR the placeholder `_` is not allowed within types on item signatures for associated types
     type B = _;
     //~^ ERROR the placeholder `_` is not allowed within types on item signatures for associated types
     const C: _;
-    //~^ ERROR the placeholder `_` is not allowed within types on item signatures for constants
+    //~^ ERROR the placeholder `_` is not allowed within types on item signatures for associated constants
     //~| ERROR associated constant in `impl` without body
     const D: _ = 42;
-    //~^ ERROR the placeholder `_` is not allowed within types on item signatures for constants
+    //~^ ERROR the placeholder `_` is not allowed within types on item signatures for associated constants
 }
 
 fn map<T>(_: fn() -> Option<&'static T>) -> Option<T> {
@@ -227,6 +228,4 @@ fn evens_squared(n: usize) -> _ {
 }
 
 const _: _ = (1..10).filter(|x| x % 2 == 0).map(|x| x * x);
-//~^ ERROR the trait bound
-//~| ERROR the trait bound
-//~| ERROR the placeholder
+//~^ ERROR the placeholder

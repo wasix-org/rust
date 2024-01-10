@@ -1,3 +1,4 @@
+use core::ptr::NonNull;
 use test::black_box;
 use test::Bencher;
 
@@ -90,7 +91,7 @@ fn binary_search_l3_worst_case(b: &mut Bencher) {
 }
 
 #[derive(Clone)]
-struct Rgb(u8, u8, u8);
+struct Rgb(#[allow(dead_code)] u8, #[allow(dead_code)] u8, #[allow(dead_code)] u8);
 
 impl Rgb {
     fn gen(i: usize) -> Self {
@@ -153,7 +154,7 @@ swap_with_slice!(swap_with_slice_5x_usize_3000, 3000, |i| [i; 5]);
 #[bench]
 fn fill_byte_sized(b: &mut Bencher) {
     #[derive(Copy, Clone)]
-    struct NewType(u8);
+    struct NewType(#[allow(dead_code)] u8);
 
     let mut ary = [NewType(0); 1024];
 
@@ -161,4 +162,12 @@ fn fill_byte_sized(b: &mut Bencher) {
         let slice = &mut ary[..];
         black_box(slice.fill(black_box(NewType(42))));
     });
+}
+
+// Tests the ability of the compiler to recognize that only the last slice item is needed
+// based on issue #106288
+#[bench]
+fn fold_to_last(b: &mut Bencher) {
+    let slice: &[i32] = &[0; 1024];
+    b.iter(|| black_box(slice).iter().fold(None, |_, r| Some(NonNull::from(r))));
 }

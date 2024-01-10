@@ -48,6 +48,7 @@ pub(crate) fn qualify_method_call(acc: &mut Assists, ctx: &AssistContext<'_>) ->
         ctx.sema.db,
         item_for_path_search(ctx.sema.db, item_in_ns)?,
         ctx.config.prefer_no_std,
+        ctx.config.prefer_prelude,
     )?;
 
     let qualify_candidate = QualifyCandidate::ImplMethod(ctx.sema.db, call, resolved_call);
@@ -507,7 +508,7 @@ fn main() {
     }
 
     #[test]
-    fn struct_method_over_stuct_instance() {
+    fn struct_method_over_struct_instance() {
         check_assist_not_applicable(
             qualify_method_call,
             r#"
@@ -525,7 +526,7 @@ fn main() {
     }
 
     #[test]
-    fn trait_method_over_stuct_instance() {
+    fn trait_method_over_struct_instance() {
         check_assist_not_applicable(
             qualify_method_call,
             r#"

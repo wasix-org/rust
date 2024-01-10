@@ -2,13 +2,12 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use rustc_ast::token::TokenKind;
-use rustc_ast::{ast, ptr};
+use rustc_ast::{ast, attr, ptr};
 use rustc_errors::Diagnostic;
 use rustc_parse::{new_parser_from_file, parser::Parser as RawParser};
 use rustc_span::{sym, Span};
 use thin_vec::ThinVec;
 
-use crate::attr::first_attr_value_str_by_name;
 use crate::parse::session::ParseSess;
 use crate::Input;
 
@@ -93,7 +92,7 @@ pub(crate) enum ParserError {
 
 impl<'a> Parser<'a> {
     pub(crate) fn submod_path_from_attr(attrs: &[ast::Attribute], path: &Path) -> Option<PathBuf> {
-        let path_sym = first_attr_value_str_by_name(attrs, sym::path)?;
+        let path_sym = attr::first_attr_value_str_by_name(attrs, sym::path)?;
         let path_str = path_sym.as_str();
 
         // On windows, the base path might have the form
@@ -115,7 +114,7 @@ impl<'a> Parser<'a> {
             let mut parser = new_parser_from_file(sess.inner(), path, Some(span));
             match parser.parse_mod(&TokenKind::Eof) {
                 Ok((a, i, spans)) => Some((a, i, spans.inner_span)),
-                Err(mut e) => {
+                Err(e) => {
                     e.emit();
                     if sess.can_reset_errors() {
                         sess.reset_errors();
@@ -166,7 +165,7 @@ impl<'a> Parser<'a> {
 
         match catch_unwind(move || parser.parse_crate_mod()) {
             Ok(Ok(k)) => Ok(k),
-            Ok(Err(mut db)) => {
+            Ok(Err(db)) => {
                 db.emit();
                 Err(ParserError::ParseError)
             }

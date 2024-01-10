@@ -1,18 +1,19 @@
 //! A lowering for `use`-paths (more generally, paths without angle-bracketed segments).
 
 use std::{
-    fmt::{self, Display},
+    fmt::{self, Display as _},
     iter,
 };
 
 use crate::{
-    db::AstDatabase,
-    hygiene::Hygiene,
-    name::{known, Name},
+    db::ExpandDatabase,
+    hygiene::{marks_rev, SyntaxContextExt, Transparency},
+    name::{known, AsName, Name},
+    span_map::SpanMapRef,
 };
 use base_db::CrateId;
-use either::Either;
 use smallvec::SmallVec;
+use span::SyntaxContextId;
 use syntax::{ast, AstNode};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -24,6 +25,12 @@ pub struct ModPath {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UnescapedModPath<'a>(&'a ModPath);
 
+impl<'a> UnescapedModPath<'a> {
+    pub fn display(&'a self, db: &'a dyn crate::db::ExpandDatabase) -> impl fmt::Display + 'a {
+        UnescapedDisplay { db, path: self }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PathKind {
     Plain,
@@ -32,13 +39,18 @@ pub enum PathKind {
     Crate,
     /// Absolute path (::foo)
     Abs,
+    // FIXME: Remove this
     /// `$crate` from macro expansion
     DollarCrate(CrateId),
 }
 
 impl ModPath {
-    pub fn from_src(db: &dyn AstDatabase, path: ast::Path, hygiene: &Hygiene) -> Option<ModPath> {
-        convert_path(db, None, path, hygiene)
+    pub fn from_src(
+        db: &dyn ExpandDatabase,
+        path: ast::Path,
+        span_map: SpanMapRef<'_>,
+    ) -> Option<ModPath> {
+        convert_path(db, None, path, span_map)
     }
 
     pub fn from_segments(kind: PathKind, segments: impl IntoIterator<Item = Name>) -> ModPath {
@@ -106,52 +118,30 @@ impl ModPath {
         UnescapedModPath(self)
     }
 
-    fn _fmt(&self, f: &mut fmt::Formatter<'_>, escaped: bool) -> fmt::Result {
-        let mut first_segment = true;
-        let mut add_segment = |s| -> fmt::Result {
-            if !first_segment {
-                f.write_str("::")?;
-            }
-            first_segment = false;
-            f.write_str(s)?;
-            Ok(())
-        };
-        match self.kind {
-            PathKind::Plain => {}
-            PathKind::Super(0) => add_segment("self")?,
-            PathKind::Super(n) => {
-                for _ in 0..n {
-                    add_segment("super")?;
-                }
-            }
-            PathKind::Crate => add_segment("crate")?,
-            PathKind::Abs => add_segment("")?,
-            PathKind::DollarCrate(_) => add_segment("$crate")?,
-        }
-        for segment in &self.segments {
-            if !first_segment {
-                f.write_str("::")?;
-            }
-            first_segment = false;
-            if escaped {
-                segment.fmt(f)?
-            } else {
-                segment.unescaped().fmt(f)?
-            };
-        }
-        Ok(())
+    pub fn display<'a>(&'a self, db: &'a dyn crate::db::ExpandDatabase) -> impl fmt::Display + 'a {
+        Display { db, path: self }
     }
 }
 
-impl Display for ModPath {
+struct Display<'a> {
+    db: &'a dyn ExpandDatabase,
+    path: &'a ModPath,
+}
+
+impl fmt::Display for Display<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self._fmt(f, true)
+        display_fmt_path(self.db, self.path, f, true)
     }
 }
 
-impl<'a> Display for UnescapedModPath<'a> {
+struct UnescapedDisplay<'a> {
+    db: &'a dyn ExpandDatabase,
+    path: &'a UnescapedModPath<'a>,
+}
+
+impl fmt::Display for UnescapedDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0._fmt(f, false)
+        display_fmt_path(self.db, self.path.0, f, false)
     }
 }
 
@@ -160,38 +150,81 @@ impl From<Name> for ModPath {
         ModPath::from_segments(PathKind::Plain, iter::once(name))
     }
 }
+fn display_fmt_path(
+    db: &dyn ExpandDatabase,
+    path: &ModPath,
+    f: &mut fmt::Formatter<'_>,
+    escaped: bool,
+) -> fmt::Result {
+    let mut first_segment = true;
+    let mut add_segment = |s| -> fmt::Result {
+        if !first_segment {
+            f.write_str("::")?;
+        }
+        first_segment = false;
+        f.write_str(s)?;
+        Ok(())
+    };
+    match path.kind {
+        PathKind::Plain => {}
+        PathKind::Super(0) => add_segment("self")?,
+        PathKind::Super(n) => {
+            for _ in 0..n {
+                add_segment("super")?;
+            }
+        }
+        PathKind::Crate => add_segment("crate")?,
+        PathKind::Abs => add_segment("")?,
+        PathKind::DollarCrate(_) => add_segment("$crate")?,
+    }
+    for segment in &path.segments {
+        if !first_segment {
+            f.write_str("::")?;
+        }
+        first_segment = false;
+        if escaped {
+            segment.display(db).fmt(f)?;
+        } else {
+            segment.unescaped().display(db).fmt(f)?;
+        }
+    }
+    Ok(())
+}
 
 fn convert_path(
-    db: &dyn AstDatabase,
+    db: &dyn ExpandDatabase,
     prefix: Option<ModPath>,
     path: ast::Path,
-    hygiene: &Hygiene,
+    span_map: SpanMapRef<'_>,
 ) -> Option<ModPath> {
     let prefix = match path.qualifier() {
-        Some(qual) => Some(convert_path(db, prefix, qual, hygiene)?),
+        Some(qual) => Some(convert_path(db, prefix, qual, span_map)?),
         None => prefix,
     };
 
     let segment = path.segment()?;
     let mut mod_path = match segment.kind()? {
         ast::PathSegmentKind::Name(name_ref) => {
-            match hygiene.name_ref_to_name(db, name_ref) {
-                Either::Left(name) => {
-                    // no type args in use
-                    let mut res = prefix.unwrap_or_else(|| {
-                        ModPath::from_kind(
-                            segment.coloncolon_token().map_or(PathKind::Plain, |_| PathKind::Abs),
-                        )
-                    });
-                    res.segments.push(name);
-                    res
+            if name_ref.text() == "$crate" {
+                if prefix.is_some() {
+                    return None;
                 }
-                Either::Right(crate_id) => {
-                    return Some(ModPath::from_segments(
-                        PathKind::DollarCrate(crate_id),
-                        iter::empty(),
-                    ))
-                }
+                ModPath::from_kind(
+                    resolve_crate_root(
+                        db,
+                        span_map.span_for_range(name_ref.syntax().text_range()).ctx,
+                    )
+                    .map(PathKind::DollarCrate)
+                    .unwrap_or(PathKind::Crate),
+                )
+            } else {
+                let mut res = prefix.unwrap_or_else(|| {
+                    ModPath::from_kind(
+                        segment.coloncolon_token().map_or(PathKind::Plain, |_| PathKind::Abs),
+                    )
+                });
+                res.segments.push(name_ref.as_name());
+                res
             }
         }
         ast::PathSegmentKind::SelfTypeKw => {
@@ -233,13 +266,42 @@ fn convert_path(
     // We follow what it did anyway :)
     if mod_path.segments.len() == 1 && mod_path.kind == PathKind::Plain {
         if let Some(_macro_call) = path.syntax().parent().and_then(ast::MacroCall::cast) {
-            if let Some(crate_id) = hygiene.local_inner_macros(db, path) {
-                mod_path.kind = PathKind::DollarCrate(crate_id);
+            let syn_ctx = span_map.span_for_range(segment.syntax().text_range()).ctx;
+            if let Some(macro_call_id) = db.lookup_intern_syntax_context(syn_ctx).outer_expn {
+                if db.lookup_intern_macro_call(macro_call_id).def.local_inner {
+                    mod_path.kind = match resolve_crate_root(db, syn_ctx) {
+                        Some(crate_root) => PathKind::DollarCrate(crate_root),
+                        None => PathKind::Crate,
+                    }
+                }
             }
         }
     }
 
     Some(mod_path)
+}
+
+pub fn resolve_crate_root(db: &dyn ExpandDatabase, mut ctxt: SyntaxContextId) -> Option<CrateId> {
+    // When resolving `$crate` from a `macro_rules!` invoked in a `macro`,
+    // we don't want to pretend that the `macro_rules!` definition is in the `macro`
+    // as described in `SyntaxContext::apply_mark`, so we ignore prepended opaque marks.
+    // FIXME: This is only a guess and it doesn't work correctly for `macro_rules!`
+    // definitions actually produced by `macro` and `macro` definitions produced by
+    // `macro_rules!`, but at least such configurations are not stable yet.
+    ctxt = ctxt.normalize_to_macro_rules(db);
+    let mut iter = marks_rev(ctxt, db).peekable();
+    let mut result_mark = None;
+    // Find the last opaque mark from the end if it exists.
+    while let Some(&(mark, Transparency::Opaque)) = iter.peek() {
+        result_mark = Some(mark);
+        iter.next();
+    }
+    // Then find the last semi-transparent mark from the end if it exists.
+    while let Some((mark, Transparency::SemiTransparent)) = iter.next() {
+        result_mark = Some(mark);
+    }
+
+    result_mark.flatten().map(|call| db.lookup_intern_macro_call(call.into()).def.krate)
 }
 
 pub use crate::name as __name;

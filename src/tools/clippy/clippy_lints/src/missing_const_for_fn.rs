@@ -1,5 +1,5 @@
+use clippy_config::msrvs::{self, Msrv};
 use clippy_utils::diagnostics::span_lint;
-use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::qualify_min_const_fn::is_min_const_fn;
 use clippy_utils::ty::has_drop;
 use clippy_utils::{fn_has_unsatisfiable_preds, is_entrypoint_fn, is_from_proc_macro, trait_ref_of_method};
@@ -7,10 +7,9 @@ use rustc_hir as hir;
 use rustc_hir::def_id::CRATE_DEF_ID;
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{Body, Constness, FnDecl, GenericParamKind};
-use rustc_hir_analysis::hir_ty_to_ty;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_session::impl_lint_pass;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::Span;
 
@@ -28,7 +27,7 @@ declare_clippy_lint! {
     ///
     /// Also, the lint only runs one pass over the code. Consider these two non-const functions:
     ///
-    /// ```rust
+    /// ```no_run
     /// fn a() -> i32 {
     ///     0
     /// }
@@ -41,8 +40,9 @@ declare_clippy_lint! {
     /// can't be const as it calls a non-const function. Making `a` const and running Clippy again,
     /// will suggest to make `b` const, too.
     ///
+    /// If you are marking a public function with `const`, removing it again will break API compatibility.
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # struct Foo {
     /// #     random_number: usize,
     /// # }
@@ -55,7 +55,7 @@ declare_clippy_lint! {
     ///
     /// Could be a const fn:
     ///
-    /// ```rust
+    /// ```no_run
     /// # struct Foo {
     /// #     random_number: usize,
     /// # }
@@ -123,7 +123,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingConstForFn {
             FnKind::Method(_, sig, ..) => {
                 if trait_ref_of_method(cx, def_id).is_some()
                     || already_const(sig.header)
-                    || method_accepts_droppable(cx, sig.decl.inputs)
+                    || method_accepts_droppable(cx, def_id)
                 {
                     return;
                 }
@@ -131,13 +131,13 @@ impl<'tcx> LateLintPass<'tcx> for MissingConstForFn {
             FnKind::Closure => return,
         }
 
-        let hir_id = cx.tcx.hir().local_def_id_to_hir_id(def_id);
+        let hir_id = cx.tcx.local_def_id_to_hir_id(def_id);
 
         // Const fns are not allowed as methods in a trait.
         {
             let parent = cx.tcx.hir().get_parent_item(hir_id).def_id;
             if parent != CRATE_DEF_ID {
-                if let hir::Node::Item(item) = cx.tcx.hir().get_by_def_id(parent) {
+                if let hir::Node::Item(item) = cx.tcx.hir_node_by_def_id(parent) {
                     if let hir::ItemKind::Trait(..) = &item.kind {
                         return;
                     }
@@ -153,7 +153,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingConstForFn {
 
         if let Err((span, err)) = is_min_const_fn(cx.tcx, mir, &self.msrv) {
             if cx.tcx.is_const_fn_raw(def_id.to_def_id()) {
-                cx.tcx.sess.span_err(span, err.as_ref());
+                cx.tcx.dcx().span_err(span, err);
             }
         } else {
             span_lint(cx, MISSING_CONST_FOR_FN, span, "this could be a `const fn`");
@@ -164,12 +164,11 @@ impl<'tcx> LateLintPass<'tcx> for MissingConstForFn {
 
 /// Returns true if any of the method parameters is a type that implements `Drop`. The method
 /// can't be made const then, because `drop` can't be const-evaluated.
-fn method_accepts_droppable(cx: &LateContext<'_>, param_tys: &[hir::Ty<'_>]) -> bool {
+fn method_accepts_droppable(cx: &LateContext<'_>, def_id: LocalDefId) -> bool {
+    let sig = cx.tcx.fn_sig(def_id).instantiate_identity().skip_binder();
+
     // If any of the params are droppable, return true
-    param_tys.iter().any(|hir_ty| {
-        let ty_ty = hir_ty_to_ty(cx.tcx, hir_ty);
-        has_drop(cx, ty_ty)
-    })
+    sig.inputs().iter().any(|&ty| has_drop(cx, ty))
 }
 
 // We don't have to lint on something that's already `const`

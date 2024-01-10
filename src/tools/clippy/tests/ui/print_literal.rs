@@ -25,17 +25,44 @@ fn main() {
 
     // these should throw warnings
     print!("Hello {}", "world");
+    //~^ ERROR: literal with an empty format string
+    //~| NOTE: `-D clippy::print-literal` implied by `-D warnings`
     println!("Hello {} {}", world, "world");
+    //~^ ERROR: literal with an empty format string
     println!("Hello {}", "world");
+    //~^ ERROR: literal with an empty format string
     println!("{} {:.4}", "a literal", 5);
+    //~^ ERROR: literal with an empty format string
 
     // positional args don't change the fact
     // that we're using a literal -- this should
     // throw a warning
     println!("{0} {1}", "hello", "world");
+    //~^ ERROR: literal with an empty format string
     println!("{1} {0}", "hello", "world");
+    //~^ ERROR: literal with an empty format string
 
     // named args shouldn't change anything either
     println!("{foo} {bar}", foo = "hello", bar = "world");
+    //~^ ERROR: literal with an empty format string
     println!("{bar} {foo}", foo = "hello", bar = "world");
+    //~^ ERROR: literal with an empty format string
+
+    // The string literal from `file!()` has a callsite span that isn't marked as coming from an
+    // expansion
+    println!("file: {}", file!());
+
+    // Braces in unicode escapes should not be escaped
+    println!("{}", "{} \x00 \u{ab123} \\\u{ab123} {:?}");
+    println!("{}", "\\\u{1234}");
+    // This does not lint because it would have to suggest unescaping the character
+    println!(r"{}", "\u{ab123}");
+    // These are not unicode escapes
+    println!("{}", r"\u{ab123} \u{{");
+    println!(r"{}", r"\u{ab123} \u{{");
+    println!("{}", r"\{ab123} \u{{");
+    println!("{}", "\\u{ab123}");
+    println!("{}", "\\\\u{1234}");
+
+    println!("mixed: {} {world}", "{hello}");
 }
