@@ -1,11 +1,10 @@
 //! 64-bit WebAssembly target with a full operating system based on WASI
 //!
 
-use super::wasm_base;
-use super::{crt_objects::{self, LinkSelfContainedDefault}, Cc, LinkerFlavor, Target};
+use crate::spec::{base, crt_objects, Cc, LinkerFlavor, Target, LinkSelfContainedDefault};
 
 pub fn target() -> Target {
-    let mut options = wasm_base::options();
+    let mut options = base::wasm::options();
     options.os = "wasi".into();
     options.vendor = "wasmer".into();
     options.add_pre_link_args(LinkerFlavor::WasmLld(Cc::No), &["-mwasm64"]);
