@@ -26,11 +26,23 @@ fn sun_path_offset(addr: &sockaddr_un) -> usize {
 /// An address associated with a Unix socket.
 ///
 /// Not currently supported on this platform
-#[derive(Clone)]
 #[stable(feature = "unix_socket", since = "1.10.0")]
 pub struct SocketAddr {
     pub(super) addr: sockaddr_un,
     pub(super) len: libc::socklen_t,
+}
+
+#[stable(feature = "unix_socket", since = "1.10.0")]
+impl core::clone::Clone for SocketAddr {
+    fn clone(&self) -> Self {
+        SocketAddr {
+            addr: sockaddr_un {
+                sun_family: self.addr.sun_family,
+                sun_path: self.addr.sun_path,
+            },
+            len: self.len,
+        }
+    }
 }
 
 impl SocketAddr {

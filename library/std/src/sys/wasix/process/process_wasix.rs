@@ -204,6 +204,19 @@ impl Process {
 #[derive(Clone, Copy)]
 pub struct ExitStatus(JoinStatus);
 
+impl Default for ExitStatus {
+    fn default() -> Self {
+        unsafe {
+            ExitStatus(JoinStatus {
+                tag: wasi::JOIN_STATUS_TYPE_NOTHING.raw(),
+                u: wasi::JoinStatusU {
+                    nothing: 0,
+                }
+            })
+        }
+    }
+}
+
 impl PartialEq<ExitStatus> for ExitStatus {
     fn eq(&self, other: &Self) -> bool {
         self.code().eq(&other.code())
@@ -225,7 +238,7 @@ impl fmt::Debug for ExitStatus {
 }
 
 impl ExitStatus {
-    pub fn new(status: JoinStatus) -> ExitStatus {
+    pub(crate) fn new(status: JoinStatus) -> ExitStatus {
         ExitStatus(status)
     }
 
@@ -278,11 +291,12 @@ impl ExitStatus {
         self.code().map(|c| libc::WIFCONTINUED(c)).unwrap_or(false)
     }
 
-    pub fn into_raw(&self) -> JoinStatus {
+    pub(crate) fn into_raw(&self) -> JoinStatus {
         self.0
     }
 }
 
+#[allow(exported_private_dependencies)]
 impl From<JoinStatus> for ExitStatus {
     fn from(s: JoinStatus) -> ExitStatus {
         ExitStatus(s)

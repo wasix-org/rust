@@ -1,5 +1,5 @@
 #![cfg_attr(test, allow(dead_code))]
-#![cfg_attr(target_vendor = "wasmer", allow(dead_code))]
+#![cfg_attr(target_vendor = "wasmer", allow(dead_code, unused))]
 
 use self::imp::{drop_handler, make_handler};
 

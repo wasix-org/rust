@@ -1,6 +1,7 @@
 pub use self::process_common::{Command, CommandArgs, ExitCode, Stdio, StdioPipes};
 pub use self::process_inner::{ExitStatus, ExitStatusError, Process};
 pub use crate::ffi::OsString as EnvKey;
+#[cfg_attr(any(target_os = "wasi"), allow(unused))]
 pub use crate::sys_common::process::CommandEnvs;
 
 #[path = "../../unix/process/process_common.rs"]

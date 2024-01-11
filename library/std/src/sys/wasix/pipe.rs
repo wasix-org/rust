@@ -6,7 +6,7 @@ use crate::sys_common::IntoInner;
 use crate::sys::err2io;
 use crate::io::Read;
 
-pub use crate::sys::{cvt, cvt_r};
+pub use crate::sys::cvt_r;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Anonymous pipes
@@ -29,6 +29,10 @@ pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
 impl AnonPipe {
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.read(&mut [IoSliceMut::new(buf)])
+    }
+
+    pub fn read_buf(&self, buf: io::BorrowedCursor<'_>) -> io::Result<()> {
+        self.0.read_buf(buf)
     }
 
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {

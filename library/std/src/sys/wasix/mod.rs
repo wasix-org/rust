@@ -105,7 +105,6 @@ pub fn hashmap_random_keys() -> (u64, u64) {
 }
 
 pub use super::common::cvt::{
-    IsMinusOne,
     cvt,
     cvt_r
 };

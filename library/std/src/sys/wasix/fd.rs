@@ -50,6 +50,22 @@ impl WasiFd {
         unsafe { wasi::fd_read(self.as_raw_fd() as wasi::Fd, iovec(bufs)).map_err(err2io) }
     }
 
+    pub(crate) fn read_buf(&self, mut buf: io::BorrowedCursor<'_>) -> io::Result<()> {
+        unsafe {
+            let bufs = [wasi::Iovec {
+                buf: buf.as_mut().as_mut_ptr() as *mut u8,
+                buf_len: buf.capacity(),
+            }];
+            match wasi::fd_read(self.as_raw_fd() as wasi::Fd, &bufs) {
+                Ok(n) => {
+                    buf.advance(n);
+                    Ok(())
+                }
+                Err(e) => Err(err2io(e)),
+            }
+        }
+    }
+
     pub(crate) fn write(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         unsafe { wasi::fd_write(self.as_raw_fd() as wasi::Fd, ciovec(bufs)).map_err(err2io) }
     }
