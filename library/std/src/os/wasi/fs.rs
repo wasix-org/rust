@@ -3,7 +3,6 @@
 //! [`std::fs`]: crate::fs
 
 #![deny(unsafe_op_in_unsafe_fn)]
-#![unstable(feature = "wasi_ext", issue = "71213")]
 
 use crate::ffi::OsStr;
 use crate::fs::{self, File, Metadata, OpenOptions};

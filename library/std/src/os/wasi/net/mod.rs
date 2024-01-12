@@ -1,6 +1,5 @@
 //! WASI-specific networking functionality
 
-#![unstable(feature = "wasi_ext", issue = "71213")]
 
 use crate::io;
 use crate::net;
