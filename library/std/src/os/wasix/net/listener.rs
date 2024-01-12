@@ -1,5 +1,6 @@
 //! WASI-specific networking functionality
 
+#![stable(feature = "rust1", since = "1.0.0")]
 #![allow(unused_variables, dead_code)]
 
 use crate::io;
