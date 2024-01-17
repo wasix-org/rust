@@ -7,6 +7,9 @@ use crate::time::Duration;
 ///
 /// Returns false on timeout, and true in all other cases.
 pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<Duration>) -> bool {
+    use crate::sync::atomic::Ordering::Relaxed;
+    use crate::sync::atomic::Ordering::SeqCst;
+
     let timeout = match timeout {
         Some(timeout) => wasi::OptionTimestamp {
             tag: wasi::OPTION_SOME.raw(),
@@ -22,14 +25,22 @@ pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<Duration>) -
         }
     };
 
-    unsafe {
-        match wasi::futex_wait(
-            futex as *const AtomicU32 as *mut u32,
-            expected,
-            &timeout as *const wasi::OptionTimestamp
-        ) {
-            Ok(wasi::BOOL_FALSE) => false,
-            _ => true
+    loop {
+        // No need to wait if the value already changed.
+        if futex.load(Relaxed) != expected {
+            return true;
+        }
+
+        return unsafe {
+            match wasi::futex_wait(
+                futex as *const AtomicU32 as *mut u32,
+                expected,
+                &timeout as *const wasi::OptionTimestamp
+            ) {
+                Ok(wasi::BOOL_FALSE) if futex.load(SeqCst) == expected => false,
+                Err(wasi::ERRNO_INTR) => continue,
+                _ => true
+            }
         }
     }
 }

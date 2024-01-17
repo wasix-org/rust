@@ -46,9 +46,7 @@ pub mod locks {
     pub(crate) use futex_mutex::Mutex;
     pub(crate) use futex_rwlock::RwLock;
 }
-//#[cfg_attr(target_pointer_width = "32", path = "../wasm/atomics/futex.rs")]
-#[cfg_attr(target_pointer_width = "32", path = "atomics/futex.rs")]
-#[cfg_attr(target_pointer_width = "64", path = "atomics/futex.rs")]
+#[path = "atomics/futex.rs"]
 pub mod futex;
 #[path = "../unix/thread.rs"]
 pub mod thread;
