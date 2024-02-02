@@ -4,6 +4,7 @@ cfg_if::cfg_if! {
         target_os = "android",
         all(target_arch = "wasm32", target_feature = "atomics"),
         all(target_vendor = "wasmer", target_os = "wasi"),
+        any(target_arch = "wasix32", target_arch = "wasix64"),
         target_os = "freebsd",
         target_os = "openbsd",
         target_os = "dragonfly",

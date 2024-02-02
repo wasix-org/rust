@@ -15,6 +15,7 @@ use crate::ptr;
     target_arch = "powerpc64",
     target_arch = "sparc",
     target_arch = "wasm32",
+    target_arch = "wasix32",
     target_arch = "hexagon",
     all(target_arch = "riscv32", not(target_os = "espidf")),
     all(target_arch = "xtensa", not(target_os = "espidf")),
@@ -30,6 +31,7 @@ pub const MIN_ALIGN: usize = 8;
     target_arch = "sparc64",
     target_arch = "riscv64",
     target_arch = "wasm64",
+    target_arch = "wasix64"
 ))]
 pub const MIN_ALIGN: usize = 16;
 // The allocator on the esp-idf platform guarantees 4 byte alignment.

@@ -42,7 +42,7 @@ features = [
     "Win32_System_Threading",
 ]
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(not(any(target_arch = "wasm32", target_arch = "wasix32", target_arch = "wasix64")))'.dependencies]
 # tidy-alphabetical-start
 memmap2 = "0.2.1"
 # tidy-alphabetical-end

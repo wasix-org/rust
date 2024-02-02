@@ -25,7 +25,7 @@ where
             target_endian = "little"
         ))]
         use core::arch::arm::{uint8x8_t, vtbl1_u8};
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", target_arch = "wasix32"))]
         use core::arch::wasm32 as wasm;
         #[cfg(target_arch = "x86")]
         use core::arch::x86;

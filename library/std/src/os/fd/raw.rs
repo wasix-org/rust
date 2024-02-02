@@ -8,7 +8,7 @@ use crate::io;
 use crate::os::hermit::io::OwnedFd;
 #[cfg(not(target_os = "hermit"))]
 use crate::os::raw;
-#[cfg(all(doc, not(target_family = "wasm")))]
+#[cfg(all(doc, not(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"))))]
 use crate::os::unix::io::AsFd;
 #[cfg(unix)]
 use crate::os::unix::io::OwnedFd;

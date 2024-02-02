@@ -1,6 +1,7 @@
 use std::env;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(target_arch, values(\"wasix32\",\"wasix64\"))");
     println!("cargo:rerun-if-changed=build.rs");
     let target = env::var("TARGET").expect("TARGET was not set");
     if target.contains("linux")

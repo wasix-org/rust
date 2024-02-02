@@ -1,5 +1,5 @@
 // wasm32 does not support benches (no time).
-#![cfg(not(target_family = "wasm"))]
+#![cfg(not(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64")))]
 #![feature(flt2dec)]
 #![feature(test)]
 #![feature(trusted_random_access)]

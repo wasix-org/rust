@@ -1580,6 +1580,9 @@ supported_targets! {
     ("wasm64-unknown-unknown", wasm64_unknown_unknown),
     ("wasm64-wasmer-wasi", wasm64_wasmer_wasi),
 
+    ("wasix32-unknown-linux-gnu", wasix32_unknown_linux_gnu),
+    ("wasix64-unknown-linux-gnu", wasix64_unknown_linux_gnu),
+
     ("thumbv6m-none-eabi", thumbv6m_none_eabi),
     ("thumbv7m-none-eabi", thumbv7m_none_eabi),
     ("thumbv7em-none-eabi", thumbv7em_none_eabi),

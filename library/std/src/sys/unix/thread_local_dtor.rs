@@ -117,7 +117,7 @@ pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
     target_os = "emscripten",
     target_os = "aix"
 ))]
-#[cfg_attr(target_family = "wasm", allow(unused))] // might remain unused depending on target details (e.g. wasm32-unknown-emscripten)
+#[cfg_attr(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"), allow(unused))] // might remain unused depending on target details (e.g. wasm32-unknown-emscripten)
 pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
     use crate::sys_common::thread_local_dtor::register_dtor_fallback;
     register_dtor_fallback(t, dtor);

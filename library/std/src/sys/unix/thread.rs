@@ -1,4 +1,4 @@
-#![cfg_attr(target_vendor = "wasmer", allow(dead_code))]
+#![cfg_attr(any(target_arch = "wasix32", target_arch = "wasix64", target_vendor = "wasmer"), allow(dead_code))]
 use crate::cmp;
 use crate::ffi::CStr;
 use crate::io;

@@ -32,6 +32,8 @@ pub use self::arch::{blkcnt_t, blksize_t, ino_t, nlink_t, off_t, stat, time_t};
     target_arch = "sparc",
     target_arch = "arm",
     target_family = "wasm",
+    target_arch = "wasix32",
+    target_arch = "wasix64"
 ))]
 mod arch {
     use crate::os::raw::{c_long, c_short, c_uint};

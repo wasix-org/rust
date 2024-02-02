@@ -3,13 +3,13 @@ use std::io;
 use std::ops::{Deref, DerefMut};
 
 /// A trivial wrapper for [`memmap2::Mmap`] (or `Vec<u8>` on WASM).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasix32", target_arch = "wasix64")))]
 pub struct Mmap(memmap2::Mmap);
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"))]
 pub struct Mmap(Vec<u8>);
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(not(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64")))]
 impl Mmap {
     /// # Safety
     ///
@@ -23,7 +23,7 @@ impl Mmap {
     }
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"))]
 impl Mmap {
     #[inline]
     pub unsafe fn map(mut file: File) -> io::Result<Self> {
@@ -50,13 +50,13 @@ impl AsRef<[u8]> for Mmap {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasix32", target_arch = "wasix64")))]
 pub struct MmapMut(memmap2::MmapMut);
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_arch = "wasix32", target_arch = "wasix64"))]
 pub struct MmapMut(Vec<u8>);
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_arch = "wasix32", target_arch = "wasix64")))]
 impl MmapMut {
     #[inline]
     pub fn map_anon(len: usize) -> io::Result<Self> {
@@ -76,7 +76,7 @@ impl MmapMut {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_arch = "wasix32", target_arch = "wasix64"))]
 impl MmapMut {
     #[inline]
     pub fn map_anon(len: usize) -> io::Result<Self> {

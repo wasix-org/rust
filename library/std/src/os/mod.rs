@@ -84,7 +84,7 @@ pub mod linux;
 )))]
 #[cfg(any(all(target_os = "wasi", not(target_vendor = "wasmer")), doc))]
 pub mod wasi;
-#[cfg(any(all(target_os = "wasi", target_vendor = "wasmer")))]
+#[cfg(any(target_arch = "wasix32", target_arch = "wasix64", all(target_os = "wasi", target_vendor = "wasmer")))]
 #[path = "wasix/mod.rs"]
 pub mod wasi;
 #[cfg(any(all(target_os = "wasi", target_vendor = "wasmer")))]

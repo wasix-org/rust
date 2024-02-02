@@ -12,6 +12,8 @@ cfg_if::cfg_if! {
         target_os = "linux",
         target_os = "android",
         all(target_family = "wasm", target_feature = "atomics"),
+        target_arch = "wasix32",
+        target_arch = "wasix64",
         target_os = "freebsd",
         target_os = "openbsd",
         target_os = "dragonfly",

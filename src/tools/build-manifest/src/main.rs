@@ -143,14 +143,13 @@ static TARGETS: &[&str] = &[
     "thumbv8m.main-none-eabihf",
     "wasm32-unknown-emscripten",
     "wasm32-unknown-unknown",
-<<<<<<< HEAD
     "wasm32-unknown-wasi",
     "wasm32-wasmer-wasi",
     "wasm64-wasmer-wasi",
-=======
+    "wasix32-unknown-linux-gnu",
+    "wasix64-unknown-linux-gnu",
     "wasm32-wasi",
     "wasm32-wasi-preview1-threads",
->>>>>>> upstream/master
     "x86_64-apple-darwin",
     "x86_64-apple-ios",
     "x86_64-fortanix-unknown-sgx",

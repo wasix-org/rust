@@ -828,7 +828,7 @@ impl TcpListener {
     pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         // On WASM, `TcpStream` is uninhabited (as it's unsupported) and so
         // the `a` variable here is technically unused.
-        #[cfg_attr(target_family = "wasm", allow(unused_variables))]
+        #[cfg_attr(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"), allow(unused_variables))]
         self.0.accept().map(|(a, b)| (TcpStream(a), b))
     }
     
@@ -852,7 +852,7 @@ impl TcpListener {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn accept_timeout(&self, timeout: crate::time::Duration) -> io::Result<(TcpStream, SocketAddr)> {
-        #[cfg_attr(target_family = "wasm", allow(unused_variables))]
+        #[cfg_attr(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"), allow(unused_variables))]
         self.0.accept_timeout(timeout).map(|(a, b)| (TcpStream(a), b))
     }
 

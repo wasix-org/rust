@@ -1,4 +1,4 @@
-#![cfg(not(target_family = "wasm"))]
+#![cfg(not(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64")))]
 
 use std::mem::MaybeUninit;
 use std::str;

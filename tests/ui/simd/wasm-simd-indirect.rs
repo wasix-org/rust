@@ -1,13 +1,13 @@
 // build-pass
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"))]
 fn main() {
     unsafe {
         a::api_with_simd_feature();
     }
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"))]
 mod a {
     use std::arch::wasm::*;
 
@@ -17,7 +17,7 @@ mod a {
     }
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"))]
 mod b {
     use std::arch::wasm::*;
 
@@ -27,5 +27,5 @@ mod b {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(not(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64")))]
 fn main() {}

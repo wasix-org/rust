@@ -1,7 +1,7 @@
 changelog-seen = 2
 
 [build]
-target = ["wasm32-wasmer-wasi", "wasm64-wasmer-wasi"]
+target = ["wasm32-wasmer-wasi", "wasm64-wasmer-wasi", "wasix32-unknown-linux-gnu", "wasix64-unknown-linux-gnu"]
 extended = true
 tools = [ "clippy", "rustfmt" ]
 configure-args = []
@@ -16,5 +16,11 @@ download-ci-llvm = false
 [target.wasm32-wasmer-wasi]
 wasi-root = "../wasix-libc/sysroot32"
 
+[target.wasix32-unknown-linux-gnu]
+wasi-root = "../wasix-libc/sysroot32"
+
 [target.wasm64-wasmer-wasi]
+wasi-root = "../wasix-libc/sysroot64"
+
+[target.wasix64-unknown-linux-gnu]
 wasi-root = "../wasix-libc/sysroot64"

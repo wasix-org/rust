@@ -5,7 +5,6 @@
 //! backtrace support. The APIs in this module are highly unstable,
 //! and should be considered as private implementation details for the
 //! time being.
-
 #![unstable(
     feature = "rt",
     reason = "this public module should not exist and is highly likely \
@@ -15,7 +14,7 @@
 #![doc(hidden)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(unused_macros)]
-#![cfg_attr(target_vendor = "wasmer", allow(dead_code))]
+#![cfg_attr(any(target_arch = "wasix32", target_arch = "wasix64", target_vendor = "wasmer"), allow(dead_code))]
 
 use crate::ffi::CString;
 

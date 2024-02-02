@@ -15,7 +15,7 @@ trait DisplayInt:
     fn zero() -> Self;
     fn from_u8(u: u8) -> Self;
     fn to_u8(&self) -> u8;
-    #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
+    #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32", target_arch = "wasix32")))]
     fn to_u32(&self) -> u32;
     fn to_u64(&self) -> u64;
     fn to_u128(&self) -> u128;
@@ -27,7 +27,7 @@ macro_rules! impl_int {
           fn zero() -> Self { 0 }
           fn from_u8(u: u8) -> Self { u as Self }
           fn to_u8(&self) -> u8 { *self as u8 }
-          #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
+          #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32", target_arch = "wasix32")))]
           fn to_u32(&self) -> u32 { *self as u32 }
           fn to_u64(&self) -> u64 { *self as u64 }
           fn to_u128(&self) -> u128 { *self as u128 }
@@ -40,7 +40,7 @@ macro_rules! impl_uint {
           fn zero() -> Self { 0 }
           fn from_u8(u: u8) -> Self { u as Self }
           fn to_u8(&self) -> u8 { *self as u8 }
-          #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
+          #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32", target_arch = "wasix32")))]
           fn to_u32(&self) -> u32 { *self as u32 }
           fn to_u64(&self) -> u64 { *self as u64 }
           fn to_u128(&self) -> u128 { *self as u128 }
@@ -465,7 +465,7 @@ macro_rules! impl_Exp {
 
 // Include wasm32 in here since it doesn't reflect the native pointer size, and
 // often cares strongly about getting a smaller code size.
-#[cfg(any(target_pointer_width = "64", target_arch = "wasm32"))]
+#[cfg(any(target_pointer_width = "64", target_arch = "wasm32", target_arch = "wasix32"))]
 mod imp {
     use super::*;
     impl_Display!(
@@ -478,7 +478,7 @@ mod imp {
     );
 }
 
-#[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
+#[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32", target_arch = "wasix32")))]
 mod imp {
     use super::*;
     impl_Display!(i8, u8, i16, u16, i32, u32, isize, usize as u32 via to_u32 named fmt_u32);

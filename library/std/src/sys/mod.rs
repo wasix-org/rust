@@ -26,7 +26,13 @@ pub mod common;
 mod personality;
 
 cfg_if::cfg_if! {
-    if #[cfg(unix)] {
+    if #[cfg(any(target_arch = "wasix32", target_arch = "wasix64"))] {
+        #[path = "wasix/mod.rs"]
+        mod wasi;
+        pub use self::wasi::*;
+        mod unix;
+        pub use self::unix::*;
+    } else if #[cfg(unix)] {
         mod unix;
         pub use self::unix::*;
     } else if #[cfg(windows)] {

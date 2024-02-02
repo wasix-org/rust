@@ -21,7 +21,7 @@ macro_rules! from_transmute {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod x86;
 
-#[cfg(any(target_family = "wasm"))]
+#[cfg(any(target_family = "wasm", target_arch = "wasix32", target_arch = "wasix64"))]
 mod wasm;
 
 #[cfg(any(target_arch = "aarch64", target_arch = "arm",))]
