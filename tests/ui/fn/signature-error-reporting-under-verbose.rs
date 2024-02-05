@@ -1,4 +1,4 @@
-// compile-flags: -Zverbose
+// compile-flags: -Zverbose-internals
 
 fn foo(_: i32, _: i32) {}
 
@@ -12,5 +12,4 @@ fn main() {
     //~| NOTE expected fn pointer, found fn item
     //~| NOTE expected fn pointer `fn(i32, u32)`
     //~| NOTE arguments to this function are incorrect
-    //~| NOTE when the arguments and return types match, functions can be coerced to function pointers
 }

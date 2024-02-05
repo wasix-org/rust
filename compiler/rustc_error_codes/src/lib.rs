@@ -1,3 +1,6 @@
+#![allow(internal_features)]
+#![feature(rustdoc_internals)]
+#![doc(rust_logo)]
 #![deny(rustdoc::invalid_codeblock_attributes)]
 #![deny(rustc::untranslatable_diagnostic)]
 #![deny(rustc::diagnostic_outside_of_impl)]

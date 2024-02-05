@@ -1,21 +1,25 @@
 use crate::clean;
+use crate::clean::utils::has_doc_flag;
 use crate::docfs::PathError;
 use crate::error::Error;
-use crate::html::format::Buffer;
+use crate::html::format;
 use crate::html::highlight;
 use crate::html::layout;
 use crate::html::render::Context;
 use crate::visit::DocVisitor;
 
+use askama::Template;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
-use rustc_span::source_map::FileName;
+use rustc_span::{sym, FileName};
 
 use std::cell::RefCell;
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
+use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
@@ -85,8 +89,10 @@ impl LocalSourcesCollector<'_, '_> {
             },
         );
 
-        let mut href = href.into_inner().to_string_lossy().to_string();
-        if let Some(c) = href.as_bytes().last() && *c != b'/' {
+        let mut href = href.into_inner().to_string_lossy().into_owned();
+        if let Some(c) = href.as_bytes().last()
+            && *c != b'/'
+        {
             href.push('/');
         }
         let mut src_fname = p.file_name().expect("source has no filename").to_os_string();
@@ -131,7 +137,7 @@ impl DocVisitor for SourceCollector<'_, '_> {
             let filename = span.filename(sess);
             let span = span.inner();
             let pos = sess.source_map().lookup_source_file(span.lo());
-            let file_span = span.with_lo(pos.start_pos).with_hi(pos.end_pos);
+            let file_span = span.with_lo(pos.start_pos).with_hi(pos.end_position());
             // If it turns out that we couldn't read this file, then we probably
             // can't read any of the files (generating html output from json or
             // something like that), so just don't include sources for the
@@ -140,12 +146,11 @@ impl DocVisitor for SourceCollector<'_, '_> {
             self.cx.include_sources = match self.emit_source(&filename, file_span) {
                 Ok(()) => true,
                 Err(e) => {
-                    self.cx.shared.tcx.sess.span_err(
+                    self.cx.shared.tcx.dcx().span_err(
                         span,
-                        &format!(
-                            "failed to render source code for `{}`: {}",
-                            filename.prefer_local(),
-                            e,
+                        format!(
+                            "failed to render source code for `{filename}`: {e}",
+                            filename = filename.prefer_local(),
                         ),
                     );
                     false
@@ -209,7 +214,9 @@ impl SourceCollector<'_, '_> {
 
         let root_path = PathBuf::from("../../").join(root_path.into_inner());
         let mut root_path = root_path.to_string_lossy();
-        if let Some(c) = root_path.as_bytes().last() && *c != b'/' {
+        if let Some(c) = root_path.as_bytes().last()
+            && *c != b'/'
+        {
             root_path += "/";
         }
         let mut cur = self.dst.join(cur.into_inner());
@@ -221,14 +228,16 @@ impl SourceCollector<'_, '_> {
         cur.push(&fname);
 
         let title = format!("{} - source", src_fname.to_string_lossy());
-        let desc = format!("Source of the Rust file `{}`.", filename.prefer_remapped());
+        let desc =
+            format!("Source of the Rust file `{}`.", filename.prefer_remapped_unconditionaly());
         let page = layout::Page {
             title: &title,
-            css_class: "source",
+            css_class: "src",
             root_path: &root_path,
             static_root_path: shared.static_root_path.as_deref(),
             description: &desc,
             resource_suffix: &shared.resource_suffix,
+            rust_logo: has_doc_flag(self.cx.tcx(), LOCAL_CRATE.as_def_id(), sym::rust_logo),
         };
         let v = layout::render(
             &shared.layout,
@@ -291,7 +300,7 @@ pub(crate) enum SourceContext {
 /// Wrapper struct to render the source code of a file. This will do things like
 /// adding line numbers to the left-hand side.
 pub(crate) fn print_src(
-    buf: &mut Buffer,
+    mut writer: impl fmt::Write,
     s: &str,
     file_span: rustc_span::Span,
     context: &Context<'_>,
@@ -299,39 +308,32 @@ pub(crate) fn print_src(
     decoration_info: highlight::DecorationInfo,
     source_context: SourceContext,
 ) {
+    #[derive(Template)]
+    #[template(path = "source.html")]
+    struct Source<Code: std::fmt::Display> {
+        embedded: bool,
+        needs_expansion: bool,
+        lines: RangeInclusive<usize>,
+        code_html: Code,
+    }
     let lines = s.lines().count();
-    let mut line_numbers = Buffer::empty_from(buf);
-    let extra;
-    line_numbers.write_str("<pre class=\"src-line-numbers\">");
+    let (embedded, needs_expansion, lines) = match source_context {
+        SourceContext::Standalone => (false, false, 1..=lines),
+        SourceContext::Embedded { offset, needs_expansion } => {
+            (true, needs_expansion, (1 + offset)..=(lines + offset))
+        }
+    };
     let current_href = context
         .href_from_span(clean::Span::new(file_span), false)
         .expect("only local crates should have sources emitted");
-    match source_context {
-        SourceContext::Standalone => {
-            extra = None;
-            for line in 1..=lines {
-                writeln!(line_numbers, "<a href=\"#{line}\" id=\"{line}\">{line}</a>")
-            }
-        }
-        SourceContext::Embedded { offset, needs_expansion } => {
-            extra = if needs_expansion {
-                Some(r#"<button class="expand">&varr;</button>"#)
-            } else {
-                None
-            };
-            for line_number in 1..=lines {
-                let line = line_number + offset;
-                writeln!(line_numbers, "<span>{line}</span>")
-            }
-        }
-    }
-    line_numbers.write_str("</pre>");
-    highlight::render_source_with_highlighting(
-        s,
-        buf,
-        line_numbers,
-        highlight::HrefContext { context, file_span, root_path, current_href },
-        decoration_info,
-        extra,
-    );
+    let code = format::display_fn(move |fmt| {
+        highlight::write_code(
+            fmt,
+            s,
+            Some(highlight::HrefContext { context, file_span, root_path, current_href }),
+            Some(decoration_info),
+        );
+        Ok(())
+    });
+    Source { embedded, needs_expansion, lines, code_html: code }.render_into(&mut writer).unwrap();
 }

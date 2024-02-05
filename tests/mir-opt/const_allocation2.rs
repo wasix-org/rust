@@ -1,7 +1,8 @@
-// unit-test: ConstProp
+// skip-filecheck
+// unit-test: GVN
 // ignore-endian-big
 // EMIT_MIR_FOR_EACH_BIT_WIDTH
-// EMIT_MIR const_allocation2.main.ConstProp.after.mir
+// EMIT_MIR const_allocation2.main.GVN.after.mir
 fn main() {
     FOO;
 }

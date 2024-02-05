@@ -7,4 +7,5 @@
     issue = "none"
 )]
 #![allow(unused_features)]
+#![allow(internal_features)]
 #![feature(staged_api)]

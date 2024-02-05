@@ -3,6 +3,8 @@ use std::{
     thread,
 };
 
+use log::debug;
+
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 use crate::Message;
@@ -13,8 +15,7 @@ pub(crate) fn stdio_transport() -> (Sender<Message>, Receiver<Message>, IoThread
     let writer = thread::spawn(move || {
         let stdout = stdout();
         let mut stdout = stdout.lock();
-        writer_receiver.into_iter().try_for_each(|it| it.write(&mut stdout))?;
-        Ok(())
+        writer_receiver.into_iter().try_for_each(|it| it.write(&mut stdout))
     });
     let (reader_sender, reader_receiver) = bounded::<Message>(0);
     let reader = thread::spawn(move || {
@@ -23,7 +24,8 @@ pub(crate) fn stdio_transport() -> (Sender<Message>, Receiver<Message>, IoThread
         while let Some(msg) = Message::read(&mut stdin)? {
             let is_exit = matches!(&msg, Message::Notification(n) if n.is_exit());
 
-            reader_sender.send(msg).unwrap();
+            debug!("sending message {:#?}", msg);
+            reader_sender.send(msg).expect("receiver was dropped, failed to send a message");
 
             if is_exit {
                 break;

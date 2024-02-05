@@ -3,16 +3,22 @@
 
 #![feature(const_float_bits_conv)]
 #![feature(const_float_classify)]
-#![feature(const_trait_impl)]
+#![feature(const_trait_impl, effects)]
 
 // Don't promote
 const fn nop<T>(x: T) -> T { x }
+
+impl const PartialEq<NonDet> for bool {
+    fn eq(&self, _: &NonDet) -> bool {
+        true
+    }
+}
 
 macro_rules! const_assert {
     ($a:expr, $b:expr) => {
         {
             const _: () = assert!($a == $b);
-            assert_eq!(nop($a), nop($b));
+            assert!(nop($a) == nop($b));
         }
     };
 }
@@ -46,15 +52,6 @@ macro_rules! suite_inner {
 
 #[derive(Debug)]
 struct NonDet;
-
-impl const PartialEq<NonDet> for bool {
-    fn eq(&self, _: &NonDet) -> bool {
-        true
-    }
-    fn ne(&self, _: &NonDet) -> bool {
-        false
-    }
-}
 
 // The result of the `is_sign` methods are not checked for correctness, since LLVM does not
 // guarantee anything about the signedness of NaNs. See

@@ -1,12 +1,12 @@
 //! Handling of `static`s, `const`s and promoted allocations
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use rustc_middle::mir::interpret::{
-    read_target_uint, AllocId, ConstAllocation, ConstValue, ErrorHandled, GlobalAlloc, Scalar,
-};
+use std::cmp::Ordering;
 
 use cranelift_module::*;
+use rustc_data_structures::fx::FxHashSet;
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+use rustc_middle::mir::interpret::{read_target_uint, AllocId, GlobalAlloc, Scalar};
+use rustc_middle::ty::ScalarInt;
 
 use crate::prelude::*;
 
@@ -33,16 +33,6 @@ impl ConstantCx {
     }
 }
 
-pub(crate) fn check_constants(fx: &mut FunctionCx<'_, '_, '_>) -> bool {
-    let mut all_constants_ok = true;
-    for constant in &fx.mir.required_consts {
-        if eval_mir_constant(fx, constant).is_none() {
-            all_constants_ok = false;
-        }
-    }
-    all_constants_ok
-}
-
 pub(crate) fn codegen_static(tcx: TyCtxt<'_>, module: &mut dyn Module, def_id: DefId) {
     let mut constants_cx = ConstantCx::new();
     constants_cx.todo.push(TodoItem::Static(def_id));
@@ -54,64 +44,42 @@ pub(crate) fn codegen_tls_ref<'tcx>(
     def_id: DefId,
     layout: TyAndLayout<'tcx>,
 ) -> CValue<'tcx> {
-    let data_id = data_id_for_static(fx.tcx, fx.module, def_id, false);
-    let local_data_id = fx.module.declare_data_in_func(data_id, &mut fx.bcx.func);
-    if fx.clif_comments.enabled() {
-        fx.add_comment(local_data_id, format!("tls {:?}", def_id));
-    }
-    let tls_ptr = fx.bcx.ins().tls_value(fx.pointer_type, local_data_id);
+    let tls_ptr = if !def_id.is_local() && fx.tcx.needs_thread_local_shim(def_id) {
+        let instance = ty::Instance {
+            def: ty::InstanceDef::ThreadLocalShim(def_id),
+            args: ty::GenericArgs::empty(),
+        };
+        let func_ref = fx.get_function_ref(instance);
+        let call = fx.bcx.ins().call(func_ref, &[]);
+        fx.bcx.func.dfg.first_result(call)
+    } else {
+        let data_id = data_id_for_static(fx.tcx, fx.module, def_id, false);
+        let local_data_id = fx.module.declare_data_in_func(data_id, &mut fx.bcx.func);
+        if fx.clif_comments.enabled() {
+            fx.add_comment(local_data_id, format!("tls {:?}", def_id));
+        }
+        fx.bcx.ins().tls_value(fx.pointer_type, local_data_id)
+    };
     CValue::by_val(tls_ptr, layout)
 }
 
 pub(crate) fn eval_mir_constant<'tcx>(
     fx: &FunctionCx<'_, '_, 'tcx>,
-    constant: &Constant<'tcx>,
-) -> Option<(ConstValue<'tcx>, Ty<'tcx>)> {
-    let constant_kind = fx.monomorphize(constant.literal);
-    let uv = match constant_kind {
-        ConstantKind::Ty(const_) => match const_.kind() {
-            ty::ConstKind::Unevaluated(uv) => uv.expand(),
-            ty::ConstKind::Value(val) => {
-                return Some((fx.tcx.valtree_to_const_val((const_.ty(), val)), const_.ty()));
-            }
-            err => span_bug!(
-                constant.span,
-                "encountered bad ConstKind after monomorphizing: {:?}",
-                err
-            ),
-        },
-        ConstantKind::Unevaluated(mir::UnevaluatedConst { def, .. }, _)
-            if fx.tcx.is_static(def.did) =>
-        {
-            span_bug!(constant.span, "MIR constant refers to static");
-        }
-        ConstantKind::Unevaluated(uv, _) => uv,
-        ConstantKind::Val(val, _) => return Some((val, constant_kind.ty())),
-    };
-
-    let val = fx
-        .tcx
-        .const_eval_resolve(ty::ParamEnv::reveal_all(), uv, None)
-        .map_err(|err| match err {
-            ErrorHandled::Reported(_) => {
-                fx.tcx.sess.span_err(constant.span, "erroneous constant encountered");
-            }
-            ErrorHandled::TooGeneric => {
-                span_bug!(constant.span, "codegen encountered polymorphic constant: {:?}", err);
-            }
-        })
-        .ok();
-    val.map(|val| (val, constant_kind.ty()))
+    constant: &ConstOperand<'tcx>,
+) -> (ConstValue<'tcx>, Ty<'tcx>) {
+    let cv = fx.monomorphize(constant.const_);
+    // This cannot fail because we checked all required_consts in advance.
+    let val = cv
+        .eval(fx.tcx, ty::ParamEnv::reveal_all(), Some(constant.span))
+        .expect("erroneous constant not captured by required_consts");
+    (val, cv.ty())
 }
 
 pub(crate) fn codegen_constant_operand<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
-    constant: &Constant<'tcx>,
+    constant: &ConstOperand<'tcx>,
 ) -> CValue<'tcx> {
-    let (const_val, ty) = eval_mir_constant(fx, constant).unwrap_or_else(|| {
-        span_bug!(constant.span, "erroneous constant not captured by required_consts")
-    });
-
+    let (const_val, ty) = eval_mir_constant(fx, constant);
     codegen_const_value(fx, const_val, ty)
 }
 
@@ -128,13 +96,13 @@ pub(crate) fn codegen_const_value<'tcx>(
     }
 
     match const_val {
-        ConstValue::ZeroSized => unreachable!(), // we already handles ZST above
+        ConstValue::ZeroSized => unreachable!(), // we already handled ZST above
         ConstValue::Scalar(x) => match x {
             Scalar::Int(int) => {
                 if fx.clif_type(layout.ty).is_some() {
                     return CValue::const_val(fx, layout, int);
                 } else {
-                    let raw_val = int.to_bits(int.size()).unwrap();
+                    let raw_val = int.size().truncate(int.to_bits(int.size()).unwrap());
                     let val = match int.size().bytes() {
                         1 => fx.bcx.ins().iconst(types::I8, raw_val as i64),
                         2 => fx.bcx.ins().iconst(types::I16, raw_val as i64),
@@ -149,13 +117,16 @@ pub(crate) fn codegen_const_value<'tcx>(
                         _ => unreachable!(),
                     };
 
+                    // FIXME avoid this extra copy to the stack and directly write to the final
+                    // destination
                     let place = CPlace::new_stack_slot(fx, layout);
                     place.to_ptr().store(fx, val, MemFlags::trusted());
                     place.to_cvalue(fx)
                 }
             }
             Scalar::Ptr(ptr, _size) => {
-                let (alloc_id, offset) = ptr.into_parts(); // we know the `offset` is relative
+                let (prov, offset) = ptr.into_parts(); // we know the `offset` is relative
+                let alloc_id = prov.alloc_id();
                 let base_addr = match fx.tcx.global_alloc(alloc_id) {
                     GlobalAlloc::Memory(alloc) => {
                         let data_id = data_id_for_alloc_id(
@@ -210,19 +181,15 @@ pub(crate) fn codegen_const_value<'tcx>(
                 CValue::by_val(val, layout)
             }
         },
-        ConstValue::ByRef { alloc, offset } => CValue::by_ref(
-            pointer_for_allocation(fx, alloc)
+        ConstValue::Indirect { alloc_id, offset } => CValue::by_ref(
+            pointer_for_allocation(fx, alloc_id)
                 .offset_i64(fx, i64::try_from(offset.bytes()).unwrap()),
             layout,
         ),
-        ConstValue::Slice { data, start, end } => {
-            let ptr = pointer_for_allocation(fx, data)
-                .offset_i64(fx, i64::try_from(start).unwrap())
-                .get_addr(fx);
-            let len = fx
-                .bcx
-                .ins()
-                .iconst(fx.pointer_type, i64::try_from(end.checked_sub(start).unwrap()).unwrap());
+        ConstValue::Slice { data, meta } => {
+            let alloc_id = fx.tcx.reserve_and_set_memory_alloc(data);
+            let ptr = pointer_for_allocation(fx, alloc_id).get_addr(fx);
+            let len = fx.bcx.ins().iconst(fx.pointer_type, meta as i64);
             CValue::by_val_pair(ptr, len, layout)
         }
     }
@@ -230,9 +197,9 @@ pub(crate) fn codegen_const_value<'tcx>(
 
 fn pointer_for_allocation<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
-    alloc: ConstAllocation<'tcx>,
+    alloc_id: AllocId,
 ) -> crate::pointer::Pointer {
-    let alloc_id = fx.tcx.create_memory_alloc(alloc);
+    let alloc = fx.tcx.global_alloc(alloc_id).unwrap_memory();
     let data_id = data_id_for_alloc_id(
         &mut fx.constants_cx,
         &mut *fx.module,
@@ -290,13 +257,13 @@ fn data_id_for_static(
         };
 
         let data_id = match module.declare_data(
-            &*symbol_name,
+            symbol_name,
             linkage,
             is_mutable,
             attrs.flags.contains(CodegenFnAttrFlags::THREAD_LOCAL),
         ) {
             Ok(data_id) => data_id,
-            Err(ModuleError::IncompatibleDeclaration(_)) => tcx.sess.fatal(&format!(
+            Err(ModuleError::IncompatibleDeclaration(_)) => tcx.dcx().fatal(format!(
                 "attempt to declare `{symbol_name}` as static, but it was already declared as function"
             )),
             Err(err) => Err::<_, _>(err).unwrap(),
@@ -312,12 +279,12 @@ fn data_id_for_static(
 
         let ref_name = format!("_rust_extern_with_linkage_{}", symbol_name);
         let ref_data_id = module.declare_data(&ref_name, Linkage::Local, false, false).unwrap();
-        let mut data_ctx = DataContext::new();
-        data_ctx.set_align(align);
-        let data = module.declare_data_in_data(data_id, &mut data_ctx);
-        data_ctx.define(std::iter::repeat(0).take(pointer_ty(tcx).bytes() as usize).collect());
-        data_ctx.write_data_addr(0, data, 0);
-        match module.define_data(ref_data_id, &data_ctx) {
+        let mut data = DataDescription::new();
+        data.set_align(align);
+        let data_gv = module.declare_data_in_data(data_id, &mut data);
+        data.define(std::iter::repeat(0).take(pointer_ty(tcx).bytes() as usize).collect());
+        data.write_data_addr(0, data_gv, 0);
+        match module.define_data(ref_data_id, &data) {
             // Every time the static is referenced there will be another definition of this global,
             // so duplicate definitions are expected and allowed.
             Err(ModuleError::DuplicateDefinition(_)) => {}
@@ -338,13 +305,13 @@ fn data_id_for_static(
     };
 
     let data_id = match module.declare_data(
-        &*symbol_name,
+        symbol_name,
         linkage,
         is_mutable,
         attrs.flags.contains(CodegenFnAttrFlags::THREAD_LOCAL),
     ) {
         Ok(data_id) => data_id,
-        Err(ModuleError::IncompatibleDeclaration(_)) => tcx.sess.fatal(&format!(
+        Err(ModuleError::IncompatibleDeclaration(_)) => tcx.dcx().fatal(format!(
             "attempt to declare `{symbol_name}` as static, but it was already declared as function"
         )),
         Err(err) => Err::<_, _>(err).unwrap(),
@@ -363,6 +330,7 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
                         unreachable!()
                     }
                 };
+                // FIXME: should we have a cache so we don't do this multiple times for the same `ConstAllocation`?
                 let data_id = *cx.anon_allocs.entry(alloc_id).or_insert_with(|| {
                     module.declare_anonymous_data(alloc.inner().mutability.is_mut(), false).unwrap()
                 });
@@ -382,9 +350,9 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
             continue;
         }
 
-        let mut data_ctx = DataContext::new();
+        let mut data = DataDescription::new();
         let alloc = alloc.inner();
-        data_ctx.set_align(alloc.align.bytes());
+        data.set_align(alloc.align.bytes());
 
         if let Some(section_name) = section_name {
             let (segment_name, section_name) = if tcx.sess.target.is_like_osx {
@@ -392,7 +360,7 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
                 if let Some(names) = section_name.split_once(',') {
                     names
                 } else {
-                    tcx.sess.fatal(&format!(
+                    tcx.dcx().fatal(format!(
                         "#[link_section = \"{}\"] is not valid for macos target: must be segment and section separated by comma",
                         section_name
                     ));
@@ -400,13 +368,14 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
             } else {
                 ("", section_name.as_str())
             };
-            data_ctx.set_segment_section(segment_name, section_name);
+            data.set_segment_section(segment_name, section_name);
         }
 
         let bytes = alloc.inspect_with_uninit_and_ptr_outside_interpreter(0..alloc.len()).to_vec();
-        data_ctx.define(bytes.into_boxed_slice());
+        data.define(bytes.into_boxed_slice());
 
-        for &(offset, alloc_id) in alloc.provenance().ptrs().iter() {
+        for &(offset, prov) in alloc.provenance().ptrs().iter() {
+            let alloc_id = prov.alloc_id();
             let addend = {
                 let endianness = tcx.data_layout.endian;
                 let offset = offset.bytes() as usize;
@@ -423,8 +392,8 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
                     assert_eq!(addend, 0);
                     let func_id =
                         crate::abi::import_function(tcx, module, instance.polymorphize(tcx));
-                    let local_func_id = module.declare_func_in_data(func_id, &mut data_ctx);
-                    data_ctx.write_function_addr(offset.bytes() as u32, local_func_id);
+                    let local_func_id = module.declare_func_in_data(func_id, &mut data);
+                    data.write_function_addr(offset.bytes() as u32, local_func_id);
                     continue;
                 }
                 GlobalAlloc::Memory(target_alloc) => {
@@ -437,7 +406,7 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
                 GlobalAlloc::Static(def_id) => {
                     if tcx.codegen_fn_attrs(def_id).flags.contains(CodegenFnAttrFlags::THREAD_LOCAL)
                     {
-                        tcx.sess.fatal(&format!(
+                        tcx.dcx().fatal(format!(
                             "Allocation {:?} contains reference to TLS value {:?}",
                             alloc_id, def_id
                         ));
@@ -450,11 +419,11 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
                 }
             };
 
-            let global_value = module.declare_data_in_data(data_id, &mut data_ctx);
-            data_ctx.write_data_addr(offset.bytes() as u32, global_value, addend as i64);
+            let global_value = module.declare_data_in_data(data_id, &mut data);
+            data.write_data_addr(offset.bytes() as u32, global_value, addend as i64);
         }
 
-        module.define_data(data_id, &data_ctx).unwrap();
+        module.define_data(data_id, &data).unwrap();
         cx.done.insert(data_id);
     }
 
@@ -465,9 +434,9 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
 pub(crate) fn mir_operand_get_const_val<'tcx>(
     fx: &FunctionCx<'_, '_, 'tcx>,
     operand: &Operand<'tcx>,
-) -> Option<ConstValue<'tcx>> {
+) -> Option<ScalarInt> {
     match operand {
-        Operand::Constant(const_) => Some(eval_mir_constant(fx, const_).unwrap().0),
+        Operand::Constant(const_) => eval_mir_constant(fx, const_).0.try_to_scalar_int(),
         // FIXME(rust-lang/rust#85105): Casts like `IMM8 as u32` result in the const being stored
         // inside a temporary before being passed to the intrinsic requiring the const argument.
         // This code tries to find a single constant defining definition of the referenced local.
@@ -475,7 +444,7 @@ pub(crate) fn mir_operand_get_const_val<'tcx>(
             if !place.projection.is_empty() {
                 return None;
             }
-            let mut computed_const_val = None;
+            let mut computed_scalar_int = None;
             for bb_data in fx.mir.basic_blocks.iter() {
                 for stmt in &bb_data.statements {
                     match &stmt.kind {
@@ -491,22 +460,38 @@ pub(crate) fn mir_operand_get_const_val<'tcx>(
                                     operand,
                                     ty,
                                 ) => {
-                                    if computed_const_val.is_some() {
+                                    if computed_scalar_int.is_some() {
                                         return None; // local assigned twice
                                     }
                                     if !matches!(ty.kind(), ty::Uint(_) | ty::Int(_)) {
                                         return None;
                                     }
-                                    let const_val = mir_operand_get_const_val(fx, operand)?;
-                                    if fx.layout_of(*ty).size
-                                        != const_val.try_to_scalar_int()?.size()
+                                    let scalar_int = mir_operand_get_const_val(fx, operand)?;
+                                    let scalar_int = match fx
+                                        .layout_of(*ty)
+                                        .size
+                                        .cmp(&scalar_int.size())
                                     {
-                                        return None;
-                                    }
-                                    computed_const_val = Some(const_val);
+                                        Ordering::Equal => scalar_int,
+                                        Ordering::Less => match ty.kind() {
+                                            ty::Uint(_) => ScalarInt::try_from_uint(
+                                                scalar_int.try_to_uint(scalar_int.size()).unwrap(),
+                                                fx.layout_of(*ty).size,
+                                            )
+                                            .unwrap(),
+                                            ty::Int(_) => ScalarInt::try_from_int(
+                                                scalar_int.try_to_int(scalar_int.size()).unwrap(),
+                                                fx.layout_of(*ty).size,
+                                            )
+                                            .unwrap(),
+                                            _ => unreachable!(),
+                                        },
+                                        Ordering::Greater => return None,
+                                    };
+                                    computed_scalar_int = Some(scalar_int);
                                 }
                                 Rvalue::Use(operand) => {
-                                    computed_const_val = mir_operand_get_const_val(fx, operand)
+                                    computed_scalar_int = mir_operand_get_const_val(fx, operand)
                                 }
                                 _ => return None,
                             }
@@ -529,6 +514,7 @@ pub(crate) fn mir_operand_get_const_val<'tcx>(
                         | StatementKind::StorageDead(_)
                         | StatementKind::Retag(_, _)
                         | StatementKind::AscribeUserType(_, _)
+                        | StatementKind::PlaceMention(..)
                         | StatementKind::Coverage(_)
                         | StatementKind::ConstEvalCounter
                         | StatementKind::Nop => {}
@@ -537,15 +523,14 @@ pub(crate) fn mir_operand_get_const_val<'tcx>(
                 match &bb_data.terminator().kind {
                     TerminatorKind::Goto { .. }
                     | TerminatorKind::SwitchInt { .. }
-                    | TerminatorKind::Resume
-                    | TerminatorKind::Abort
+                    | TerminatorKind::UnwindResume
+                    | TerminatorKind::UnwindTerminate(_)
                     | TerminatorKind::Return
                     | TerminatorKind::Unreachable
                     | TerminatorKind::Drop { .. }
                     | TerminatorKind::Assert { .. } => {}
-                    TerminatorKind::DropAndReplace { .. }
-                    | TerminatorKind::Yield { .. }
-                    | TerminatorKind::GeneratorDrop
+                    TerminatorKind::Yield { .. }
+                    | TerminatorKind::CoroutineDrop
                     | TerminatorKind::FalseEdge { .. }
                     | TerminatorKind::FalseUnwind { .. } => unreachable!(),
                     TerminatorKind::InlineAsm { .. } => return None,
@@ -557,7 +542,7 @@ pub(crate) fn mir_operand_get_const_val<'tcx>(
                     TerminatorKind::Call { .. } => {}
                 }
             }
-            computed_const_val
+            computed_scalar_int
         }
     }
 }

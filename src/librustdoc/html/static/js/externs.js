@@ -9,10 +9,12 @@ function initSearch(searchIndex){}
 /**
  * @typedef {{
  *     name: string,
+ *     id: integer|null,
  *     fullPath: Array<string>,
  *     pathWithoutLast: Array<string>,
  *     pathLast: string,
  *     generics: Array<QueryElement>,
+ *     bindings: Map<integer, Array<QueryElement>>,
  * }}
  */
 let QueryElement;
@@ -23,6 +25,7 @@ let QueryElement;
  *      totalElems: number,
  *      typeFilter: (null|string),
  *      userQuery: string,
+ *      isInBinding: (null|string),
  * }}
  */
 let ParserState;
@@ -36,6 +39,10 @@ let ParserState;
  *     args: Array<QueryElement>,
  *     returned: Array<QueryElement>,
  *     foundElems: number,
+ *     totalElems: number,
+ *     literalSearch: boolean,
+ *     corrections: Array<{from: string, to: integer}>,
+ *     typeFingerprint: Uint32Array,
  * }}
  */
 let ParsedQuery;
@@ -50,7 +57,7 @@ let ParsedQuery;
  *    parent: (Object|null|undefined),
  *    path: string,
  *    ty: (Number|null|number),
- *    type: (Array<?>|null)
+ *    type: FunctionSearchType?
  * }}
  */
 let Row;
@@ -64,6 +71,11 @@ let Row;
  * }}
  */
 let ResultsTable;
+
+/**
+ * @typedef {Map<String, ResultObject>}
+ */
+let Results;
 
 /**
  * @typedef {{
@@ -80,7 +92,7 @@ let ResultsTable;
  *     ty: number,
  * }}
  */
-let Results;
+let ResultObject;
 
 /**
  * A pair of [inputs, outputs], or 0 for null. This is stored in the search index.
@@ -95,7 +107,7 @@ let Results;
  *
  *     fn something() -> Result<usize, usize>
  *
- * If output was allowed to be any RawFunctionType, it would look like this
+ * If output was allowed to be any RawFunctionType, it would look like thi
  *
  *     [[], [50, [3, 3]]]
  *
@@ -105,10 +117,56 @@ let Results;
  * in favor of the pair of types interpretation. This is why the `(number|Array<RawFunctionType>)`
  * is used instead of `(RawFunctionType|Array<RawFunctionType>)`.
  *
+ * The output can be skipped if it's actually unit and there's no type constraints. If thi
+ * function accepts constrained generics, then the output will be unconditionally emitted, and
+ * after it will come a list of trait constraints. The position of the item in the list will
+ * determine which type parameter it is. For example:
+ *
+ *     [1, 2, 3, 4, 5]
+ *      ^  ^  ^  ^  ^
+ *      |  |  |  |  - generic parameter (-3) of trait 5
+ *      |  |  |  - generic parameter (-2) of trait 4
+ *      |  |  - generic parameter (-1) of trait 3
+ *      |  - this function returns a single value (type 2)
+ *      - this function takes a single input parameter (type 1)
+ *
+ * Or, for a less contrived version:
+ *
+ *     [[[4, -1], 3], [[5, -1]], 11]
+ *      -^^^^^^^----   ^^^^^^^   ^^
+ *       |        |    |          - generic parameter, roughly `where -1: 11`
+ *       |        |    |            since -1 is the type parameter and 11 the trait
+ *       |        |    - function output 5<-1>
+ *       |        - the overall function signature is something like
+ *       |          `fn(4<-1>, 3) -> 5<-1> where -1: 11`
+ *       - function input, corresponds roughly to 4<-1>
+ *         4 is an index into the `p` array for a type
+ *         -1 is the generic parameter, given by 11
+ *
+ * If a generic parameter has multiple trait constraints, it gets wrapped in an array, just like
+ * function inputs and outputs:
+ *
+ *     [-1, -1, [4, 3]]
+ *              ^^^^^^ where -1: 4 + 3
+ *
+ * If a generic parameter's trait constraint has generic parameters, it gets wrapped in the array
+ * even if only one exists. In other words, the ambiguity of `4<3>` and `4 + 3` is resolved in
+ * favor of `4 + 3`:
+ *
+ *     [-1, -1, [[4, 3]]]
+ *              ^^^^^^^^ where -1: 4 + 3
+ *
+ *     [-1, -1, [5, [4, 3]]]
+ *              ^^^^^^^^^^^ where -1: 5, -2: 4 + 3
+ *
+ * If a generic parameter has no trait constraints (like in Rust, the `Sized` constraint i
+ * implied and a fake `?Sized` constraint used to note its absence), it will be filled in with 0.
+ *
  * @typedef {(
  *     0 |
  *     [(number|Array<RawFunctionType>)] |
- *     [(number|Array<RawFunctionType>), (number|Array<RawFunctionType>)]
+ *     [(number|Array<RawFunctionType>), (number|Array<RawFunctionType>)] |
+ *     Array<(number|Array<RawFunctionType>)>
  * )}
  */
 let RawFunctionSearchType;
@@ -127,16 +185,74 @@ let RawFunctionType;
 /**
  * @typedef {{
  *     inputs: Array<FunctionType>,
- *     outputs: Array<FunctionType>,
+ *     output: Array<FunctionType>,
+ *     where_clause: Array<Array<FunctionType>>,
  * }}
  */
 let FunctionSearchType;
 
 /**
  * @typedef {{
- *     name: (null|string),
- *     ty: (null|number),
+ *     id: (null|number),
+ *     ty: number,
  *     generics: Array<FunctionType>,
+ *     bindings: Map<integer, Array<FunctionType>>,
  * }}
  */
 let FunctionType;
+
+/**
+ * The raw search data for a given crate. `n`, `t`, `d`, `i`, and `f`
+ * are arrays with the same length. `q`, `a`, and `c` use a sparse
+ * representation for compactness.
+ *
+ * `n[i]` contains the name of an item.
+ *
+ * `t[i]` contains the type of that item
+ * (as a string of characters that represent an offset in `itemTypes`).
+ *
+ * `d[i]` contains the description of that item.
+ *
+ * `q` contains the full paths of the items. For compactness, it is a set of
+ * (index, path) pairs used to create a map. If a given index `i` is
+ * not present, this indicates "same as the last index present".
+ *
+ * `i[i]` contains an item's parent, usually a module. For compactness,
+ * it is a set of indexes into the `p` array.
+ *
+ * `f` contains function signatures, or `0` if the item isn't a function.
+ * More information on how they're encoded can be found in rustc-dev-guide
+ *
+ * Functions are themselves encoded as arrays. The first item is a list of
+ * types representing the function's inputs, and the second list item is a list
+ * of types representing the function's output. Tuples are flattened.
+ * Types are also represented as arrays; the first item is an index into the `p`
+ * array, while the second is a list of types representing any generic parameters.
+ *
+ * b[i] contains an item's impl disambiguator. This is only present if an item
+ * is defined in an impl block and, the impl block's type has more than one associated
+ * item with the same name.
+ *
+ * `a` defines aliases with an Array of pairs: [name, offset], where `offset`
+ * points into the n/t/d/q/i/f arrays.
+ *
+ * `doc` contains the description of the crate.
+ *
+ * `p` is a list of path/type pairs. It is used for parents and function parameters.
+ *
+ * `c` is an array of item indices that are deprecated.
+ * @typedef {{
+ *   doc: string,
+ *   a: Object,
+ *   n: Array<string>,
+ *   t: String,
+ *   d: Array<string>,
+ *   q: Array<[Number, string]>,
+ *   i: Array<Number>,
+ *   f: string,
+ *   p: Array<Object>,
+ *   b: Array<[Number, String]>,
+ *   c: Array<Number>
+ * }}
+ */
+let RawSearchIndexCrate;

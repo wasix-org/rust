@@ -1,8 +1,8 @@
 use super::*;
 use crate::env;
+use crate::rc::Rc;
 use crate::sync::mpmc::SendTimeoutError;
 use crate::thread;
-use crate::time::Duration;
 
 pub fn stress_factor() -> usize {
     match env::var("RUST_TEST_STRESS") {
@@ -655,4 +655,16 @@ fn issue_15761() {
     for _ in 0..100 {
         repro()
     }
+}
+
+#[test]
+fn drop_unreceived() {
+    let (tx, rx) = sync_channel::<Rc<()>>(1);
+    let msg = Rc::new(());
+    let weak = Rc::downgrade(&msg);
+    assert!(tx.send(msg).is_ok());
+    drop(rx);
+    // Messages should be dropped immediately when the last receiver is destroyed.
+    assert!(weak.upgrade().is_none());
+    drop(tx);
 }

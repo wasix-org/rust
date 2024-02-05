@@ -1,3 +1,4 @@
+use rustc_middle::infer::unify_key::ConstVidKey;
 use rustc_middle::ty::fold::{TypeFoldable, TypeFolder, TypeSuperFoldable};
 use rustc_middle::ty::{self, ConstVid, FloatVid, IntVid, RegionVid, Ty, TyCtxt, TyVid};
 
@@ -23,14 +24,14 @@ where
 }
 
 fn const_vars_since_snapshot<'tcx>(
-    table: &mut UnificationTable<'_, 'tcx, ConstVid<'tcx>>,
+    table: &mut UnificationTable<'_, 'tcx, ConstVidKey<'tcx>>,
     snapshot_var_len: usize,
-) -> (Range<ConstVid<'tcx>>, Vec<ConstVariableOrigin>) {
+) -> (Range<ConstVid>, Vec<ConstVariableOrigin>) {
     let range = vars_since_snapshot(table, snapshot_var_len);
     (
-        range.start..range.end,
-        (range.start.index..range.end.index)
-            .map(|index| table.probe_value(ConstVid::from_index(index)).origin)
+        range.start.vid..range.end.vid,
+        (range.start.index()..range.end.index())
+            .map(|index| table.probe_value(ConstVid::from_u32(index)).origin)
             .collect(),
     )
 }
@@ -172,7 +173,7 @@ pub struct InferenceFudger<'a, 'tcx> {
     int_vars: Range<IntVid>,
     float_vars: Range<FloatVid>,
     region_vars: (Range<RegionVid>, Vec<RegionVariableOrigin>),
-    const_vars: (Range<ConstVid<'tcx>>, Vec<ConstVariableOrigin>),
+    const_vars: (Range<ConstVid>, Vec<ConstVariableOrigin>),
 }
 
 impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for InferenceFudger<'a, 'tcx> {
@@ -186,7 +187,7 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for InferenceFudger<'a, 'tcx> {
                 if self.type_vars.0.contains(&vid) {
                     // This variable was created during the fudging.
                     // Recreate it with a fresh variable here.
-                    let idx = (vid.as_usize() - self.type_vars.0.start.as_usize()) as usize;
+                    let idx = vid.as_usize() - self.type_vars.0.start.as_usize();
                     let origin = self.type_vars.1[idx];
                     self.infcx.next_ty_var(origin)
                 } else {
@@ -220,7 +221,9 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for InferenceFudger<'a, 'tcx> {
     }
 
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        if let ty::ReVar(vid) = *r && self.region_vars.0.contains(&vid) {
+        if let ty::ReVar(vid) = *r
+            && self.region_vars.0.contains(&vid)
+        {
             let idx = vid.index() - self.region_vars.0.start.index();
             let origin = self.region_vars.1[idx];
             return self.infcx.next_region_var(origin);
@@ -233,7 +236,7 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for InferenceFudger<'a, 'tcx> {
             if self.const_vars.0.contains(&vid) {
                 // This variable was created during the fudging.
                 // Recreate it with a fresh variable here.
-                let idx = (vid.index - self.const_vars.0.start.index) as usize;
+                let idx = vid.index() - self.const_vars.0.start.index();
                 let origin = self.const_vars.1[idx];
                 self.infcx.next_const_var(ct.ty(), origin)
             } else {

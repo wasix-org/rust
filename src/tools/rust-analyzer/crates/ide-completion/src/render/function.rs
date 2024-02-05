@@ -52,11 +52,17 @@ fn render(
 
     let (call, escaped_call) = match &func_kind {
         FuncKind::Method(_, Some(receiver)) => (
-            format!("{}.{}", receiver.unescaped(), name.unescaped()).into(),
-            format!("{receiver}.{name}").into(),
+            format!(
+                "{}.{}",
+                receiver.unescaped().display(ctx.db()),
+                name.unescaped().display(ctx.db())
+            )
+            .into(),
+            format!("{}.{}", receiver.display(ctx.db()), name.display(ctx.db())).into(),
         ),
         _ => (name.unescaped().to_smol_str(), name.to_smol_str()),
     };
+
     let mut item = CompletionItem::new(
         if func.self_param(db).is_some() {
             CompletionItemKind::Method
@@ -72,8 +78,31 @@ fn render(
         .as_assoc_item(ctx.db())
         .and_then(|trait_| trait_.containing_trait_or_trait_impl(ctx.db()))
         .map_or(false, |trait_| completion.is_ops_trait(trait_));
+
+    let (has_dot_receiver, has_call_parens, cap) = match func_kind {
+        FuncKind::Function(&PathCompletionCtx {
+            kind: PathKind::Expr { .. },
+            has_call_parens,
+            ..
+        }) => (false, has_call_parens, ctx.completion.config.snippet_cap),
+        FuncKind::Method(&DotAccess { kind: DotAccessKind::Method { has_parens }, .. }, _) => {
+            (true, has_parens, ctx.completion.config.snippet_cap)
+        }
+        FuncKind::Method(DotAccess { kind: DotAccessKind::Field { .. }, .. }, _) => {
+            (true, false, ctx.completion.config.snippet_cap)
+        }
+        _ => (false, false, None),
+    };
+    let complete_call_parens = cap
+        .filter(|_| !has_call_parens)
+        .and_then(|cap| Some((cap, params(ctx.completion, func, &func_kind, has_dot_receiver)?)));
+
     item.set_relevance(CompletionRelevance {
-        type_match: compute_type_match(completion, &ret_type),
+        type_match: if has_call_parens || complete_call_parens.is_some() {
+            compute_type_match(completion, &ret_type)
+        } else {
+            compute_type_match(completion, &func.ty(db))
+        },
         exact_name_match: compute_exact_name_match(completion, &call),
         is_op_method,
         ..ctx.completion_relevance()
@@ -93,47 +122,19 @@ fn render(
         _ => (),
     }
 
+    let detail = if ctx.completion.config.full_function_signatures {
+        detail_full(db, func)
+    } else {
+        detail(db, func)
+    };
     item.set_documentation(ctx.docs(func))
         .set_deprecated(ctx.is_deprecated(func) || ctx.is_deprecated_assoc_item(func))
-        .detail(detail(db, func))
+        .detail(detail)
         .lookup_by(name.unescaped().to_smol_str());
 
-    match ctx.completion.config.snippet_cap {
-        Some(cap) => {
-            let complete_params = match func_kind {
-                FuncKind::Function(PathCompletionCtx {
-                    kind: PathKind::Expr { .. },
-                    has_call_parens: false,
-                    ..
-                }) => Some(false),
-                FuncKind::Method(
-                    DotAccess {
-                        kind:
-                            DotAccessKind::Method { has_parens: false } | DotAccessKind::Field { .. },
-                        ..
-                    },
-                    _,
-                ) => Some(true),
-                _ => None,
-            };
-            if let Some(has_dot_receiver) = complete_params {
-                if let Some((self_param, params)) =
-                    params(ctx.completion, func, &func_kind, has_dot_receiver)
-                {
-                    add_call_parens(
-                        &mut item,
-                        completion,
-                        cap,
-                        call,
-                        escaped_call,
-                        self_param,
-                        params,
-                    );
-                }
-            }
-        }
-        _ => (),
-    };
+    if let Some((cap, (self_param, params))) = complete_call_parens {
+        add_call_parens(&mut item, completion, cap, call, escaped_call, self_param, params);
+    }
 
     match ctx.import_to_add {
         Some(import_to_add) => {
@@ -147,6 +148,8 @@ fn render(
             }
         }
     }
+
+    item.doc_aliases(ctx.doc_aliases);
     item
 }
 
@@ -256,6 +259,21 @@ fn detail(db: &dyn HirDatabase, func: hir::Function) -> String {
     detail
 }
 
+fn detail_full(db: &dyn HirDatabase, func: hir::Function) -> String {
+    let signature = format!("{}", func.display(db));
+    let mut detail = String::with_capacity(signature.len());
+
+    for segment in signature.split_whitespace() {
+        if !detail.is_empty() {
+            detail.push(' ');
+        }
+
+        detail.push_str(segment);
+    }
+
+    detail
+}
+
 fn params_display(db: &dyn HirDatabase, func: hir::Function) -> String {
     if let Some(self_param) = func.self_param(db) {
         let assoc_fn_params = func.assoc_fn_params(db);
@@ -287,12 +305,15 @@ fn params(
         return None;
     }
 
-    // Don't add parentheses if the expected type is some function reference.
-    if let Some(ty) = &ctx.expected_type {
-        // FIXME: check signature matches?
-        if ty.is_fn() {
-            cov_mark::hit!(no_call_parens_if_fn_ptr_needed);
-            return None;
+    // Don't add parentheses if the expected type is a function reference with the same signature.
+    if let Some(expected) = ctx.expected_type.as_ref().filter(|e| e.is_fn()) {
+        if let Some(expected) = expected.as_callable(ctx.db) {
+            if let Some(completed) = func.ty(ctx.db).as_callable(ctx.db) {
+                if expected.sig() == completed.sig() {
+                    cov_mark::hit!(no_call_parens_if_fn_ptr_needed);
+                    return None;
+                }
+            }
         }
     }
 

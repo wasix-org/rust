@@ -4,12 +4,9 @@ mod arg_matrix;
 mod checks;
 mod suggestions;
 
-pub use _impl::*;
-use rustc_errors::ErrorGuaranteed;
-pub use suggestions::*;
-
 use crate::coercion::DynamicCoerceMany;
-use crate::{Diverges, EnclosingBreakables, Inherited};
+use crate::{CoroutineTypes, Diverges, EnclosingBreakables, Inherited};
+use rustc_errors::{DiagCtxt, ErrorGuaranteed};
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir_analysis::astconv::AstConv;
@@ -17,7 +14,6 @@ use rustc_infer::infer;
 use rustc_infer::infer::error_reporting::TypeErrCtxt;
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_middle::infer::unify_key::{ConstVariableOrigin, ConstVariableOriginKind};
-use rustc_middle::ty::subst::GenericArgKind;
 use rustc_middle::ty::{self, Const, Ty, TyCtxt, TypeVisitableExt};
 use rustc_session::Session;
 use rustc_span::symbol::Ident;
@@ -72,7 +68,7 @@ pub struct FnCtxt<'a, 'tcx> {
     /// First span of a return site that we find. Used in error messages.
     pub(super) ret_coercion_span: Cell<Option<Span>>,
 
-    pub(super) resume_yield_tys: Option<(Ty<'tcx>, Ty<'tcx>)>,
+    pub(super) coroutine_types: Option<CoroutineTypes<'tcx>>,
 
     /// Whether the last checked node generates a divergence (e.g.,
     /// `return` will set this to `Always`). In general, when entering
@@ -123,10 +119,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         FnCtxt {
             body_id,
             param_env,
-            err_count_on_creation: inh.tcx.sess.err_count(),
+            err_count_on_creation: inh.tcx.dcx().err_count(),
             ret_coercion: None,
             ret_coercion_span: Cell::new(None),
-            resume_yield_tys: None,
+            coroutine_types: None,
             diverges: Cell::new(Diverges::Maybe),
             enclosing_breakables: RefCell::new(EnclosingBreakables {
                 stack: Vec::new(),
@@ -135,6 +131,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             inh,
             fallback_has_occurred: Cell::new(false),
         }
+    }
+
+    pub(crate) fn dcx(&self) -> &'tcx DiagCtxt {
+        self.tcx.dcx()
     }
 
     pub fn cause(&self, span: Span, code: ObligationCauseCode<'tcx>) -> ObligationCause<'tcx> {
@@ -146,7 +146,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     pub fn sess(&self) -> &Session {
-        &self.tcx.sess
+        self.tcx.sess
     }
 
     /// Creates an `TypeErrCtxt` with a reference to the in-progress
@@ -164,12 +164,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     return fn_sig;
                 }
                 self.probe(|_| {
-                    let ocx = ObligationCtxt::new_in_snapshot(self);
+                    let ocx = ObligationCtxt::new(self);
                     let normalized_fn_sig =
                         ocx.normalize(&ObligationCause::dummy(), self.param_env, fn_sig);
                     if ocx.select_all_or_error().is_empty() {
                         let normalized_fn_sig = self.resolve_vars_if_possible(normalized_fn_sig);
-                        if !normalized_fn_sig.needs_infer() {
+                        if !normalized_fn_sig.has_infer() {
                             return normalized_fn_sig;
                         }
                     }
@@ -188,14 +188,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     pub fn errors_reported_since_creation(&self) -> bool {
-        self.tcx.sess.err_count() > self.err_count_on_creation
+        self.dcx().err_count() > self.err_count_on_creation
+    }
+
+    pub fn next_root_ty_var(&self, origin: TypeVariableOrigin) -> Ty<'tcx> {
+        Ty::new_var(self.tcx, self.next_ty_var_id_in_universe(origin, ty::UniverseIndex::ROOT))
     }
 }
 
 impl<'a, 'tcx> Deref for FnCtxt<'a, 'tcx> {
     type Target = Inherited<'tcx>;
     fn deref(&self) -> &Self::Target {
-        &self.inh
+        self.inh
     }
 }
 
@@ -211,23 +215,21 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
     fn get_type_parameter_bounds(
         &self,
         _: Span,
-        def_id: DefId,
+        def_id: LocalDefId,
         _: Ident,
     ) -> ty::GenericPredicates<'tcx> {
         let tcx = self.tcx;
-        let item_def_id = tcx.hir().ty_param_owner(def_id.expect_local());
+        let item_def_id = tcx.hir().ty_param_owner(def_id);
         let generics = tcx.generics_of(item_def_id);
-        let index = generics.param_def_id_to_index[&def_id];
+        let index = generics.param_def_id_to_index[&def_id.to_def_id()];
+        // HACK(eddyb) should get the original `Span`.
+        let span = tcx.def_span(def_id);
         ty::GenericPredicates {
             parent: None,
             predicates: tcx.arena.alloc_from_iter(
                 self.param_env.caller_bounds().iter().filter_map(|predicate| {
                     match predicate.kind().skip_binder() {
-                        ty::PredicateKind::Clause(ty::Clause::Trait(data))
-                            if data.self_ty().is_param(index) =>
-                        {
-                            // HACK(eddyb) should get the original `Span`.
-                            let span = tcx.def_span(def_id);
+                        ty::ClauseKind::Trait(data) if data.self_ty().is_param(index) => {
                             Some((predicate, span))
                         }
                         _ => None,
@@ -239,7 +241,7 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
 
     fn re_infer(&self, def: Option<&ty::GenericParamDef>, span: Span) -> Option<ty::Region<'tcx>> {
         let v = match def {
-            Some(def) => infer::EarlyBoundRegion(span, def.name),
+            Some(def) => infer::RegionParameterDefinition(span, def.name),
             None => infer::MiscVariable(span),
         };
         Some(self.next_region_var(v))
@@ -250,16 +252,12 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
     }
 
     fn ty_infer(&self, param: Option<&ty::GenericParamDef>, span: Span) -> Ty<'tcx> {
-        if let Some(param) = param {
-            if let GenericArgKind::Type(ty) = self.var_for_def(span, param).unpack() {
-                return ty;
-            }
-            unreachable!()
-        } else {
-            self.next_ty_var(TypeVariableOrigin {
+        match param {
+            Some(param) => self.var_for_def(span, param).as_type().unwrap(),
+            None => self.next_ty_var(TypeVariableOrigin {
                 kind: TypeVariableOriginKind::TypeInference,
                 span,
-            })
+            }),
         }
     }
 
@@ -269,16 +267,19 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
         param: Option<&ty::GenericParamDef>,
         span: Span,
     ) -> Const<'tcx> {
-        if let Some(param) = param {
-            if let GenericArgKind::Const(ct) = self.var_for_def(span, param).unpack() {
-                return ct;
-            }
-            unreachable!()
-        } else {
-            self.next_const_var(
+        // FIXME ideally this shouldn't use unwrap
+        match param {
+            Some(
+                param @ ty::GenericParamDef {
+                    kind: ty::GenericParamDefKind::Const { is_host_effect: true, .. },
+                    ..
+                },
+            ) => self.var_for_effect(param).as_const().unwrap(),
+            Some(param) => self.var_for_def(span, param).as_const().unwrap(),
+            None => self.next_const_var(
                 ty,
                 ConstVariableOrigin { kind: ConstVariableOriginKind::ConstInference, span },
-            )
+            ),
         }
     }
 
@@ -291,25 +292,27 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
     ) -> Ty<'tcx> {
         let trait_ref = self.instantiate_binder_with_fresh_vars(
             span,
-            infer::LateBoundRegionConversionTime::AssocTypeProjection(item_def_id),
+            infer::BoundRegionConversionTime::AssocTypeProjection(item_def_id),
             poly_trait_ref,
         );
 
-        let item_substs = self.astconv().create_substs_for_associated_item(
+        let item_args = self.astconv().create_args_for_associated_item(
             span,
             item_def_id,
             item_segment,
-            trait_ref.substs,
+            trait_ref.args,
         );
 
-        self.tcx().mk_projection(item_def_id, item_substs)
+        Ty::new_projection(self.tcx(), item_def_id, item_args)
     }
 
     fn probe_adt(&self, span: Span, ty: Ty<'tcx>) -> Option<ty::AdtDef<'tcx>> {
         match ty.kind() {
             ty::Adt(adt_def, _) => Some(*adt_def),
             // FIXME(#104767): Should we handle bound regions here?
-            ty::Alias(ty::Projection, _) if !ty.has_escaping_bound_vars() => {
+            ty::Alias(ty::Projection | ty::Inherent | ty::Weak, _)
+                if !ty.has_escaping_bound_vars() =>
+            {
                 self.normalize(span, ty).ty_adt_def()
             }
             _ => None,
@@ -322,7 +325,21 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
 
     fn record_ty(&self, hir_id: hir::HirId, ty: Ty<'tcx>, span: Span) {
         // FIXME: normalization and escaping regions
-        let ty = if !ty.has_escaping_bound_vars() { self.normalize(span, ty) } else { ty };
+        let ty = if !ty.has_escaping_bound_vars() {
+            // NOTE: These obligations are 100% redundant and are implied by
+            // WF obligations that are registered elsewhere, but they have a
+            // better cause code assigned to them in `add_required_obligations_for_hir`.
+            // This means that they should shadow obligations with worse spans.
+            if let ty::Alias(ty::Projection | ty::Weak, ty::AliasTy { args, def_id, .. }) =
+                ty.kind()
+            {
+                self.add_required_obligations_for_hir(span, *def_id, args, hir_id);
+            }
+
+            self.normalize(span, ty)
+        } else {
+            ty
+        };
         self.write_ty(hir_id, ty)
     }
 

@@ -70,8 +70,20 @@ pub(crate) const KINDS_SRC: KindsSrc<'_> = KindsSrc {
         "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct",
         "super", "trait", "true", "try", "type", "unsafe", "use", "where", "while", "yield",
     ],
-    contextual_keywords: &["auto", "default", "existential", "union", "raw", "macro_rules", "yeet"],
-    literals: &["INT_NUMBER", "FLOAT_NUMBER", "CHAR", "BYTE", "STRING", "BYTE_STRING"],
+    contextual_keywords: &[
+        "auto",
+        "builtin",
+        "default",
+        "existential",
+        "union",
+        "raw",
+        "macro_rules",
+        "yeet",
+        "offset_of",
+        "asm",
+        "format_args",
+    ],
+    literals: &["INT_NUMBER", "FLOAT_NUMBER", "CHAR", "BYTE", "STRING", "BYTE_STRING", "C_STRING"],
     tokens: &["ERROR", "IDENT", "WHITESPACE", "LIFETIME_IDENT", "COMMENT", "SHEBANG"],
     nodes: &[
         "SOURCE_FILE",
@@ -86,6 +98,7 @@ pub(crate) const KINDS_SRC: KindsSrc<'_> = KindsSrc {
         "STATIC",
         "CONST",
         "TRAIT",
+        "TRAIT_ALIAS",
         "IMPL",
         "TYPE_ALIAS",
         "MACRO_CALL",
@@ -153,7 +166,10 @@ pub(crate) const KINDS_SRC: KindsSrc<'_> = KindsSrc {
         "RECORD_EXPR",
         "RECORD_EXPR_FIELD_LIST",
         "RECORD_EXPR_FIELD",
-        "BOX_EXPR",
+        "OFFSET_OF_EXPR",
+        "ASM_EXPR",
+        "FORMAT_ARGS_EXPR",
+        "FORMAT_ARGS_ARG",
         // postfix
         "CALL_EXPR",
         "INDEX_EXPR",
@@ -198,6 +214,7 @@ pub(crate) const KINDS_SRC: KindsSrc<'_> = KindsSrc {
         "GENERIC_PARAM",
         "LIFETIME_PARAM",
         "TYPE_PARAM",
+        "RETURN_TYPE_ARG",
         "CONST_PARAM",
         "GENERIC_ARG_LIST",
         "LIFETIME",
@@ -214,6 +231,7 @@ pub(crate) const KINDS_SRC: KindsSrc<'_> = KindsSrc {
         // macro related
         "MACRO_ITEMS",
         "MACRO_STMTS",
+        "MACRO_EAGER_INPUT",
     ],
 };
 

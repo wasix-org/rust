@@ -1,29 +1,26 @@
 use std::cell::{Cell, RefCell};
 
-use gccjit::{Block, CType, Context, Function, FunctionPtrType, FunctionType, LValue, RValue, Struct, Type};
+use gccjit::{Block, CType, Context, Function, FunctionPtrType, FunctionType, LValue, RValue, Type};
 use rustc_codegen_ssa::base::wants_msvc_seh;
 use rustc_codegen_ssa::traits::{
     BackendTypes,
+    BaseTypeMethods,
     MiscMethods,
 };
+use rustc_codegen_ssa::errors as ssa_errors;
 use rustc_data_structures::base_n;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_middle::span_bug;
 use rustc_middle::mir::mono::CodegenUnit;
 use rustc_middle::ty::{self, Instance, ParamEnv, PolyExistentialTraitRef, Ty, TyCtxt};
-use rustc_middle::ty::layout::{FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasParamEnv, HasTyCtxt, LayoutError, TyAndLayout, LayoutOfHelpers};
+use rustc_middle::ty::layout::{FnAbiError, FnAbiOf, FnAbiOfHelpers, FnAbiRequest, HasParamEnv, HasTyCtxt, LayoutError, TyAndLayout, LayoutOfHelpers};
 use rustc_session::Session;
 use rustc_span::{Span, source_map::respan};
 use rustc_target::abi::{call::FnAbi, HasDataLayout, PointeeInfo, Size, TargetDataLayout, VariantIdx};
 use rustc_target::spec::{HasTargetSpec, Target, TlsModel};
 
 use crate::callee::get_fn;
-
-#[derive(Clone)]
-pub struct FuncSig<'gcc> {
-    pub params: Vec<Type<'gcc>>,
-    pub return_type: Type<'gcc>,
-}
+use crate::common::SignType;
 
 pub struct CodegenCx<'gcc, 'tcx> {
     pub check_overflow: bool,
@@ -33,6 +30,7 @@ pub struct CodegenCx<'gcc, 'tcx> {
     // TODO(bjorn3): Can this field be removed?
     pub current_func: RefCell<Option<Function<'gcc>>>,
     pub normal_function_addresses: RefCell<FxHashSet<RValue<'gcc>>>,
+    pub function_address_names: RefCell<FxHashMap<RValue<'gcc>, String>>,
 
     pub functions: RefCell<FxHashMap<String, Function<'gcc>>>,
     pub intrinsics: RefCell<FxHashMap<String, Function<'gcc>>>,
@@ -78,12 +76,10 @@ pub struct CodegenCx<'gcc, 'tcx> {
 
     pub struct_types: RefCell<FxHashMap<Vec<Type<'gcc>>, Type<'gcc>>>,
 
-    pub types_with_fields_to_set: RefCell<FxHashMap<Type<'gcc>, (Struct<'gcc>, TyAndLayout<'tcx>)>>,
-
     /// Cache instances of monomorphic and polymorphic items
     pub instances: RefCell<FxHashMap<Instance<'tcx>, LValue<'gcc>>>,
     /// Cache function instances of monomorphic and polymorphic items
-    pub function_instances: RefCell<FxHashMap<Instance<'tcx>, RValue<'gcc>>>,
+    pub function_instances: RefCell<FxHashMap<Instance<'tcx>, Function<'gcc>>>,
     /// Cache generated vtables
     pub vtables: RefCell<FxHashMap<(Ty<'tcx>, Option<ty::PolyExistentialTraitRef<'tcx>>), RValue<'gcc>>>,
 
@@ -110,6 +106,7 @@ pub struct CodegenCx<'gcc, 'tcx> {
     local_gen_sym_counter: Cell<usize>,
 
     eh_personality: Cell<Option<RValue<'gcc>>>,
+    pub rust_try_fn: Cell<Option<(Type<'gcc>, Function<'gcc>)>>,
 
     pub pointee_infos: RefCell<FxHashMap<(Ty<'tcx>, Size), Option<PointeeInfo>>>,
 
@@ -119,35 +116,65 @@ pub struct CodegenCx<'gcc, 'tcx> {
     /// they can be dereferenced later.
     /// FIXME(antoyo): fix the rustc API to avoid having this hack.
     pub structs_as_pointer: RefCell<FxHashSet<RValue<'gcc>>>,
+
+    pub cleanup_blocks: RefCell<FxHashSet<Block<'gcc>>>,
 }
 
 impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
     pub fn new(context: &'gcc Context<'gcc>, codegen_unit: &'tcx CodegenUnit<'tcx>, tcx: TyCtxt<'tcx>, supports_128bit_integers: bool) -> Self {
         let check_overflow = tcx.sess.overflow_checks();
 
-        let i8_type = context.new_c_type(CType::Int8t);
-        let i16_type = context.new_c_type(CType::Int16t);
-        let i32_type = context.new_c_type(CType::Int32t);
-        let i64_type = context.new_c_type(CType::Int64t);
-        let u8_type = context.new_c_type(CType::UInt8t);
-        let u16_type = context.new_c_type(CType::UInt16t);
-        let u32_type = context.new_c_type(CType::UInt32t);
-        let u64_type = context.new_c_type(CType::UInt64t);
+        let create_type = |ctype, rust_type| {
+            let layout = tcx.layout_of(ParamEnv::reveal_all().and(rust_type)).unwrap();
+            let align = layout.align.abi.bytes();
+            #[cfg(feature="master")]
+            {
+                context.new_c_type(ctype).get_aligned(align)
+            }
+            #[cfg(not(feature="master"))]
+            {
+                // Since libgccjit 12 doesn't contain the fix to compare aligned integer types,
+                // only align u128 and i128.
+                if layout.ty.int_size_and_signed(tcx).0.bytes() == 16 {
+                    context.new_c_type(ctype).get_aligned(align)
+                }
+                else {
+                    context.new_c_type(ctype)
+                }
+            }
+        };
+
+        let i8_type = create_type(CType::Int8t, tcx.types.i8);
+        let i16_type = create_type(CType::Int16t, tcx.types.i16);
+        let i32_type = create_type(CType::Int32t, tcx.types.i32);
+        let i64_type = create_type(CType::Int64t, tcx.types.i64);
+        let u8_type = create_type(CType::UInt8t, tcx.types.u8);
+        let u16_type = create_type(CType::UInt16t, tcx.types.u16);
+        let u32_type = create_type(CType::UInt32t, tcx.types.u32);
+        let u64_type = create_type(CType::UInt64t, tcx.types.u64);
 
         let (i128_type, u128_type) =
             if supports_128bit_integers {
-                let i128_type = context.new_c_type(CType::Int128t).get_aligned(8); // TODO(antoyo): should the alignment be hard-coded?;
-                let u128_type = context.new_c_type(CType::UInt128t).get_aligned(8); // TODO(antoyo): should the alignment be hard-coded?;
+                let i128_type = create_type(CType::Int128t, tcx.types.i128);
+                let u128_type = create_type(CType::UInt128t, tcx.types.u128);
                 (i128_type, u128_type)
             }
             else {
-                let i128_type = context.new_array_type(None, i64_type, 2);
-                let u128_type = context.new_array_type(None, u64_type, 2);
+                /*let layout = tcx.layout_of(ParamEnv::reveal_all().and(tcx.types.i128)).unwrap();
+                let i128_align = layout.align.abi.bytes();
+                let layout = tcx.layout_of(ParamEnv::reveal_all().and(tcx.types.u128)).unwrap();
+                let u128_align = layout.align.abi.bytes();*/
+
+                // TODO(antoyo): re-enable the alignment when libgccjit fixed the issue in
+                // gcc_jit_context_new_array_constructor (it should not use reinterpret_cast).
+                let i128_type = context.new_array_type(None, i64_type, 2)/*.get_aligned(i128_align)*/;
+                let u128_type = context.new_array_type(None, u64_type, 2)/*.get_aligned(u128_align)*/;
                 (i128_type, u128_type)
             };
 
         let tls_model = to_gcc_tls_mode(tcx.sess.tls_model());
 
+        // TODO(antoyo): set alignment on those types as well.
         let float_type = context.new_type::<f32>();
         let double_type = context.new_type::<f64>();
 
@@ -163,13 +190,9 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         let ulonglong_type = context.new_c_type(CType::ULongLong);
         let sizet_type = context.new_c_type(CType::SizeT);
 
-        let isize_type = context.new_c_type(CType::LongLong);
-        let usize_type = context.new_c_type(CType::ULongLong);
+        let usize_type = sizet_type;
+        let isize_type = usize_type;
         let bool_type = context.new_type::<bool>();
-
-        // TODO(antoyo): only have those assertions on x86_64.
-        assert_eq!(isize_type.get_size(), i64_type.get_size());
-        assert_eq!(usize_type.get_size(), u64_type.get_size());
 
         let mut functions = FxHashMap::default();
         let builtins = [
@@ -188,12 +211,13 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
             functions.insert(builtin.to_string(), context.get_builtin_function(builtin));
         }
 
-        Self {
+        let mut cx = Self {
             check_overflow,
             codegen_unit,
             context,
             current_func: RefCell::new(None),
             normal_function_addresses: Default::default(),
+            function_address_names: Default::default(),
             functions: RefCell::new(functions),
             intrinsics: RefCell::new(FxHashMap::default()),
 
@@ -243,12 +267,16 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
             types: Default::default(),
             tcx,
             struct_types: Default::default(),
-            types_with_fields_to_set: Default::default(),
             local_gen_sym_counter: Cell::new(0),
             eh_personality: Cell::new(None),
+            rust_try_fn: Cell::new(None),
             pointee_infos: Default::default(),
             structs_as_pointer: Default::default(),
-        }
+            cleanup_blocks: Default::default(),
+        };
+        // TODO(antoyo): instead of doing this, add SsizeT to libgccjit.
+        cx.isize_type = usize_type.to_signed(&cx);
+        cx
     }
 
     pub fn rvalue_as_function(&self, value: RValue<'gcc>) -> Function<'gcc> {
@@ -327,8 +355,9 @@ impl<'gcc, 'tcx> MiscMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
 
     fn get_fn(&self, instance: Instance<'tcx>) -> RValue<'gcc> {
         let func = get_fn(self, instance);
-        *self.current_func.borrow_mut() = Some(self.rvalue_as_function(func));
-        func
+        *self.current_func.borrow_mut() = Some(func);
+        // FIXME(antoyo): this is a wrong cast. That requires changing the compiler API.
+        unsafe { std::mem::transmute(func) }
     }
 
     fn get_fn_addr(&self, instance: Instance<'tcx>) -> RValue<'gcc> {
@@ -339,8 +368,7 @@ impl<'gcc, 'tcx> MiscMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
                 self.intrinsics.borrow()[func_name].clone()
             }
             else {
-                let func = get_fn(self, instance);
-                self.rvalue_as_function(func)
+                get_fn(self, instance)
             };
         let ptr = func.get_address(None);
 
@@ -348,6 +376,7 @@ impl<'gcc, 'tcx> MiscMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
         // FIXME(antoyo): the rustc API seems to call get_fn_addr() when not needed (e.g. for FFI).
 
         self.normal_function_addresses.borrow_mut().insert(ptr);
+        self.function_address_names.borrow_mut().insert(ptr, func_name.to_string());
 
         ptr
     }
@@ -377,31 +406,40 @@ impl<'gcc, 'tcx> MiscMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
             return llpersonality;
         }
         let tcx = self.tcx;
-        let llfn = match tcx.lang_items().eh_personality() {
-            Some(def_id) if !wants_msvc_seh(self.sess()) => self.get_fn_addr(
-                ty::Instance::resolve(
-                    tcx,
-                    ty::ParamEnv::reveal_all(),
-                    def_id,
-                    ty::List::empty(),
-                )
-                .unwrap().unwrap(),
-            ),
-            _ => {
-                let _name = if wants_msvc_seh(self.sess()) {
-                    "__CxxFrameHandler3"
-                } else {
-                    "rust_eh_personality"
-                };
-                //let func = self.declare_func(name, self.type_i32(), &[], true);
-                // FIXME(antoyo): this hack should not be needed. That will probably be removed when
-                // unwinding support is added.
-                self.context.new_rvalue_from_int(self.int_type, 0)
-            }
-        };
+        let func =
+            match tcx.lang_items().eh_personality() {
+                Some(def_id) if !wants_msvc_seh(self.sess()) => {
+                    let instance =
+                        ty::Instance::resolve(
+                            tcx,
+                            ty::ParamEnv::reveal_all(),
+                            def_id,
+                            ty::List::empty(),
+                        )
+                        .unwrap().unwrap();
+
+                    let symbol_name = tcx.symbol_name(instance).name;
+                    let fn_abi = self.fn_abi_of_instance(instance, ty::List::empty());
+                    self.linkage.set(FunctionType::Extern);
+                    let func = self.declare_fn(symbol_name, &fn_abi);
+                    let func: RValue<'gcc> = unsafe { std::mem::transmute(func) };
+                    func
+                },
+                _ => {
+                    let name =
+                        if wants_msvc_seh(self.sess()) {
+                            "__CxxFrameHandler3"
+                        }
+                        else {
+                            "rust_eh_personality"
+                        };
+                    let func = self.declare_func(name, self.type_i32(), &[], true);
+                    unsafe { std::mem::transmute(func) }
+                }
+            };
         // TODO(antoyo): apply target cpu attributes.
-        self.eh_personality.set(Some(llfn));
-        llfn
+        self.eh_personality.set(Some(func));
+        func
     }
 
     fn sess(&self) -> &Session {
@@ -461,10 +499,10 @@ impl<'gcc, 'tcx> LayoutOfHelpers<'tcx> for CodegenCx<'gcc, 'tcx> {
 
     #[inline]
     fn handle_layout_err(&self, err: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
-        if let LayoutError::SizeOverflow(_) = err {
-            self.sess().emit_fatal(respan(span, err))
+        if let LayoutError::SizeOverflow(_) | LayoutError::ReferencesError(_) = err {
+            self.tcx.dcx().emit_fatal(respan(span, err.into_diagnostic()))
         } else {
-            span_bug!(span, "failed to get layout for `{}`: {}", ty, err)
+            self.tcx.dcx().emit_fatal(ssa_errors::FailedToGetLayout { span, ty, err })
         }
     }
 }
@@ -480,25 +518,16 @@ impl<'gcc, 'tcx> FnAbiOfHelpers<'tcx> for CodegenCx<'gcc, 'tcx> {
         fn_abi_request: FnAbiRequest<'tcx>,
     ) -> ! {
         if let FnAbiError::Layout(LayoutError::SizeOverflow(_)) = err {
-            self.sess().emit_fatal(respan(span, err))
+            self.tcx.dcx().emit_fatal(respan(span, err))
         } else {
             match fn_abi_request {
                 FnAbiRequest::OfFnPtr { sig, extra_args } => {
-                    span_bug!(
-                        span,
-                        "`fn_abi_of_fn_ptr({}, {:?})` failed: {}",
-                        sig,
-                        extra_args,
-                        err
-                    );
+                    span_bug!(span, "`fn_abi_of_fn_ptr({sig}, {extra_args:?})` failed: {err:?}");
                 }
                 FnAbiRequest::OfInstance { instance, extra_args } => {
                     span_bug!(
                         span,
-                        "`fn_abi_of_instance({}, {:?})` failed: {}",
-                        instance,
-                        extra_args,
-                        err
+                        "`fn_abi_of_instance({instance}, {extra_args:?})` failed: {err:?}"
                     );
                 }
             }
@@ -534,5 +563,6 @@ fn to_gcc_tls_mode(tls_model: TlsModel) -> gccjit::TlsModel {
         TlsModel::LocalDynamic => gccjit::TlsModel::LocalDynamic,
         TlsModel::InitialExec => gccjit::TlsModel::InitialExec,
         TlsModel::LocalExec => gccjit::TlsModel::LocalExec,
+        TlsModel::Emulated => gccjit::TlsModel::GlobalDynamic,
     }
 }

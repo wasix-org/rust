@@ -7,8 +7,8 @@ use rustc_infer::infer::region_constraints::GenericKind;
 use rustc_infer::infer::InferCtxt;
 use rustc_middle::mir::ConstraintCategory;
 use rustc_middle::traits::query::OutlivesBound;
-use rustc_middle::ty::{self, RegionVid, Ty};
-use rustc_span::Span;
+use rustc_middle::ty::{self, RegionVid, Ty, TypeVisitableExt};
+use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
 use rustc_trait_selection::traits::query::type_op::{self, TypeOp};
 use std::rc::Rc;
 use type_op::TypeOpOutput;
@@ -91,31 +91,6 @@ impl UniversalRegionRelations<'_> {
         let res = self.non_local_bounds(&self.inverse_outlives, fr);
         assert!(!res.is_empty(), "can't find an upper bound!?");
         res
-    }
-
-    /// Returns the "postdominating" bound of the set of
-    /// `non_local_upper_bounds` for the given region.
-    pub(crate) fn non_local_upper_bound(&self, fr: RegionVid) -> RegionVid {
-        let upper_bounds = self.non_local_upper_bounds(fr);
-
-        // In case we find more than one, reduce to one for
-        // convenience. This is to prevent us from generating more
-        // complex constraints, but it will cause spurious errors.
-        let post_dom = self.inverse_outlives.mutual_immediate_postdominator(upper_bounds);
-
-        debug!("non_local_bound: post_dom={:?}", post_dom);
-
-        post_dom
-            .and_then(|post_dom| {
-                // If the mutual immediate postdom is not local, then
-                // there is no non-local result we can return.
-                if !self.universal_regions.is_local_free_region(post_dom) {
-                    Some(post_dom)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(self.universal_regions.fr_static)
     }
 
     /// Finds a "lower bound" for `fr` that is not local. In other
@@ -268,18 +243,11 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
             let TypeOpOutput { output: norm_ty, constraints: constraints_normalize, .. } = self
                 .param_env
                 .and(type_op::normalize::Normalize::new(ty))
-                .fully_perform(self.infcx)
-                .unwrap_or_else(|_| {
-                    let guar = self
-                        .infcx
-                        .tcx
-                        .sess
-                        .delay_span_bug(span, &format!("failed to normalize {:?}", ty));
-                    TypeOpOutput {
-                        output: self.infcx.tcx.ty_error(guar),
-                        constraints: None,
-                        error_info: None,
-                    }
+                .fully_perform(self.infcx, span)
+                .unwrap_or_else(|guar| TypeOpOutput {
+                    output: Ty::new_error(self.infcx.tcx, guar),
+                    constraints: None,
+                    error_info: None,
                 });
             if let Some(c) = constraints_normalize {
                 constraints.push(c)
@@ -335,7 +303,7 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
             Locations::All(span),
             span,
             ConstraintCategory::Internal,
-            &mut self.constraints,
+            self.constraints,
         )
         .convert_all(data);
     }
@@ -349,9 +317,13 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
         let TypeOpOutput { output: bounds, constraints, .. } = self
             .param_env
             .and(type_op::implied_outlives_bounds::ImpliedOutlivesBounds { ty })
-            .fully_perform(self.infcx)
-            .unwrap_or_else(|_| bug!("failed to compute implied bounds {:?}", ty));
+            .fully_perform(self.infcx, DUMMY_SP)
+            .map_err(|_: ErrorGuaranteed| debug!("failed to compute implied bounds {:?}", ty))
+            .ok()?;
         debug!(?bounds, ?constraints);
+        // Because of #109628, we may have unexpected placeholders. Ignore them!
+        // FIXME(#109628): panic in this case once the issue is fixed.
+        let bounds = bounds.into_iter().filter(|bound| !bound.has_placeholders());
         self.add_outlives_bounds(bounds);
         constraints
     }

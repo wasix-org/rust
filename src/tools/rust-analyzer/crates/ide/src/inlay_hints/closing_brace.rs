@@ -10,7 +10,7 @@ use syntax::{
     match_ast, SyntaxKind, SyntaxNode, T,
 };
 
-use crate::{FileId, InlayHint, InlayHintLabel, InlayHintsConfig, InlayKind};
+use crate::{FileId, InlayHint, InlayHintLabel, InlayHintPosition, InlayHintsConfig, InlayKind};
 
 pub(super) fn hints(
     acc: &mut Vec<InlayHint>,
@@ -35,7 +35,7 @@ pub(super) fn hints(
                     let ty = imp.self_ty(sema.db);
                     let trait_ = imp.trait_(sema.db);
                     let hint_text = match trait_ {
-                        Some(tr) => format!("impl {} for {}", tr.name(sema.db), ty.display_truncated(sema.db, config.max_length)),
+                        Some(tr) => format!("impl {} for {}", tr.name(sema.db).display(sema.db), ty.display_truncated(sema.db, config.max_length)),
                         None => format!("impl {}", ty.display_truncated(sema.db, config.max_length)),
                     };
                     (hint_text, None)
@@ -109,9 +109,14 @@ pub(super) fn hints(
 
     let linked_location = name_range.map(|range| FileRange { file_id, range });
     acc.push(InlayHint {
+        needs_resolve: linked_location.is_some(),
         range: closing_token.text_range(),
         kind: InlayKind::ClosingBrace,
         label: InlayHintLabel::simple(label, None, linked_location),
+        text_edit: None,
+        position: InlayHintPosition::After,
+        pad_left: true,
+        pad_right: false,
     });
 
     None

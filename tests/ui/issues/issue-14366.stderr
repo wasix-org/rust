@@ -5,12 +5,12 @@ LL |     let _x = "test" as &dyn (::std::any::Any);
    |              ^^^^^^ doesn't have a size known at compile-time
    |
    = help: the trait `Sized` is not implemented for `str`
-   = note: required for the cast from `str` to the object type `dyn Any`
-help: consider borrowing the value, since `&str` can be coerced into `dyn Any`
+   = note: required for the cast from `&'static str` to `&(dyn Any + 'static)`
+help: consider borrowing the value, since `&&'static str` can be coerced into `&(dyn Any + 'static)`
    |
 LL |     let _x = &"test" as &dyn (::std::any::Any);
    |              +
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0277`.

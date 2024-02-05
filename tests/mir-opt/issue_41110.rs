@@ -1,4 +1,5 @@
-// ignore-wasm32-bare compiled with panic=abort by default
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 
 // check that we don't emit multiple drop flags when they are not needed.
 

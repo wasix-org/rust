@@ -7,6 +7,7 @@ LL | |     }
    | |_____^ help: replace it with: `a?;`
    |
    = note: `-D clippy::question-mark` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::question_mark)]`
 
 error: this block may be rewritten with the `?` operator
   --> $DIR/question_mark.rs:52:9
@@ -115,7 +116,7 @@ LL | |     }
    | |_____^ help: replace it with: `x?;`
 
 error: this block may be rewritten with the `?` operator
-  --> $DIR/question_mark.rs:196:5
+  --> $DIR/question_mark.rs:213:5
    |
 LL | /     if let Err(err) = func_returning_result() {
 LL | |         return Err(err);
@@ -123,12 +124,22 @@ LL | |     }
    | |_____^ help: replace it with: `func_returning_result()?;`
 
 error: this block may be rewritten with the `?` operator
-  --> $DIR/question_mark.rs:203:5
+  --> $DIR/question_mark.rs:220:5
    |
 LL | /     if let Err(err) = func_returning_result() {
 LL | |         return Err(err);
 LL | |     }
    | |_____^ help: replace it with: `func_returning_result()?;`
 
-error: aborting due to 15 previous errors
+error: this block may be rewritten with the `?` operator
+  --> $DIR/question_mark.rs:297:13
+   |
+LL | /             if a.is_none() {
+LL | |                 return None;
+LL | |                 // do lint here, the outer `try` is not relevant here
+LL | |                 // https://github.com/rust-lang/rust-clippy/pull/11001#issuecomment-1610636867
+LL | |             }
+   | |_____________^ help: replace it with: `a?;`
+
+error: aborting due to 16 previous errors
 

@@ -10,7 +10,7 @@ use rustc_hir::{
     StmtKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::Span;
 
 declare_clippy_lint! {
@@ -22,7 +22,7 @@ declare_clippy_lint! {
     /// Assigning in the `let` statement is less repetitive.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let a;
     /// a = 1;
     ///
@@ -41,7 +41,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let a = 1;
     ///
     /// let b = match 3 {
@@ -86,7 +86,9 @@ fn contains_let(cond: &Expr<'_>) -> bool {
 }
 
 fn stmt_needs_ordered_drop(cx: &LateContext<'_>, stmt: &Stmt<'_>) -> bool {
-    let StmtKind::Local(local) = stmt.kind else { return false };
+    let StmtKind::Local(local) = stmt.kind else {
+        return false;
+    };
     !local.pat.walk_short(|pat| {
         if let PatKind::Binding(.., None) = pat.kind {
             !needs_ordered_drop(cx, cx.typeck_results().pat_ty(pat))
@@ -126,21 +128,18 @@ impl LocalAssign {
         let assign = match expr.kind {
             ExprKind::Block(Block { expr: Some(expr), .. }, _) => Self::from_expr(expr, expr.span),
             ExprKind::Block(block, _) => {
-                if_chain! {
-                    if let Some((last, other_stmts)) = block.stmts.split_last();
-                    if let StmtKind::Expr(expr) | StmtKind::Semi(expr) = last.kind;
+                if let Some((last, other_stmts)) = block.stmts.split_last()
+                    && let StmtKind::Expr(expr) | StmtKind::Semi(expr) = last.kind
 
-                    let assign = Self::from_expr(expr, last.span)?;
+                    && let assign = Self::from_expr(expr, last.span)?
 
                     // avoid visiting if not needed
-                    if assign.lhs_id == binding_id;
-                    if other_stmts.iter().all(|stmt| !contains_assign_expr(cx, stmt));
-
-                    then {
-                        Some(assign)
-                    } else {
-                        None
-                    }
+                    && assign.lhs_id == binding_id
+                    && other_stmts.iter().all(|stmt| !contains_assign_expr(cx, stmt))
+                {
+                    Some(assign)
+                } else {
+                    None
                 }
             },
             ExprKind::Assign(..) => Self::from_expr(expr, expr.span),
@@ -366,22 +365,20 @@ fn check<'tcx>(
 impl<'tcx> LateLintPass<'tcx> for NeedlessLateInit {
     fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx Local<'tcx>) {
         let mut parents = cx.tcx.hir().parent_iter(local.hir_id);
-        if_chain! {
-            if let Local {
-                init: None,
-                pat: &Pat {
+        if let Local {
+            init: None,
+            pat:
+                &Pat {
                     kind: PatKind::Binding(BindingAnnotation::NONE, binding_id, _, None),
                     ..
                 },
-                source: LocalSource::Normal,
-                ..
-            } = local;
-            if let Some((_, Node::Stmt(local_stmt))) = parents.next();
-            if let Some((_, Node::Block(block))) = parents.next();
-
-            then {
-                check(cx, local, local_stmt, block, binding_id);
-            }
+            source: LocalSource::Normal,
+            ..
+        } = local
+            && let Some((_, Node::Stmt(local_stmt))) = parents.next()
+            && let Some((_, Node::Block(block))) = parents.next()
+        {
+            check(cx, local, local_stmt, block, binding_id);
         }
     }
 }

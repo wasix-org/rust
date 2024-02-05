@@ -1,6 +1,4 @@
-// run-rustfix
-
-#![feature(let_chains)]
+#![feature(let_chains, inline_const)]
 #![warn(clippy::bool_to_int_with_if)]
 #![allow(unused, dead_code, clippy::unnecessary_operation, clippy::no_effect)]
 
@@ -111,6 +109,11 @@ fn main() {
 
     pub const SHOULD_NOT_LINT: usize = if true { 1 } else { 0 };
 
+    // https://github.com/rust-lang/rust-clippy/issues/10452
+    let should_not_lint = [(); if true { 1 } else { 0 }];
+
+    let should_not_lint = const { if true { 1 } else { 0 } };
+
     some_fn(a);
 }
 
@@ -137,7 +140,9 @@ fn if_let(a: Enum, b: Enum) {
         0
     };
 
-    if let Enum::A = a && let Enum::B = b {
+    if let Enum::A = a
+        && let Enum::B = b
+    {
         1
     } else {
         0

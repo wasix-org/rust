@@ -277,6 +277,14 @@ pub mod consts {
     #[stable(feature = "tau_constant", since = "1.47.0")]
     pub const TAU: f64 = 6.28318530717958647692528676655900577_f64;
 
+    /// The golden ratio (φ)
+    #[unstable(feature = "more_float_constants", issue = "103883")]
+    pub const PHI: f64 = 1.618033988749894848204586834365638118_f64;
+
+    /// The Euler-Mascheroni constant (γ)
+    #[unstable(feature = "more_float_constants", issue = "103883")]
+    pub const EGAMMA: f64 = 0.577215664901532860606512090082402431_f64;
+
     /// π/2
     #[stable(feature = "rust1", since = "1.0.0")]
     pub const FRAC_PI_2: f64 = 1.57079632679489661923132169163975144_f64;
@@ -301,6 +309,10 @@ pub mod consts {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub const FRAC_1_PI: f64 = 0.318309886183790671537767526745028724_f64;
 
+    /// 1/sqrt(π)
+    #[unstable(feature = "more_float_constants", issue = "103883")]
+    pub const FRAC_1_SQRT_PI: f64 = 0.564189583547756286948079451560772586_f64;
+
     /// 2/π
     #[stable(feature = "rust1", since = "1.0.0")]
     pub const FRAC_2_PI: f64 = 0.636619772367581343075535053490057448_f64;
@@ -316,6 +328,14 @@ pub mod consts {
     /// 1/sqrt(2)
     #[stable(feature = "rust1", since = "1.0.0")]
     pub const FRAC_1_SQRT_2: f64 = 0.707106781186547524400844362104849039_f64;
+
+    /// sqrt(3)
+    #[unstable(feature = "more_float_constants", issue = "103883")]
+    pub const SQRT_3: f64 = 1.732050807568877293527446341505872367_f64;
+
+    /// 1/sqrt(3)
+    #[unstable(feature = "more_float_constants", issue = "103883")]
+    pub const FRAC_1_SQRT_3: f64 = 0.577350269189625764509148780501957456_f64;
 
     /// Euler's number (e)
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -356,6 +376,13 @@ impl f64 {
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const MANTISSA_DIGITS: u32 = 53;
     /// Approximate number of significant digits in base 10.
+    ///
+    /// This is the maximum <i>x</i> such that any decimal number with <i>x</i>
+    /// significant digits can be converted to `f64` and back without loss.
+    ///
+    /// Equal to floor(log<sub>10</sub>&nbsp;2<sup>[`MANTISSA_DIGITS`]&nbsp;&minus;&nbsp;1</sup>).
+    ///
+    /// [`MANTISSA_DIGITS`]: f64::MANTISSA_DIGITS
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const DIGITS: u32 = 15;
 
@@ -363,31 +390,62 @@ impl f64 {
     ///
     /// This is the difference between `1.0` and the next larger representable number.
     ///
+    /// Equal to 2<sup>1&nbsp;&minus;&nbsp;[`MANTISSA_DIGITS`]</sup>.
+    ///
     /// [Machine epsilon]: https://en.wikipedia.org/wiki/Machine_epsilon
+    /// [`MANTISSA_DIGITS`]: f64::MANTISSA_DIGITS
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const EPSILON: f64 = 2.2204460492503131e-16_f64;
 
     /// Smallest finite `f64` value.
+    ///
+    /// Equal to &minus;[`MAX`].
+    ///
+    /// [`MAX`]: f64::MAX
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const MIN: f64 = -1.7976931348623157e+308_f64;
     /// Smallest positive normal `f64` value.
+    ///
+    /// Equal to 2<sup>[`MIN_EXP`]&nbsp;&minus;&nbsp;1</sup>.
+    ///
+    /// [`MIN_EXP`]: f64::MIN_EXP
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const MIN_POSITIVE: f64 = 2.2250738585072014e-308_f64;
     /// Largest finite `f64` value.
+    ///
+    /// Equal to
+    /// (1&nbsp;&minus;&nbsp;2<sup>&minus;[`MANTISSA_DIGITS`]</sup>)&nbsp;2<sup>[`MAX_EXP`]</sup>.
+    ///
+    /// [`MANTISSA_DIGITS`]: f64::MANTISSA_DIGITS
+    /// [`MAX_EXP`]: f64::MAX_EXP
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const MAX: f64 = 1.7976931348623157e+308_f64;
 
     /// One greater than the minimum possible normal power of 2 exponent.
+    ///
+    /// If <i>x</i>&nbsp;=&nbsp;`MIN_EXP`, then normal numbers
+    /// ≥&nbsp;0.5&nbsp;×&nbsp;2<sup><i>x</i></sup>.
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const MIN_EXP: i32 = -1021;
     /// Maximum possible power of 2 exponent.
+    ///
+    /// If <i>x</i>&nbsp;=&nbsp;`MAX_EXP`, then normal numbers
+    /// &lt;&nbsp;1&nbsp;×&nbsp;2<sup><i>x</i></sup>.
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const MAX_EXP: i32 = 1024;
 
-    /// Minimum possible normal power of 10 exponent.
+    /// Minimum <i>x</i> for which 10<sup><i>x</i></sup> is normal.
+    ///
+    /// Equal to ceil(log<sub>10</sub>&nbsp;[`MIN_POSITIVE`]).
+    ///
+    /// [`MIN_POSITIVE`]: f64::MIN_POSITIVE
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const MIN_10_EXP: i32 = -307;
-    /// Maximum possible power of 10 exponent.
+    /// Maximum <i>x</i> for which 10<sup><i>x</i></sup> is normal.
+    ///
+    /// Equal to floor(log<sub>10</sub>&nbsp;[`MAX`]).
+    ///
+    /// [`MAX`]: f64::MAX
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const MAX_10_EXP: i32 = 308;
 
@@ -401,6 +459,7 @@ impl f64 {
     /// This constant isn't guaranteed to equal to any specific NaN bitpattern,
     /// and the stability of its representation over Rust versions
     /// and target platforms isn't guaranteed.
+    #[rustc_diagnostic_item = "f64_nan"]
     #[stable(feature = "assoc_int_consts", since = "1.43.0")]
     pub const NAN: f64 = 0.0_f64 / 0.0_f64;
     /// Infinity (∞).
@@ -947,7 +1006,44 @@ impl f64 {
         } else if self == other {
             if self.is_sign_negative() && other.is_sign_positive() { self } else { other }
         } else {
+            // At least one input is NaN. Use `+` to perform NaN propagation and quieting.
             self + other
+        }
+    }
+
+    /// Calculates the middle point of `self` and `rhs`.
+    ///
+    /// This returns NaN when *either* argument is NaN or if a combination of
+    /// +inf and -inf is provided as arguments.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(num_midpoint)]
+    /// assert_eq!(1f64.midpoint(4.0), 2.5);
+    /// assert_eq!((-5.5f64).midpoint(8.0), 1.25);
+    /// ```
+    #[unstable(feature = "num_midpoint", issue = "110840")]
+    pub fn midpoint(self, other: f64) -> f64 {
+        const LO: f64 = f64::MIN_POSITIVE * 2.;
+        const HI: f64 = f64::MAX / 2.;
+
+        let (a, b) = (self, other);
+        let abs_a = a.abs_private();
+        let abs_b = b.abs_private();
+
+        if abs_a <= HI && abs_b <= HI {
+            // Overflow is impossible
+            (a + b) / 2.
+        } else if abs_a < LO {
+            // Not safe to halve a
+            a + (b / 2.)
+        } else if abs_b < LO {
+            // Not safe to halve b
+            (a / 2.) + b
+        } else {
+            // Not safe to halve a and b
+            (a / 2.) + (b / 2.)
         }
     }
 
@@ -1326,9 +1422,17 @@ impl f64 {
     /// ];
     ///
     /// bois.sort_by(|a, b| a.weight.total_cmp(&b.weight));
-    /// # assert!(bois.into_iter().map(|b| b.weight)
-    /// #     .zip([-5.0, 0.1, 10.0, 99.0, f64::INFINITY, f64::NAN].iter())
-    /// #     .all(|(a, b)| a.to_bits() == b.to_bits()))
+    ///
+    /// // `f64::NAN` could be positive or negative, which will affect the sort order.
+    /// if f64::NAN.is_sign_negative() {
+    ///     assert!(bois.into_iter().map(|b| b.weight)
+    ///         .zip([f64::NAN, -5.0, 0.1, 10.0, 99.0, f64::INFINITY].iter())
+    ///         .all(|(a, b)| a.to_bits() == b.to_bits()))
+    /// } else {
+    ///     assert!(bois.into_iter().map(|b| b.weight)
+    ///         .zip([-5.0, 0.1, 10.0, 99.0, f64::INFINITY, f64::NAN].iter())
+    ///         .all(|(a, b)| a.to_bits() == b.to_bits()))
+    /// }
     /// ```
     #[stable(feature = "total_cmp", since = "1.62.0")]
     #[must_use]
@@ -1389,7 +1493,7 @@ impl f64 {
     #[stable(feature = "clamp", since = "1.50.0")]
     #[inline]
     pub fn clamp(mut self, min: f64, max: f64) -> f64 {
-        assert!(min <= max);
+        assert!(min <= max, "min > max, or either was NaN. min = {min:?}, max = {max:?}");
         if self < min {
             self = min;
         }

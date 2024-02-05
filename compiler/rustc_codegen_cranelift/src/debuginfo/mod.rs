@@ -5,11 +5,8 @@ mod line_info;
 mod object;
 mod unwind;
 
-use crate::prelude::*;
-
 use cranelift_codegen::ir::Endianness;
 use cranelift_codegen::isa::TargetIsa;
-
 use gimli::write::{
     Address, AttributeValue, DwarfUnit, FileId, LineProgram, LineString, Range, RangeList,
     UnitEntryId,
@@ -17,12 +14,13 @@ use gimli::write::{
 use gimli::{Encoding, Format, LineEncoding, RunTimeEndian};
 use indexmap::IndexSet;
 
-pub(crate) use emit::{DebugReloc, DebugRelocName};
-pub(crate) use unwind::UnwindContext;
+pub(crate) use self::emit::{DebugReloc, DebugRelocName};
+pub(crate) use self::unwind::UnwindContext;
+use crate::prelude::*;
 
 pub(crate) fn producer() -> String {
     format!(
-        "cg_clif (rustc {}, cranelift {})",
+        "rustc version {} with cranelift {}",
         rustc_interface::util::rustc_version_str().unwrap_or("unknown version"),
         cranelift_codegen::VERSION,
     )
@@ -33,12 +31,14 @@ pub(crate) struct DebugContext {
 
     dwarf: DwarfUnit,
     unit_range_list: RangeList,
+
+    should_remap_filepaths: bool,
 }
 
 pub(crate) struct FunctionDebugContext {
     entry_id: UnitEntryId,
     function_source_loc: (FileId, u64, u64),
-    source_loc_set: indexmap::IndexSet<(FileId, u64, u64)>,
+    source_loc_set: IndexSet<(FileId, u64, u64)>,
 }
 
 impl DebugContext {
@@ -65,12 +65,18 @@ impl DebugContext {
 
         let mut dwarf = DwarfUnit::new(encoding);
 
+        let should_remap_filepaths = tcx.sess.should_prefer_remapped_for_codegen();
+
         let producer = producer();
         let comp_dir = tcx
             .sess
             .opts
             .working_dir
-            .to_string_lossy(FileNameDisplayPreference::Remapped)
+            .to_string_lossy(if should_remap_filepaths {
+                FileNameDisplayPreference::Remapped
+            } else {
+                FileNameDisplayPreference::Local
+            })
             .into_owned();
         let (name, file_info) = match tcx.sess.local_crate_source_file() {
             Some(path) => {
@@ -104,7 +110,12 @@ impl DebugContext {
             root.set(gimli::DW_AT_low_pc, AttributeValue::Address(Address::Constant(0)));
         }
 
-        DebugContext { endian, dwarf, unit_range_list: RangeList(Vec::new()) }
+        DebugContext {
+            endian,
+            dwarf,
+            unit_range_list: RangeList(Vec::new()),
+            should_remap_filepaths,
+        }
     }
 
     pub(crate) fn define_function(

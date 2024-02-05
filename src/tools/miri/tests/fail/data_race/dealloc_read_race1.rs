@@ -20,12 +20,14 @@ pub fn main() {
 
     unsafe {
         let j1 = spawn(move || {
+            let ptr = ptr; // avoid field capturing
             let _val = *ptr.0;
         });
 
         let j2 = spawn(move || {
+            let ptr = ptr; // avoid field capturing
             __rust_dealloc(
-                //~^ ERROR: Data race detected between (1) Read on thread `<unnamed>` and (2) Deallocate on thread `<unnamed>`
+                //~^ ERROR: Data race detected between (1) non-atomic read on thread `<unnamed>` and (2) deallocation on thread `<unnamed>`
                 ptr.0 as *mut _,
                 std::mem::size_of::<usize>(),
                 std::mem::align_of::<usize>(),

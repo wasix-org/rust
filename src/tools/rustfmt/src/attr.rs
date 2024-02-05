@@ -2,7 +2,7 @@
 
 use rustc_ast::ast;
 use rustc_ast::HasAttrs;
-use rustc_span::{symbol::sym, Span, Symbol};
+use rustc_span::{symbol::sym, Span};
 
 use self::doc_comment::DocCommentFormatter;
 use crate::comment::{contains_comment, rewrite_doc_comment, CommentStyle};
@@ -18,20 +18,6 @@ use crate::types::{rewrite_path, PathContext};
 use crate::utils::{count_newlines, mk_sp};
 
 mod doc_comment;
-
-pub(crate) fn contains_name(attrs: &[ast::Attribute], name: Symbol) -> bool {
-    attrs.iter().any(|attr| attr.has_name(name))
-}
-
-pub(crate) fn first_attr_value_str_by_name(
-    attrs: &[ast::Attribute],
-    name: Symbol,
-) -> Option<Symbol> {
-    attrs
-        .iter()
-        .find(|attr| attr.has_name(name))
-        .and_then(|attr| attr.value_str())
-}
 
 /// Returns attributes on the given statement.
 pub(crate) fn get_attrs_from_stmt(stmt: &ast::Stmt) -> &[ast::Attribute] {
@@ -322,7 +308,7 @@ impl Rewrite for ast::MetaItem {
                 // See #2479 for example.
                 let value = rewrite_literal(context, lit.as_token_lit(), lit.span, lit_shape)
                     .unwrap_or_else(|| context.snippet(lit.span).to_owned());
-                format!("{} = {}", path, value)
+                format!("{path} = {value}")
             }
         })
     }
@@ -356,7 +342,7 @@ impl Rewrite for ast::Attribute {
                         let literal_str = literal.as_str();
                         let doc_comment_formatter =
                             DocCommentFormatter::new(literal_str, comment_style);
-                        let doc_comment = format!("{}", doc_comment_formatter);
+                        let doc_comment = format!("{doc_comment_formatter}");
                         return rewrite_doc_comment(
                             &doc_comment,
                             shape.comment(context.config),
@@ -420,9 +406,9 @@ impl Rewrite for [ast::Attribute] {
                         0,
                     )?;
                     let comment = if comment.is_empty() {
-                        format!("\n{}", mlb)
+                        format!("\n{mlb}")
                     } else {
-                        format!("{}{}\n{}", mla, comment, mlb)
+                        format!("{mla}{comment}\n{mlb}")
                     };
                     result.push_str(&comment);
                     result.push_str(&shape.indent.to_string(context.config));

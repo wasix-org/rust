@@ -71,13 +71,13 @@ LL |     let x: () = foo::<'static>();
    |                               ++
 
 error[E0277]: the size for values of type `str` cannot be known at compilation time
-  --> $DIR/substs-ppaux.rs:49:5
+  --> $DIR/substs-ppaux.rs:49:6
    |
 LL |     <str as Foo<u8>>::bar;
-   |     ^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+   |      ^^^ doesn't have a size known at compile-time
    |
    = help: the trait `Sized` is not implemented for `str`
-note: required for `str` to implement `Foo<'_#0r, '_#1r, u8>`
+note: required for `str` to implement `Foo<'?0, '?1, u8>`
   --> $DIR/substs-ppaux.rs:11:17
    |
 LL | impl<'a,'b,T,S> Foo<'a, 'b, S> for T {}

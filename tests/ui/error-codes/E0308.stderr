@@ -1,12 +1,12 @@
 error[E0308]: intrinsic has wrong type
-  --> $DIR/E0308.rs:6:5
+  --> $DIR/E0308.rs:6:20
    |
 LL |     fn size_of<T>();
-   |     ^^^^^^^^^^^^^^^^ expected `()`, found `usize`
+   |                    ^ expected `usize`, found `()`
    |
-   = note: expected fn pointer `extern "rust-intrinsic" fn()`
-              found fn pointer `extern "rust-intrinsic" fn() -> usize`
+   = note: expected signature `extern "rust-intrinsic" fn() -> usize`
+              found signature `extern "rust-intrinsic" fn()`
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0308`.

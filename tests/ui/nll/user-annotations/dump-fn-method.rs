@@ -1,7 +1,7 @@
 // Unit test for the "user substitutions" that are annotated on each
 // node.
 
-// compile-flags:-Zverbose
+// compile-flags:-Zverbose-internals
 
 #![feature(rustc_attrs)]
 
@@ -15,7 +15,7 @@ impl<S, T> Bazoom<T> for S {
 
 fn foo<'a, T>(_: T) { }
 
-#[rustc_dump_user_substs]
+#[rustc_dump_user_args]
 fn main() {
     // Here: nothing is given, so we don't have any annotation.
     let x = foo;

@@ -14,6 +14,7 @@ use rustc_span::symbol::kw::{Empty, Underscore};
 use rustc_span::symbol::{sym, Ident};
 use rustc_span::Span;
 use rustc_trait_selection::infer::InferCtxtExt;
+use std::fmt::Write;
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub(super) fn lint_dot_call_from_2018(
@@ -32,7 +33,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         );
 
         // Rust 2021 and later is already using the new prelude
-        if span.rust_2021() {
+        if span.at_least_rust_2021() {
             return;
         }
 
@@ -97,32 +98,30 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         let self_adjusted = if let Some(probe::AutorefOrPtrAdjustment::ToConstPtr) =
                             pick.autoref_or_ptr_adjustment
                         {
-                            format!("{}{} as *const _", derefs, self_expr)
+                            format!("{derefs}{self_expr} as *const _")
                         } else {
-                            format!("{}{}{}", autoref, derefs, self_expr)
+                            format!("{autoref}{derefs}{self_expr}")
                         };
 
                         lint.span_suggestion(
                             sp,
                             "disambiguate the method call",
-                            format!("({})", self_adjusted),
+                            format!("({self_adjusted})"),
                             Applicability::MachineApplicable,
                         );
                     } else {
                         let self_adjusted = if let Some(probe::AutorefOrPtrAdjustment::ToConstPtr) =
                             pick.autoref_or_ptr_adjustment
                         {
-                            format!("{}(...) as *const _", derefs)
+                            format!("{derefs}(...) as *const _")
                         } else {
-                            format!("{}{}...", autoref, derefs)
+                            format!("{autoref}{derefs}...")
                         };
                         lint.span_help(
                             sp,
-                            &format!("disambiguate the method call with `({})`", self_adjusted,),
+                            format!("disambiguate the method call with `({self_adjusted})`",),
                         );
                     }
-
-                    lint
                 },
             );
         } else {
@@ -143,16 +142,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                     let (self_adjusted, precise) = self.adjust_expr(pick, self_expr, sp);
                     if precise {
-                        let args = args
-                            .iter()
-                            .map(|arg| {
-                                let span = arg.span.find_ancestor_inside(sp).unwrap_or_default();
-                                format!(
-                                    ", {}",
-                                    self.sess().source_map().span_to_snippet(span).unwrap()
-                                )
-                            })
-                            .collect::<String>();
+                        let args = args.iter().fold(String::new(), |mut string, arg| {
+                            let span = arg.span.find_ancestor_inside(sp).unwrap_or_default();
+                            write!(
+                                string,
+                                ", {}",
+                                self.sess().source_map().span_to_snippet(span).unwrap()
+                            )
+                            .unwrap();
+                            string
+                        });
 
                         lint.span_suggestion(
                             sp,
@@ -168,7 +167,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                     .ok())
                                 {
                                     // Keep turbofish.
-                                    format!("::{}", args)
+                                    format!("::{args}")
                                 } else {
                                     String::new()
                                 },
@@ -180,14 +179,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     } else {
                         lint.span_help(
                             sp,
-                            &format!(
+                            format!(
                                 "disambiguate the associated function with `{}::{}(...)`",
                                 trait_name, segment.ident,
                             ),
                         );
                     }
-
-                    lint
                 },
             );
         }
@@ -203,7 +200,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         pick: &Pick<'tcx>,
     ) {
         // Rust 2021 and later is already using the new prelude
-        if span.rust_2021() {
+        if span.at_least_rust_2021() {
             return;
         }
 
@@ -306,8 +303,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     format!("<{} as {}>::{}", self_ty_name, trait_name, method_name.name,),
                     Applicability::MachineApplicable,
                 );
-
-                lint
             },
         );
     }
@@ -347,7 +342,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // Glob import, so just use its name.
                 return None;
             } else {
-                return Some(format!("{}", any_id));
+                return Some(format!("{any_id}"));
             }
         }
 
@@ -396,9 +391,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let adjusted_text = if let Some(probe::AutorefOrPtrAdjustment::ToConstPtr) =
             pick.autoref_or_ptr_adjustment
         {
-            format!("{}{} as *const _", derefs, expr_text)
+            format!("{derefs}{expr_text} as *const _")
         } else {
-            format!("{}{}{}", autoref, derefs, expr_text)
+            format!("{autoref}{derefs}{expr_text}")
         };
 
         (adjusted_text, precise)

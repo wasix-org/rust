@@ -19,8 +19,6 @@ use crate::context::CodegenCx;
 use crate::llvm;
 use crate::value::Value;
 
-use cstr::cstr;
-
 use rustc_codegen_ssa::base::maybe_create_entry_wrapper;
 use rustc_codegen_ssa::mono_item::MonoItemExt;
 use rustc_codegen_ssa::traits::*;
@@ -86,8 +84,8 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
         {
             let cx = CodegenCx::new(tcx, cgu, &llvm_module);
             let mono_items = cx.codegen_unit.items_in_deterministic_order(cx.tcx);
-            for &(mono_item, (linkage, visibility)) in &mono_items {
-                mono_item.predefine::<Builder<'_, '_, '_>>(&cx, linkage, visibility);
+            for &(mono_item, data) in &mono_items {
+                mono_item.predefine::<Builder<'_, '_, '_>>(&cx, data.linkage, data.visibility);
             }
 
             // ... and now that we have everything pre-defined, fill out those definitions.
@@ -110,11 +108,11 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
 
             // Create the llvm.used and llvm.compiler.used variables.
             if !cx.used_statics.borrow().is_empty() {
-                cx.create_used_variable_impl(cstr!("llvm.used"), &*cx.used_statics.borrow());
+                cx.create_used_variable_impl(c"llvm.used", &*cx.used_statics.borrow());
             }
             if !cx.compiler_used_statics.borrow().is_empty() {
                 cx.create_used_variable_impl(
-                    cstr!("llvm.compiler.used"),
+                    c"llvm.compiler.used",
                     &*cx.compiler_used_statics.borrow(),
                 );
             }
@@ -123,8 +121,7 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
             // happen after the llvm.used variables are created.
             for &(old_g, new_g) in cx.statics_to_rauw().borrow().iter() {
                 unsafe {
-                    let bitcast = llvm::LLVMConstPointerCast(new_g, cx.val_ty(old_g));
-                    llvm::LLVMReplaceAllUsesWith(old_g, bitcast);
+                    llvm::LLVMReplaceAllUsesWith(old_g, new_g);
                     llvm::LLVMDeleteGlobal(old_g);
                 }
             }

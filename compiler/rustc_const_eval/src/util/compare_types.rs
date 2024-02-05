@@ -3,9 +3,9 @@
 //! FIXME: Move this to a more general place. The utility of this extends to
 //! other areas of the compiler as well.
 
-use rustc_infer::infer::{DefiningAnchor, TyCtxtInferExt};
-use rustc_infer::traits::ObligationCause;
-use rustc_middle::ty::{ParamEnv, Ty, TyCtxt};
+use rustc_infer::infer::TyCtxtInferExt;
+use rustc_middle::traits::{DefiningAnchor, ObligationCause};
+use rustc_middle::ty::{ParamEnv, Ty, TyCtxt, Variance};
 use rustc_trait_selection::traits::ObligationCtxt;
 
 /// Returns whether the two types are equal up to subtyping.
@@ -24,16 +24,22 @@ pub fn is_equal_up_to_subtyping<'tcx>(
     }
 
     // Check for subtyping in either direction.
-    is_subtype(tcx, param_env, src, dest) || is_subtype(tcx, param_env, dest, src)
+    relate_types(tcx, param_env, Variance::Covariant, src, dest)
+        || relate_types(tcx, param_env, Variance::Covariant, dest, src)
 }
 
 /// Returns whether `src` is a subtype of `dest`, i.e. `src <: dest`.
 ///
+/// When validating assignments, the variance should be `Covariant`. When checking
+/// during `MirPhase` >= `MirPhase::Runtime(RuntimePhase::Initial)` variance should be `Invariant`
+/// because we want to check for type equality.
+///
 /// This mostly ignores opaque types as it can be used in constraining contexts
 /// while still computing the final underlying type.
-pub fn is_subtype<'tcx>(
+pub fn relate_types<'tcx>(
     tcx: TyCtxt<'tcx>,
     param_env: ParamEnv<'tcx>,
+    variance: Variance,
     src: Ty<'tcx>,
     dest: Ty<'tcx>,
 ) -> bool {
@@ -48,7 +54,7 @@ pub fn is_subtype<'tcx>(
     let cause = ObligationCause::dummy();
     let src = ocx.normalize(&cause, param_env, src);
     let dest = ocx.normalize(&cause, param_env, dest);
-    match ocx.sub(&cause, param_env, src, dest) {
+    match ocx.relate(&cause, param_env, variance, src, dest) {
         Ok(()) => {}
         Err(_) => return false,
     };
@@ -56,8 +62,16 @@ pub fn is_subtype<'tcx>(
     // With `Reveal::All`, opaque types get normalized away, with `Reveal::UserFacing`
     // we would get unification errors because we're unable to look into opaque types,
     // even if they're constrained in our current function.
-    //
-    // It seems very unlikely that this hides any bugs.
-    let _ = infcx.take_opaque_types();
+    for (key, ty) in infcx.take_opaque_types() {
+        let hidden_ty = tcx.type_of(key.def_id).instantiate(tcx, key.args);
+        if hidden_ty != ty.hidden_type.ty {
+            span_bug!(
+                ty.hidden_type.span,
+                "{}, {}",
+                tcx.type_of(key.def_id).instantiate(tcx, key.args),
+                ty.hidden_type.ty
+            );
+        }
+    }
     errors.is_empty()
 }

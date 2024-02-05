@@ -1,11 +1,11 @@
 // check-pass
 // edition: 2021
 
-#![feature(async_fn_in_trait)]
-#![allow(incomplete_features)]
-
 trait MyTrait {
+    #[allow(async_fn_in_trait)]
     async fn foo(&self) -> i32;
+
+    #[allow(async_fn_in_trait)]
     async fn bar(&self) -> i32;
 }
 

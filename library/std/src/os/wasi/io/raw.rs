@@ -1,7 +1,5 @@
 //! WASI-specific extensions to general I/O primitives.
 
-#![unstable(feature = "wasi_ext", issue = "71213")]
-
 // NOTE: despite the fact that this module is unstable,
 // stable Rust had the capability to access the stable
 // re-exported items from os::fd::raw through this

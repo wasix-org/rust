@@ -1,11 +1,14 @@
 //@revisions: extern_block definition both
+//@normalize-stderr-test: "unsafe \{ libc::abort\(\) \}|crate::intrinsics::abort\(\);" -> "ABORT();"
+//@normalize-stderr-test: "\| +\^+" -> "| ^"
+//@normalize-stderr-test: "\n +[0-9]+:[^\n]+" -> ""
+//@normalize-stderr-test: "\n +at [^\n]+" -> ""
+//@[definition,both]error-in-other-file: aborted execution
 #![feature(rustc_attrs, c_unwind)]
 
 #[cfg_attr(any(definition, both), rustc_nounwind)]
 #[no_mangle]
 extern "C-unwind" fn nounwind() {
-    //~[definition]^ ERROR: abnormal termination: the program aborted execution
-    //~[both]^^ ERROR: abnormal termination: the program aborted execution
     panic!();
 }
 

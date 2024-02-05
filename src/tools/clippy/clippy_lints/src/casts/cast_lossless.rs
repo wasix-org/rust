@@ -1,6 +1,6 @@
+use clippy_config::msrvs::{self, Msrv};
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::in_constant;
-use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::source::snippet_opt;
 use clippy_utils::ty::is_isize_or_usize;
 use rustc_errors::Applicability;
@@ -25,7 +25,7 @@ pub(super) fn check(
     // The suggestion is to use a function call, so if the original expression
     // has parens on the outside, they are no longer needed.
     let mut applicability = Applicability::MachineApplicable;
-    let opt = snippet_opt(cx, cast_op.span);
+    let opt = snippet_opt(cx, cast_op.span.source_callsite());
     let sugg = opt.as_ref().map_or_else(
         || {
             applicability = Applicability::HasPlaceholders;

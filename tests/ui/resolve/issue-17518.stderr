@@ -6,9 +6,9 @@ LL |     E { name: "foobar" };
    |
 help: consider importing this variant
    |
-LL | use SomeEnum::E;
+LL + use SomeEnum::E;
    |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0422`.

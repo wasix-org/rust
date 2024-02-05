@@ -1,7 +1,6 @@
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::eq_expr_value;
 use clippy_utils::source::snippet_opt;
-use clippy_utils::sugg;
+use clippy_utils::{eq_expr_value, sugg};
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_lint::LateContext;
@@ -47,7 +46,7 @@ fn lint_misrefactored_assign_op(
             if let (Some(snip_a), Some(snip_r)) = (snippet_opt(cx, assignee.span), snippet_opt(cx, rhs_other.span)) {
                 let a = &sugg::Sugg::hir(cx, assignee, "..");
                 let r = &sugg::Sugg::hir(cx, rhs, "..");
-                let long = format!("{snip_a} = {}", sugg::make_binop(op.into(), a, r));
+                let long = format!("{snip_a} = {}", sugg::make_binop(op, a, r));
                 diag.span_suggestion(
                     expr.span,
                     format!(

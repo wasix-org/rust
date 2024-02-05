@@ -1,42 +1,32 @@
 #!/usr/bin/env bash
 set -e
 
-./y.rs build --no-unstable-features
+# CG_CLIF_FORCE_GNU_AS will force usage of as instead of the LLVM backend of rustc as
+# the LLVM backend isn't compiled in here.
+export CG_CLIF_FORCE_GNU_AS=1
+
+# Compiletest expects all standard library paths to start with /rustc/FAKE_PREFIX.
+# CG_CLIF_STDLIB_REMAP_PATH_PREFIX will cause cg_clif's build system to pass
+# --remap-path-prefix to handle this.
+CG_CLIF_STDLIB_REMAP_PATH_PREFIX=/rustc/FAKE_PREFIX ./y.sh build
 
 echo "[SETUP] Rust fork"
-git clone https://github.com/rust-lang/rust.git || true
+git clone --quiet https://github.com/rust-lang/rust.git --filter=tree:0 || true
 pushd rust
 git fetch
-git checkout -- .
-git checkout "$(rustc -V | cut -d' ' -f3 | tr -d '(')"
+git checkout --no-progress -- .
+git checkout --no-progress "$(rustc -V | cut -d' ' -f3 | tr -d '(')"
 
-git -c user.name=Dummy -c user.email=dummy@example.com am ../patches/*-sysroot-*.patch
+git submodule update --quiet --init src/tools/cargo library/backtrace library/stdarch
 
-git apply - <<EOF
-diff --git a/library/alloc/Cargo.toml b/library/alloc/Cargo.toml
-index d95b5b7f17f..00b6f0e3635 100644
---- a/library/alloc/Cargo.toml
-+++ b/library/alloc/Cargo.toml
-@@ -8,7 +8,7 @@ edition = "2018"
-
- [dependencies]
- core = { path = "../core" }
--compiler_builtins = { version = "0.1.40", features = ['rustc-dep-of-std'] }
-+compiler_builtins = { version = "0.1.66", features = ['rustc-dep-of-std', 'no-asm'] }
-
- [dev-dependencies]
- rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
- rand_xorshift = "0.3.0"
-EOF
+git -c user.name=Dummy -c user.email=dummy@example.com -c commit.gpgSign=false \
+    am ../patches/*-stdlib-*.patch
 
 cat > config.toml <<EOF
-changelog-seen = 2
-
-[llvm]
-ninja = false
+change-id = 999999
 
 [build]
-rustc = "$(pwd)/../dist/rustc-clif"
+rustc = "$(pwd)/../dist/bin/rustc-clif"
 cargo = "$(rustup which cargo)"
 full-bootstrap = true
 local-rebuild = true
@@ -47,11 +37,6 @@ deny-warnings = false
 verbose-tests = false
 EOF
 popd
-
-# FIXME remove once inline asm is fully supported
-export RUSTFLAGS="$RUSTFLAGS --cfg=rustix_use_libc"
-
-export CFG_VIRTUAL_RUST_SOURCE_BASE_DIR="$(cd download/sysroot/sysroot_src; pwd)"
 
 # Allow the testsuite to use llvm tools
 host_triple=$(rustc -vV | grep host | cut -d: -f2 | tr -d " ")

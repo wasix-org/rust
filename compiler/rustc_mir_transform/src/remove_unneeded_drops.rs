@@ -4,7 +4,6 @@
 //! useful because (unlike MIR building) it runs after type checking, so it can make use of
 //! `Reveal::All` to provide more precise type information.
 
-use crate::MirPass;
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
 
@@ -27,7 +26,7 @@ impl<'tcx> MirPass<'tcx> for RemoveUnneededDrops {
                 if ty.ty.needs_drop(tcx, param_env) {
                     continue;
                 }
-                if !tcx.consider_optimizing(|| format!("RemoveUnneededDrops {:?} ", did)) {
+                if !tcx.consider_optimizing(|| format!("RemoveUnneededDrops {did:?} ")) {
                     continue;
                 }
                 debug!("SUCCESS: replacing `drop` with goto({:?})", target);
@@ -39,7 +38,7 @@ impl<'tcx> MirPass<'tcx> for RemoveUnneededDrops {
         // if we applied optimizations, we potentially have some cfg to cleanup to
         // make it easier for further passes
         if should_simplify {
-            simplify_cfg(tcx, body);
+            simplify_cfg(body);
         }
     }
 }

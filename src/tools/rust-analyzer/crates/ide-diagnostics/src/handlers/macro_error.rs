@@ -1,4 +1,4 @@
-use crate::{Diagnostic, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 
 // Diagnostic: macro-error
 //
@@ -6,7 +6,27 @@ use crate::{Diagnostic, DiagnosticsContext};
 pub(crate) fn macro_error(ctx: &DiagnosticsContext<'_>, d: &hir::MacroError) -> Diagnostic {
     // Use more accurate position if available.
     let display_range = ctx.resolve_precise_location(&d.node, d.precise_location);
-    Diagnostic::new("macro-error", d.message.clone(), display_range).experimental()
+    Diagnostic::new(
+        DiagnosticCode::Ra("macro-error", Severity::Error),
+        d.message.clone(),
+        display_range,
+    )
+    .experimental()
+}
+
+// Diagnostic: macro-error
+//
+// This diagnostic is shown for macro expansion errors.
+pub(crate) fn macro_def_error(ctx: &DiagnosticsContext<'_>, d: &hir::MacroDefError) -> Diagnostic {
+    // Use more accurate position if available.
+    let display_range =
+        ctx.resolve_precise_location(&d.node.clone().map(|it| it.syntax_node_ptr()), d.name);
+    Diagnostic::new(
+        DiagnosticCode::Ra("macro-def-error", Severity::Error),
+        d.message.clone(),
+        display_range,
+    )
+    .experimental()
 }
 
 #[cfg(test)]
@@ -31,15 +51,15 @@ macro_rules! compile_error { () => {} }
 
   compile_error!("compile_error macro works");
 //^^^^^^^^^^^^^ error: compile_error macro works
+
+  compile_error! { "compile_error macro braced works" }
+//^^^^^^^^^^^^^ error: compile_error macro braced works
             "#,
         );
     }
 
     #[test]
     fn eager_macro_concat() {
-        // FIXME: this is incorrectly handling `$crate`, resulting in a wrong diagnostic.
-        // See: https://github.com/rust-lang/rust-analyzer/issues/10300
-
         check_diagnostics(
             r#"
 //- /lib.rs crate:lib deps:core
@@ -57,7 +77,6 @@ macro_rules! m {
 
 fn f() {
     m!();
-  //^^^^ error: unresolved macro `$crate::private::concat!`
 }
 
 //- /core.rs crate:core
@@ -134,6 +153,7 @@ struct S;
     fn macro_diag_builtin() {
         check_diagnostics(
             r#"
+//- minicore: fmt
 #[rustc_builtin_macro]
 macro_rules! env {}
 
@@ -142,9 +162,6 @@ macro_rules! include {}
 
 #[rustc_builtin_macro]
 macro_rules! compile_error {}
-
-#[rustc_builtin_macro]
-macro_rules! format_args { () => {} }
 
 fn main() {
     // Test a handful of built-in (eager) macros:
@@ -166,7 +183,7 @@ fn main() {
     // Lazy:
 
     format_args!();
-  //^^^^^^^^^^^ error: no rule matches input tokens
+  //^^^^^^^^^^^ error: Syntax Error in Expansion: expected expression
 }
 "#,
         );
@@ -188,6 +205,7 @@ fn f() {
       "#,
         );
     }
+
     #[test]
     fn dollar_crate_in_builtin_macro() {
         check_diagnostics(
@@ -211,5 +229,59 @@ fn f() {
 } //^^^^^^^^ error: leftover tokens
 "#,
         )
+    }
+
+    #[test]
+    fn def_diagnostic() {
+        check_diagnostics(
+            r#"
+macro_rules! foo {
+           //^^^ error: expected subtree
+    f => {};
+}
+
+fn f() {
+    foo!();
+  //^^^ error: invalid macro definition: expected subtree
+
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn expansion_syntax_diagnostic() {
+        check_diagnostics(
+            r#"
+macro_rules! foo {
+    () => { struct; };
+}
+
+fn f() {
+    foo!();
+  //^^^ error: Syntax Error in Expansion: expected a name
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn include_does_not_break_diagnostics() {
+        let mut config = DiagnosticsConfig::test_sample();
+        config.disabled.insert("inactive-code".to_string());
+        config.disabled.insert("unlinked-file".to_string());
+        check_diagnostics_with_config(
+            config,
+            r#"
+//- minicore: include
+//- /lib.rs crate:lib
+include!("include-me.rs");
+//- /include-me.rs
+/// long doc that pushes the diagnostic range beyond the first file's text length
+  #[err]
+//^^^^^^error: unresolved macro `err`
+mod prim_never {}
+"#,
+        );
     }
 }

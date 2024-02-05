@@ -8,7 +8,7 @@ use crate::sys_common::{AsInner, FromInner, IntoInner};
 use crate::time::Duration;
 use crate::{fmt, io};
 
-use libc::MSG_NOSIGNAL;
+const MSG_NOSIGNAL: libc::c_int = 0x0;
 
 /// A Unix datagram socket.
 ///

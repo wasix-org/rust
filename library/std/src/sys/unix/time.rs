@@ -1,8 +1,6 @@
 use crate::fmt;
 use crate::time::Duration;
 
-pub use self::inner::Instant;
-
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 pub const UNIX_EPOCH: SystemTime = SystemTime { t: Timespec::zero() };
 #[allow(dead_code)] // Used for pthread condvar timeouts
@@ -25,19 +23,23 @@ struct Nanoseconds(u32);
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SystemTime {
-    pub(in crate::sys::unix) t: Timespec,
+    pub(crate) t: Timespec,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::sys::unix) struct Timespec {
+pub(crate) struct Timespec {
     tv_sec: i64,
     tv_nsec: Nanoseconds,
 }
 
 impl SystemTime {
-    #[cfg_attr(target_os = "horizon", allow(unused))]
+    #[cfg_attr(any(target_os = "horizon", target_os = "hurd"), allow(unused))]
     pub fn new(tv_sec: i64, tv_nsec: i64) -> SystemTime {
         SystemTime { t: Timespec::new(tv_sec, tv_nsec) }
+    }
+
+    pub fn now() -> SystemTime {
+        SystemTime { t: Timespec::now(libc::CLOCK_REALTIME) }
     }
 
     pub fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {
@@ -74,9 +76,63 @@ impl Timespec {
     }
 
     const fn new(tv_sec: i64, tv_nsec: i64) -> Timespec {
+        // On Apple OS, dates before epoch are represented differently than on other
+        // Unix platforms: e.g. 1/10th of a second before epoch is represented as `seconds=-1`
+        // and `nanoseconds=100_000_000` on other platforms, but is `seconds=0` and
+        // `nanoseconds=-900_000_000` on Apple OS.
+        //
+        // To compensate, we first detect this special case by checking if both
+        // seconds and nanoseconds are in range, and then correct the value for seconds
+        // and nanoseconds to match the common unix representation.
+        //
+        // Please note that Apple OS nonetheless accepts the standard unix format when
+        // setting file times, which makes this compensation round-trippable and generally
+        // transparent.
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos"
+        ))]
+        let (tv_sec, tv_nsec) =
+            if (tv_sec <= 0 && tv_sec > i64::MIN) && (tv_nsec < 0 && tv_nsec > -1_000_000_000) {
+                (tv_sec - 1, tv_nsec + 1_000_000_000)
+            } else {
+                (tv_sec, tv_nsec)
+            };
         assert!(tv_nsec >= 0 && tv_nsec < NSEC_PER_SEC as i64);
         // SAFETY: The assert above checks tv_nsec is within the valid range
         Timespec { tv_sec, tv_nsec: unsafe { Nanoseconds(tv_nsec as u32) } }
+    }
+
+    pub fn now(clock: libc::clockid_t) -> Timespec {
+        use crate::mem::MaybeUninit;
+        use crate::sys::cvt;
+
+        // Try to use 64-bit time in preparation for Y2038.
+        #[cfg(all(
+            target_os = "linux",
+            target_env = "gnu",
+            target_pointer_width = "32",
+            not(target_arch = "riscv32")
+        ))]
+        {
+            use crate::sys::weak::weak;
+
+            // __clock_gettime64 was added to 32-bit arches in glibc 2.34,
+            // and it handles both vDSO calls and ENOSYS fallbacks itself.
+            weak!(fn __clock_gettime64(libc::clockid_t, *mut __timespec64) -> libc::c_int);
+
+            if let Some(clock_gettime64) = __clock_gettime64.get() {
+                let mut t = MaybeUninit::uninit();
+                cvt(unsafe { clock_gettime64(clock, t.as_mut_ptr()) }).unwrap();
+                return Timespec::from(unsafe { t.assume_init() });
+            }
+        }
+
+        let mut t = MaybeUninit::uninit();
+        cvt(unsafe { libc::clock_gettime(clock, t.as_mut_ptr()) }).unwrap();
+        Timespec::from(unsafe { t.assume_init() })
     }
 
     pub fn sub_timespec(&self, other: &Timespec) -> Result<Duration, Duration> {
@@ -113,11 +169,7 @@ impl Timespec {
     }
 
     pub fn checked_add_duration(&self, other: &Duration) -> Option<Timespec> {
-        let mut secs = other
-            .as_secs()
-            .try_into() // <- target type would be `i64`
-            .ok()
-            .and_then(|secs| self.tv_sec.checked_add(secs))?;
+        let mut secs = self.tv_sec.checked_add_unsigned(other.as_secs())?;
 
         // Nano calculations can't overflow because nanos are <1B which fit
         // in a u32.
@@ -126,15 +178,11 @@ impl Timespec {
             nsec -= NSEC_PER_SEC as u32;
             secs = secs.checked_add(1)?;
         }
-        Some(Timespec::new(secs, nsec as i64))
+        Some(Timespec::new(secs, nsec.into()))
     }
 
     pub fn checked_sub_duration(&self, other: &Duration) -> Option<Timespec> {
-        let mut secs = other
-            .as_secs()
-            .try_into() // <- target type would be `i64`
-            .ok()
-            .and_then(|secs| self.tv_sec.checked_sub(secs))?;
+        let mut secs = self.tv_sec.checked_sub_unsigned(other.as_secs())?;
 
         // Similar to above, nanos can't overflow.
         let mut nsec = self.tv_nsec.0 as i32 - other.subsec_nanos() as i32;
@@ -142,7 +190,7 @@ impl Timespec {
             nsec += NSEC_PER_SEC as i32;
             secs = secs.checked_sub(1)?;
         }
-        Some(Timespec::new(secs, nsec as i64))
+        Some(Timespec::new(secs, nsec.into()))
     }
 
     #[allow(dead_code)]
@@ -166,6 +214,16 @@ impl Timespec {
         }
         self.to_timespec()
     }
+
+    #[cfg(all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_pointer_width = "32",
+        not(target_arch = "riscv32")
+    ))]
+    pub fn to_timespec64(&self) -> __timespec64 {
+        __timespec64::new(self.tv_sec, self.tv_nsec.0 as _)
+    }
 }
 
 impl From<libc::timespec> for Timespec {
@@ -174,213 +232,99 @@ impl From<libc::timespec> for Timespec {
     }
 }
 
-#[cfg(any(
-    all(target_os = "macos", any(not(target_arch = "aarch64"))),
-    target_os = "ios",
-    target_os = "watchos"
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    target_pointer_width = "32",
+    not(target_arch = "riscv32")
 ))]
-mod inner {
-    use crate::sync::atomic::{AtomicU64, Ordering};
-    use crate::sys::cvt;
-    use crate::sys_common::mul_div_u64;
-    use crate::time::Duration;
+#[repr(C)]
+pub(crate) struct __timespec64 {
+    pub(crate) tv_sec: i64,
+    #[cfg(target_endian = "big")]
+    _padding: i32,
+    pub(crate) tv_nsec: i32,
+    #[cfg(target_endian = "little")]
+    _padding: i32,
+}
 
-    use super::{SystemTime, Timespec, NSEC_PER_SEC};
-
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-    pub struct Instant {
-        t: u64,
-    }
-
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct mach_timebase_info {
-        numer: u32,
-        denom: u32,
-    }
-    type mach_timebase_info_t = *mut mach_timebase_info;
-    type kern_return_t = libc::c_int;
-
-    impl Instant {
-        pub fn now() -> Instant {
-            extern "C" {
-                fn mach_absolute_time() -> u64;
-            }
-            Instant { t: unsafe { mach_absolute_time() } }
-        }
-
-        pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
-            let diff = self.t.checked_sub(other.t)?;
-            let info = info();
-            let nanos = mul_div_u64(diff, info.numer as u64, info.denom as u64);
-            Some(Duration::new(nanos / NSEC_PER_SEC, (nanos % NSEC_PER_SEC) as u32))
-        }
-
-        pub fn checked_add_duration(&self, other: &Duration) -> Option<Instant> {
-            Some(Instant { t: self.t.checked_add(checked_dur2intervals(other)?)? })
-        }
-
-        pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
-            Some(Instant { t: self.t.checked_sub(checked_dur2intervals(other)?)? })
-        }
-    }
-
-    impl SystemTime {
-        pub fn now() -> SystemTime {
-            use crate::ptr;
-
-            let mut s = libc::timeval { tv_sec: 0, tv_usec: 0 };
-            cvt(unsafe { libc::gettimeofday(&mut s, ptr::null_mut()) }).unwrap();
-            return SystemTime::from(s);
-        }
-    }
-
-    impl From<libc::timeval> for Timespec {
-        fn from(t: libc::timeval) -> Timespec {
-            Timespec::new(t.tv_sec as i64, 1000 * t.tv_usec as i64)
-        }
-    }
-
-    impl From<libc::timeval> for SystemTime {
-        fn from(t: libc::timeval) -> SystemTime {
-            SystemTime { t: Timespec::from(t) }
-        }
-    }
-
-    fn checked_dur2intervals(dur: &Duration) -> Option<u64> {
-        let nanos =
-            dur.as_secs().checked_mul(NSEC_PER_SEC)?.checked_add(dur.subsec_nanos() as u64)?;
-        let info = info();
-        Some(mul_div_u64(nanos, info.denom as u64, info.numer as u64))
-    }
-
-    fn info() -> mach_timebase_info {
-        // INFO_BITS conceptually is an `Option<mach_timebase_info>`. We can do
-        // this in 64 bits because we know 0 is never a valid value for the
-        // `denom` field.
-        //
-        // Encoding this as a single `AtomicU64` allows us to use `Relaxed`
-        // operations, as we are only interested in the effects on a single
-        // memory location.
-        static INFO_BITS: AtomicU64 = AtomicU64::new(0);
-
-        // If a previous thread has initialized `INFO_BITS`, use it.
-        let info_bits = INFO_BITS.load(Ordering::Relaxed);
-        if info_bits != 0 {
-            return info_from_bits(info_bits);
-        }
-
-        // ... otherwise learn for ourselves ...
-        extern "C" {
-            fn mach_timebase_info(info: mach_timebase_info_t) -> kern_return_t;
-        }
-
-        let mut info = info_from_bits(0);
-        unsafe {
-            mach_timebase_info(&mut info);
-        }
-        INFO_BITS.store(info_to_bits(info), Ordering::Relaxed);
-        info
-    }
-
-    #[inline]
-    fn info_to_bits(info: mach_timebase_info) -> u64 {
-        ((info.denom as u64) << 32) | (info.numer as u64)
-    }
-
-    #[inline]
-    fn info_from_bits(bits: u64) -> mach_timebase_info {
-        mach_timebase_info { numer: bits as u32, denom: (bits >> 32) as u32 }
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    target_pointer_width = "32",
+    not(target_arch = "riscv32")
+))]
+impl __timespec64 {
+    pub(crate) fn new(tv_sec: i64, tv_nsec: i32) -> Self {
+        Self { tv_sec, tv_nsec, _padding: 0 }
     }
 }
 
-#[cfg(not(any(
-    all(target_os = "macos", any(not(target_arch = "aarch64"))),
-    target_os = "ios",
-    target_os = "watchos"
-)))]
-mod inner {
-    use crate::fmt;
-    use crate::mem::MaybeUninit;
-    use crate::sys::cvt;
-    use crate::time::Duration;
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    target_pointer_width = "32",
+    not(target_arch = "riscv32")
+))]
+impl From<__timespec64> for Timespec {
+    fn from(t: __timespec64) -> Timespec {
+        Timespec::new(t.tv_sec, t.tv_nsec.into())
+    }
+}
 
-    use super::{SystemTime, Timespec};
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Instant {
+    t: Timespec,
+}
 
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct Instant {
-        t: Timespec,
+impl Instant {
+    pub fn now() -> Instant {
+        // https://www.manpagez.com/man/3/clock_gettime/
+        //
+        // CLOCK_UPTIME_RAW   clock that increments monotonically, in the same man-
+        //                    ner as CLOCK_MONOTONIC_RAW, but that does not incre-
+        //                    ment while the system is asleep.  The returned value
+        //                    is identical to the result of mach_absolute_time()
+        //                    after the appropriate mach_timebase conversion is
+        //                    applied.
+        //
+        // Instant on macos was historically implemented using mach_absolute_time;
+        // we preserve this value domain out of an abundance of caution.
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        const clock_id: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        )))]
+        const clock_id: libc::clockid_t = libc::CLOCK_MONOTONIC;
+        Instant { t: Timespec::now(clock_id) }
     }
 
-    impl Instant {
-        pub fn now() -> Instant {
-            #[cfg(target_os = "macos")]
-            const clock_id: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
-            #[cfg(not(target_os = "macos"))]
-            const clock_id: libc::clockid_t = libc::CLOCK_MONOTONIC;
-            Instant { t: Timespec::now(clock_id) }
-        }
-
-        pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
-            self.t.sub_timespec(&other.t).ok()
-        }
-
-        pub fn checked_add_duration(&self, other: &Duration) -> Option<Instant> {
-            Some(Instant { t: self.t.checked_add_duration(other)? })
-        }
-
-        pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
-            Some(Instant { t: self.t.checked_sub_duration(other)? })
-        }
+    pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
+        self.t.sub_timespec(&other.t).ok()
     }
 
-    impl fmt::Debug for Instant {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("Instant")
-                .field("tv_sec", &self.t.tv_sec)
-                .field("tv_nsec", &self.t.tv_nsec.0)
-                .finish()
-        }
+    pub fn checked_add_duration(&self, other: &Duration) -> Option<Instant> {
+        Some(Instant { t: self.t.checked_add_duration(other)? })
     }
 
-    impl SystemTime {
-        pub fn now() -> SystemTime {
-            SystemTime { t: Timespec::now(libc::CLOCK_REALTIME) }
-        }
+    pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
+        Some(Instant { t: self.t.checked_sub_duration(other)? })
     }
+}
 
-    impl Timespec {
-        pub fn now(clock: libc::clockid_t) -> Timespec {
-            // Try to use 64-bit time in preparation for Y2038.
-            #[cfg(all(target_os = "linux", target_env = "gnu", target_pointer_width = "32"))]
-            {
-                use crate::sys::weak::weak;
-
-                // __clock_gettime64 was added to 32-bit arches in glibc 2.34,
-                // and it handles both vDSO calls and ENOSYS fallbacks itself.
-                weak!(fn __clock_gettime64(libc::clockid_t, *mut __timespec64) -> libc::c_int);
-
-                #[repr(C)]
-                struct __timespec64 {
-                    tv_sec: i64,
-                    #[cfg(target_endian = "big")]
-                    _padding: i32,
-                    tv_nsec: i32,
-                    #[cfg(target_endian = "little")]
-                    _padding: i32,
-                }
-
-                if let Some(clock_gettime64) = __clock_gettime64.get() {
-                    let mut t = MaybeUninit::uninit();
-                    cvt(unsafe { clock_gettime64(clock, t.as_mut_ptr()) }).unwrap();
-                    let t = unsafe { t.assume_init() };
-                    return Timespec::new(t.tv_sec, t.tv_nsec as i64);
-                }
-            }
-
-            let mut t = MaybeUninit::uninit();
-            cvt(unsafe { libc::clock_gettime(clock, t.as_mut_ptr()) }).unwrap();
-            Timespec::from(unsafe { t.assume_init() })
-        }
+impl fmt::Debug for Instant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Instant")
+            .field("tv_sec", &self.t.tv_sec)
+            .field("tv_nsec", &self.t.tv_nsec.0)
+            .finish()
     }
 }

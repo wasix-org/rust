@@ -4,7 +4,7 @@
 //!
 //! Run with `RUST_LOG=lsp_server=debug` to see all the messages.
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
 
 mod msg;
 mod stdio;
@@ -17,7 +17,7 @@ use std::{
     net::{TcpListener, TcpStream, ToSocketAddrs},
 };
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvError, RecvTimeoutError, Sender};
 
 pub use crate::{
     error::{ExtractError, ProtocolError},
@@ -113,11 +113,58 @@ impl Connection {
     /// }
     /// ```
     pub fn initialize_start(&self) -> Result<(RequestId, serde_json::Value), ProtocolError> {
-        loop {
-            break match self.receiver.recv() {
-                Ok(Message::Request(req)) if req.is_initialize() => Ok((req.id, req.params)),
+        self.initialize_start_while(|| true)
+    }
+
+    /// Starts the initialization process by waiting for an initialize as described in
+    /// [`Self::initialize_start`] as long as `running` returns
+    /// `true` while the return value can be changed through a sig handler such as `CTRL + C`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::atomic::{AtomicBool, Ordering};
+    /// use std::sync::Arc;
+    /// # use std::error::Error;
+    /// # use lsp_types::{ClientCapabilities, InitializeParams, ServerCapabilities};
+    /// # use lsp_server::{Connection, Message, Request, RequestId, Response};
+    /// # fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
+    /// let running = Arc::new(AtomicBool::new(true));
+    /// # running.store(true, Ordering::SeqCst);
+    /// let r = running.clone();
+    ///
+    /// ctrlc::set_handler(move || {
+    ///     r.store(false, Ordering::SeqCst);
+    /// }).expect("Error setting Ctrl-C handler");
+    ///
+    /// let (connection, io_threads) = Connection::stdio();
+    ///
+    /// let res = connection.initialize_start_while(|| running.load(Ordering::SeqCst));
+    /// # assert!(res.is_err());
+    ///
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn initialize_start_while<C>(
+        &self,
+        running: C,
+    ) -> Result<(RequestId, serde_json::Value), ProtocolError>
+    where
+        C: Fn() -> bool,
+    {
+        while running() {
+            let msg = match self.receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return Err(ProtocolError::disconnected()),
+            };
+
+            match msg {
+                Message::Request(req) if req.is_initialize() => return Ok((req.id, req.params)),
                 // Respond to non-initialize requests with ServerNotInitialized
-                Ok(Message::Request(req)) => {
+                Message::Request(req) => {
                     let resp = Response::new_err(
                         req.id.clone(),
                         ErrorCode::ServerNotInitialized as i32,
@@ -126,12 +173,20 @@ impl Connection {
                     self.sender.send(resp.into()).unwrap();
                     continue;
                 }
-                Ok(msg) => Err(ProtocolError(format!("expected initialize request, got {msg:?}"))),
-                Err(e) => {
-                    Err(ProtocolError(format!("expected initialize request, got error: {e}")))
+                Message::Notification(n) if !n.is_exit() => {
+                    continue;
+                }
+                msg => {
+                    return Err(ProtocolError::new(format!(
+                        "expected initialize request, got {msg:?}"
+                    )));
                 }
             };
         }
+
+        return Err(ProtocolError::new(String::from(
+            "Initialization has been aborted during initialization",
+        )));
     }
 
     /// Finishes the initialization process by sending an `InitializeResult` to the client
@@ -144,13 +199,54 @@ impl Connection {
         self.sender.send(resp.into()).unwrap();
         match &self.receiver.recv() {
             Ok(Message::Notification(n)) if n.is_initialized() => Ok(()),
-            Ok(msg) => {
-                Err(ProtocolError(format!(r#"expected initialized notification, got: {msg:?}"#)))
-            }
-            Err(e) => {
-                Err(ProtocolError(format!("expected initialized notification, got error: {e}",)))
+            Ok(msg) => Err(ProtocolError::new(format!(
+                r#"expected initialized notification, got: {msg:?}"#
+            ))),
+            Err(RecvError) => Err(ProtocolError::disconnected()),
+        }
+    }
+
+    /// Finishes the initialization process as described in [`Self::initialize_finish`] as
+    /// long as `running` returns `true` while the return value can be changed through a sig
+    /// handler such as `CTRL + C`.
+    pub fn initialize_finish_while<C>(
+        &self,
+        initialize_id: RequestId,
+        initialize_result: serde_json::Value,
+        running: C,
+    ) -> Result<(), ProtocolError>
+    where
+        C: Fn() -> bool,
+    {
+        let resp = Response::new_ok(initialize_id, initialize_result);
+        self.sender.send(resp.into()).unwrap();
+
+        while running() {
+            let msg = match self.receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(ProtocolError::disconnected());
+                }
+            };
+
+            match msg {
+                Message::Notification(n) if n.is_initialized() => {
+                    return Ok(());
+                }
+                msg => {
+                    return Err(ProtocolError::new(format!(
+                        r#"expected initialized notification, got: {msg:?}"#
+                    )));
+                }
             }
         }
+
+        return Err(ProtocolError::new(String::from(
+            "Initialization has been aborted during initialization",
+        )));
     }
 
     /// Initialize the connection. Sends the server capabilities
@@ -195,6 +291,58 @@ impl Connection {
         Ok(params)
     }
 
+    /// Initialize the connection as described in [`Self::initialize`] as long as `running` returns
+    /// `true` while the return value can be changed through a sig handler such as `CTRL + C`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::atomic::{AtomicBool, Ordering};
+    /// use std::sync::Arc;
+    /// # use std::error::Error;
+    /// # use lsp_types::ServerCapabilities;
+    /// # use lsp_server::{Connection, Message, Request, RequestId, Response};
+    ///
+    /// # fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
+    /// let running = Arc::new(AtomicBool::new(true));
+    /// # running.store(true, Ordering::SeqCst);
+    /// let r = running.clone();
+    ///
+    /// ctrlc::set_handler(move || {
+    ///     r.store(false, Ordering::SeqCst);
+    /// }).expect("Error setting Ctrl-C handler");
+    ///
+    /// let (connection, io_threads) = Connection::stdio();
+    ///
+    /// let server_capabilities = serde_json::to_value(&ServerCapabilities::default()).unwrap();
+    /// let initialization_params = connection.initialize_while(
+    ///     server_capabilities,
+    ///     || running.load(Ordering::SeqCst)
+    /// );
+    ///
+    /// # assert!(initialization_params.is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn initialize_while<C>(
+        &self,
+        server_capabilities: serde_json::Value,
+        running: C,
+    ) -> Result<serde_json::Value, ProtocolError>
+    where
+        C: Fn() -> bool,
+    {
+        let (id, params) = self.initialize_start_while(&running)?;
+
+        let initialize_data = serde_json::json!({
+            "capabilities": server_capabilities,
+        });
+
+        self.initialize_finish_while(id, initialize_data, running)?;
+
+        Ok(params)
+    }
+
     /// If `req` is `Shutdown`, respond to it and return `true`, otherwise return `false`
     pub fn handle_shutdown(&self, req: &Request) -> Result<bool, ProtocolError> {
         if !req.is_shutdown() {
@@ -205,10 +353,86 @@ impl Connection {
         match &self.receiver.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(Message::Notification(n)) if n.is_exit() => (),
             Ok(msg) => {
-                return Err(ProtocolError(format!("unexpected message during shutdown: {msg:?}")))
+                return Err(ProtocolError::new(format!(
+                    "unexpected message during shutdown: {msg:?}"
+                )))
             }
-            Err(e) => return Err(ProtocolError(format!("unexpected error during shutdown: {e}"))),
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(ProtocolError::new(format!("timed out waiting for exit notification")))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(ProtocolError::new(format!(
+                    "channel disconnected waiting for exit notification"
+                )))
+            }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossbeam_channel::unbounded;
+    use lsp_types::notification::{Exit, Initialized, Notification};
+    use lsp_types::request::{Initialize, Request};
+    use lsp_types::{InitializeParams, InitializedParams};
+    use serde_json::to_value;
+
+    use crate::{Connection, Message, ProtocolError, RequestId};
+
+    struct TestCase {
+        test_messages: Vec<Message>,
+        expected_resp: Result<(RequestId, serde_json::Value), ProtocolError>,
+    }
+
+    fn initialize_start_test(test_case: TestCase) {
+        let (reader_sender, reader_receiver) = unbounded::<Message>();
+        let (writer_sender, writer_receiver) = unbounded::<Message>();
+        let conn = Connection { sender: writer_sender, receiver: reader_receiver };
+
+        for msg in test_case.test_messages {
+            assert!(reader_sender.send(msg).is_ok());
+        }
+
+        let resp = conn.initialize_start();
+        assert_eq!(test_case.expected_resp, resp);
+
+        assert!(writer_receiver.recv_timeout(std::time::Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn not_exit_notification() {
+        let notification = crate::Notification {
+            method: Initialized::METHOD.to_string(),
+            params: to_value(InitializedParams {}).unwrap(),
+        };
+
+        let params_as_value = to_value(InitializeParams::default()).unwrap();
+        let req_id = RequestId::from(234);
+        let request = crate::Request {
+            id: req_id.clone(),
+            method: Initialize::METHOD.to_string(),
+            params: params_as_value.clone(),
+        };
+
+        initialize_start_test(TestCase {
+            test_messages: vec![notification.into(), request.into()],
+            expected_resp: Ok((req_id, params_as_value)),
+        });
+    }
+
+    #[test]
+    fn exit_notification() {
+        let notification =
+            crate::Notification { method: Exit::METHOD.to_string(), params: to_value(()).unwrap() };
+        let notification_msg = Message::from(notification);
+
+        initialize_start_test(TestCase {
+            test_messages: vec![notification_msg.clone()],
+            expected_resp: Err(ProtocolError::new(format!(
+                "expected initialize request, got {:?}",
+                notification_msg
+            ))),
+        });
     }
 }

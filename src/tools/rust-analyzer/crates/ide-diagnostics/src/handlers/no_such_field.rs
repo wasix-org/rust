@@ -1,4 +1,5 @@
-use hir::{db::AstDatabase, HasSource, HirDisplay, Semantics};
+use either::Either;
+use hir::{db::ExpandDatabase, HasSource, HirDisplay, HirFileIdExt, Semantics};
 use ide_db::{base_db::FileId, source_change::SourceChange, RootDatabase};
 use syntax::{
     ast::{self, edit::IndentLevel, make},
@@ -6,27 +7,43 @@ use syntax::{
 };
 use text_edit::TextEdit;
 
-use crate::{fix, Assist, Diagnostic, DiagnosticsContext};
+use crate::{fix, Assist, Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 // Diagnostic: no-such-field
 //
 // This diagnostic is triggered if created structure does not have field provided in record.
 pub(crate) fn no_such_field(ctx: &DiagnosticsContext<'_>, d: &hir::NoSuchField) -> Diagnostic {
-    Diagnostic::new(
-        "no-such-field",
-        "no such field",
-        ctx.sema.diagnostics_display_range(d.field.clone().map(|it| it.into())).range,
-    )
-    .with_fixes(fixes(ctx, d))
+    let node = d.field.clone().map(Into::into);
+    if d.private {
+        // FIXME: quickfix to add required visibility
+        Diagnostic::new_with_syntax_node_ptr(
+            ctx,
+            DiagnosticCode::RustcHardError("E0451"),
+            "field is private",
+            node,
+        )
+    } else {
+        Diagnostic::new_with_syntax_node_ptr(
+            ctx,
+            DiagnosticCode::RustcHardError("E0559"),
+            "no such field",
+            node,
+        )
+        .with_fixes(fixes(ctx, d))
+    }
 }
 
 fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::NoSuchField) -> Option<Vec<Assist>> {
-    let root = ctx.sema.db.parse_or_expand(d.field.file_id)?;
-    missing_record_expr_field_fixes(
-        &ctx.sema,
-        d.field.file_id.original_file(ctx.sema.db),
-        &d.field.value.to_node(&root),
-    )
+    // FIXME: quickfix for pattern
+    let root = ctx.sema.db.parse_or_expand(d.field.file_id);
+    match &d.field.value.to_node(&root) {
+        Either::Left(node) => missing_record_expr_field_fixes(
+            &ctx.sema,
+            d.field.file_id.original_file(ctx.sema.db),
+            node,
+        ),
+        _ => None,
+    }
 }
 
 fn missing_record_expr_field_fixes(
@@ -69,7 +86,7 @@ fn missing_record_expr_field_fixes(
     let new_field = make::record_field(
         None,
         make::name(record_expr_field.field_name()?.ident_token()?.text()),
-        make::ty(&new_field_type.display_source_code(sema.db, module.into()).ok()?),
+        make::ty(&new_field_type.display_source_code(sema.db, module.into(), true).ok()?),
     );
 
     let last_field = record_fields.fields().last()?;
@@ -117,13 +134,34 @@ mod tests {
             r#"
 struct S { foo: i32, bar: () }
 impl S {
-    fn new() -> S {
+    fn new(
+        s@S {
+        //^ 💡 error: missing structure fields:
+        //|    - bar
+            foo,
+            baz: baz2,
+          //^^^^^^^^^ error: no such field
+            qux
+          //^^^ error: no such field
+        }: S
+    ) -> S {
+        S {
+      //^ 💡 error: missing structure fields:
+      //|    - bar
+            foo,
+            baz: baz2,
+          //^^^^^^^^^ error: no such field
+            qux
+          //^^^ error: no such field
+        } = s;
         S {
       //^ 💡 error: missing structure fields:
       //|    - bar
             foo: 92,
             baz: 62,
           //^^^^^^^ 💡 error: no such field
+            qux
+          //^^^ error: no such field
         }
     }
 }
@@ -290,6 +328,40 @@ fn main() {
     Struct {
         0$0: 0
     }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn test_struct_field_private() {
+        check_diagnostics(
+            r#"
+mod m {
+    pub struct Struct {
+        field: u32,
+        field2: u32,
+    }
+}
+fn f(s@m::Struct {
+    field: f,
+  //^^^^^^^^ error: field is private
+    field2
+  //^^^^^^ error: field is private
+}: m::Struct) {
+    // assignee expression
+    m::Struct {
+        field: 0,
+      //^^^^^^^^ error: field is private
+        field2
+      //^^^^^^ error: field is private
+    } = s;
+    m::Struct {
+        field: 0,
+      //^^^^^^^^ error: field is private
+        field2
+      //^^^^^^ error: field is private
+    };
 }
 "#,
         )

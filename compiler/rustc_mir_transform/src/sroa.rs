@@ -1,27 +1,34 @@
-use crate::MirPass;
+use rustc_data_structures::flat_map_in_place::FlatMapInPlace;
 use rustc_index::bit_set::{BitSet, GrowableBitSet};
-use rustc_index::vec::IndexVec;
+use rustc_index::IndexVec;
 use rustc_middle::mir::patch::MirPatch;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_mir_dataflow::value_analysis::{excluded_locals, iter_fields};
+use rustc_target::abi::{FieldIdx, FIRST_VARIANT};
 
 pub struct ScalarReplacementOfAggregates;
 
 impl<'tcx> MirPass<'tcx> for ScalarReplacementOfAggregates {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
-        sess.mir_opt_level() >= 3
+        sess.mir_opt_level() >= 2
     }
 
     #[instrument(level = "debug", skip(self, tcx, body))]
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         debug!(def_id = ?body.source.def_id());
+
+        // Avoid query cycles (coroutines require optimized MIR for layout).
+        if tcx.type_of(body.source.def_id()).instantiate_identity().is_coroutine() {
+            return;
+        }
+
         let mut excluded = excluded_locals(body);
         let param_env = tcx.param_env_reveal_all_normalized(body.source.def_id());
         loop {
             debug!(?excluded);
-            let escaping = escaping_locals(&excluded, body);
+            let escaping = escaping_locals(tcx, param_env, &excluded, body);
             debug!(?escaping);
             let replacements = compute_flattening(tcx, param_env, body, escaping);
             debug!(?replacements);
@@ -47,11 +54,45 @@ impl<'tcx> MirPass<'tcx> for ScalarReplacementOfAggregates {
 /// - the locals is a union or an enum;
 /// - the local's address is taken, and thus the relative addresses of the fields are observable to
 ///   client code.
-fn escaping_locals(excluded: &BitSet<Local>, body: &Body<'_>) -> BitSet<Local> {
+fn escaping_locals<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
+    excluded: &BitSet<Local>,
+    body: &Body<'tcx>,
+) -> BitSet<Local> {
+    let is_excluded_ty = |ty: Ty<'tcx>| {
+        if ty.is_union() || ty.is_enum() {
+            return true;
+        }
+        if let ty::Adt(def, _args) = ty.kind() {
+            if def.repr().simd() {
+                // Exclude #[repr(simd)] types so that they are not de-optimized into an array
+                return true;
+            }
+            // We already excluded unions and enums, so this ADT must have one variant
+            let variant = def.variant(FIRST_VARIANT);
+            if variant.fields.len() > 1 {
+                // If this has more than one field, it cannot be a wrapper that only provides a
+                // niche, so we do not want to automatically exclude it.
+                return false;
+            }
+            let Ok(layout) = tcx.layout_of(param_env.and(ty)) else {
+                // We can't get the layout
+                return true;
+            };
+            if layout.layout.largest_niche().is_some() {
+                // This type has a niche
+                return true;
+            }
+        }
+        // Default for non-ADTs
+        false
+    };
+
     let mut set = BitSet::new_empty(body.local_decls.len());
     set.insert_range(RETURN_PLACE..=Local::from_usize(body.arg_count));
     for (local, decl) in body.local_decls().iter_enumerated() {
-        if decl.ty.is_union() || decl.ty.is_enum() || excluded.contains(local) {
+        if excluded.contains(local) || is_excluded_ty(decl.ty) {
             set.insert(local);
         }
     }
@@ -106,7 +147,7 @@ fn escaping_locals(excluded: &BitSet<Local>, body: &Body<'_>) -> BitSet<Local> {
         }
 
         // We ignore anything that happens in debuginfo, since we expand it using
-        // `VarDebugInfoContents::Composite`.
+        // `VarDebugInfoFragment`.
         fn visit_var_debug_info(&mut self, _: &VarDebugInfo<'tcx>) {}
     }
 }
@@ -115,21 +156,23 @@ fn escaping_locals(excluded: &BitSet<Local>, body: &Body<'_>) -> BitSet<Local> {
 struct ReplacementMap<'tcx> {
     /// Pre-computed list of all "new" locals for each "old" local. This is used to expand storage
     /// and deinit statement and debuginfo.
-    fragments: IndexVec<Local, Option<IndexVec<Field, Option<(Ty<'tcx>, Local)>>>>,
+    fragments: IndexVec<Local, Option<IndexVec<FieldIdx, Option<(Ty<'tcx>, Local)>>>>,
 }
 
 impl<'tcx> ReplacementMap<'tcx> {
     fn replace_place(&self, tcx: TyCtxt<'tcx>, place: PlaceRef<'tcx>) -> Option<Place<'tcx>> {
-        let &[PlaceElem::Field(f, _), ref rest @ ..] = place.projection else { return None; };
+        let &[PlaceElem::Field(f, _), ref rest @ ..] = place.projection else {
+            return None;
+        };
         let fields = self.fragments[place.local].as_ref()?;
         let (_, new_local) = fields[f]?;
-        Some(Place { local: new_local, projection: tcx.mk_place_elems(&rest) })
+        Some(Place { local: new_local, projection: tcx.mk_place_elems(rest) })
     }
 
     fn place_fragments(
         &self,
         place: Place<'tcx>,
-    ) -> Option<impl Iterator<Item = (Field, Ty<'tcx>, Local)> + '_> {
+    ) -> Option<impl Iterator<Item = (FieldIdx, Ty<'tcx>, Local)> + '_> {
         let local = place.as_local()?;
         let fields = self.fragments[local].as_ref()?;
         Some(fields.iter_enumerated().filter_map(|(field, &opt_ty_local)| {
@@ -203,9 +246,7 @@ fn replace_flattened_locals<'tcx>(
     for (index, annotation) in body.user_type_annotations.iter_enumerated_mut() {
         visitor.visit_user_type_annotation(index, annotation);
     }
-    for var_debug_info in &mut body.var_debug_info {
-        visitor.visit_var_debug_info(var_debug_info);
-    }
+    visitor.expand_var_debug_info(&mut body.var_debug_info);
     let ReplacementVisitor { patch, all_dead_locals, .. } = visitor;
     patch.apply(body);
     all_dead_locals
@@ -213,7 +254,7 @@ fn replace_flattened_locals<'tcx>(
 
 struct ReplacementVisitor<'tcx, 'll> {
     tcx: TyCtxt<'tcx>,
-    /// This is only used to compute the type for `VarDebugInfoContents::Composite`.
+    /// This is only used to compute the type for `VarDebugInfoFragment`.
     local_decls: &'ll LocalDecls<'tcx>,
     /// Work to do.
     replacements: &'ll ReplacementMap<'tcx>,
@@ -223,16 +264,38 @@ struct ReplacementVisitor<'tcx, 'll> {
 }
 
 impl<'tcx> ReplacementVisitor<'tcx, '_> {
-    fn gather_debug_info_fragments(&self, local: Local) -> Option<Vec<VarDebugInfoFragment<'tcx>>> {
-        let mut fragments = Vec::new();
-        let parts = self.replacements.place_fragments(local.into())?;
-        for (field, ty, replacement_local) in parts {
-            fragments.push(VarDebugInfoFragment {
-                projection: vec![PlaceElem::Field(field, ty)],
-                contents: Place::from(replacement_local),
-            });
-        }
-        Some(fragments)
+    #[instrument(level = "trace", skip(self))]
+    fn expand_var_debug_info(&mut self, var_debug_info: &mut Vec<VarDebugInfo<'tcx>>) {
+        var_debug_info.flat_map_in_place(|mut var_debug_info| {
+            let place = match var_debug_info.value {
+                VarDebugInfoContents::Const(_) => return vec![var_debug_info],
+                VarDebugInfoContents::Place(ref mut place) => place,
+            };
+
+            if let Some(repl) = self.replacements.replace_place(self.tcx, place.as_ref()) {
+                *place = repl;
+                return vec![var_debug_info];
+            }
+
+            let Some(parts) = self.replacements.place_fragments(*place) else {
+                return vec![var_debug_info];
+            };
+
+            let ty = place.ty(self.local_decls, self.tcx).ty;
+
+            parts
+                .map(|(field, field_ty, replacement_local)| {
+                    let mut var_debug_info = var_debug_info.clone();
+                    let composite = var_debug_info.composite.get_or_insert_with(|| {
+                        Box::new(VarDebugInfoFragment { ty, projection: Vec::new() })
+                    });
+                    composite.projection.push(PlaceElem::Field(field, field_ty));
+
+                    var_debug_info.value = VarDebugInfoContents::Place(replacement_local.into());
+                    var_debug_info
+                })
+                .collect()
+        });
     }
 }
 
@@ -377,50 +440,6 @@ impl<'tcx, 'll> MutVisitor<'tcx> for ReplacementVisitor<'tcx, 'll> {
             _ => {}
         }
         self.super_statement(statement, location)
-    }
-
-    #[instrument(level = "trace", skip(self))]
-    fn visit_var_debug_info(&mut self, var_debug_info: &mut VarDebugInfo<'tcx>) {
-        match &mut var_debug_info.value {
-            VarDebugInfoContents::Place(ref mut place) => {
-                if let Some(repl) = self.replacements.replace_place(self.tcx, place.as_ref()) {
-                    *place = repl;
-                } else if let Some(local) = place.as_local()
-                    && let Some(fragments) = self.gather_debug_info_fragments(local)
-                {
-                    let ty = place.ty(self.local_decls, self.tcx).ty;
-                    var_debug_info.value = VarDebugInfoContents::Composite { ty, fragments };
-                }
-            }
-            VarDebugInfoContents::Composite { ty: _, ref mut fragments } => {
-                let mut new_fragments = Vec::new();
-                debug!(?fragments);
-                fragments
-                    .drain_filter(|fragment| {
-                        if let Some(repl) =
-                            self.replacements.replace_place(self.tcx, fragment.contents.as_ref())
-                        {
-                            fragment.contents = repl;
-                            false
-                        } else if let Some(local) = fragment.contents.as_local()
-                            && let Some(frg) = self.gather_debug_info_fragments(local)
-                        {
-                            new_fragments.extend(frg.into_iter().map(|mut f| {
-                                f.projection.splice(0..0, fragment.projection.iter().copied());
-                                f
-                            }));
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .for_each(drop);
-                debug!(?fragments);
-                debug!(?new_fragments);
-                fragments.extend(new_fragments);
-            }
-            VarDebugInfoContents::Const(_) => {}
-        }
     }
 
     fn visit_local(&mut self, local: &mut Local, _: PlaceContext, _: Location) {

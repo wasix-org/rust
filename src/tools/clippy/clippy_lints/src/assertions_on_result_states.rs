@@ -9,7 +9,7 @@ use rustc_hir::def::Res;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{self, Ty};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
 declare_clippy_lint! {
@@ -47,7 +47,7 @@ impl<'tcx> LateLintPass<'tcx> for AssertionsOnResultStates {
             && let result_type_with_refs = cx.typeck_results().expr_ty(recv)
             && let result_type = result_type_with_refs.peel_refs()
             && is_type_diagnostic_item(cx, result_type, sym::Result)
-            && let ty::Adt(_, substs) = result_type.kind()
+            && let ty::Adt(_, args) = result_type.kind()
         {
             if !is_copy(cx, result_type) {
                 if result_type_with_refs != result_type {
@@ -58,10 +58,10 @@ impl<'tcx> LateLintPass<'tcx> for AssertionsOnResultStates {
                     return;
                 }
             }
-            let semicolon = if is_expr_final_block_expr(cx.tcx, e) {";"} else {""};
+            let semicolon = if is_expr_final_block_expr(cx.tcx, e) { ";" } else { "" };
             let mut app = Applicability::MachineApplicable;
             match method_segment.ident.as_str() {
-                "is_ok" if type_suitable_to_unwrap(cx, substs.type_at(1)) => {
+                "is_ok" if type_suitable_to_unwrap(cx, args.type_at(1)) => {
                     span_lint_and_sugg(
                         cx,
                         ASSERTIONS_ON_RESULT_STATES,
@@ -74,8 +74,8 @@ impl<'tcx> LateLintPass<'tcx> for AssertionsOnResultStates {
                         ),
                         app,
                     );
-                }
-                "is_err" if type_suitable_to_unwrap(cx, substs.type_at(0)) => {
+                },
+                "is_err" if type_suitable_to_unwrap(cx, args.type_at(0)) => {
                     span_lint_and_sugg(
                         cx,
                         ASSERTIONS_ON_RESULT_STATES,
@@ -88,7 +88,7 @@ impl<'tcx> LateLintPass<'tcx> for AssertionsOnResultStates {
                         ),
                         app,
                     );
-                }
+                },
                 _ => (),
             };
         }

@@ -106,6 +106,8 @@ pub mod unix {
 pub mod windows;
 
 // Others.
+#[cfg(target_os = "aix")]
+pub mod aix;
 #[cfg(target_os = "android")]
 pub mod android;
 #[cfg(target_os = "dragonfly")]
@@ -126,6 +128,8 @@ pub mod haiku;
 pub mod hermit;
 #[cfg(target_os = "horizon")]
 pub mod horizon;
+#[cfg(target_os = "hurd")]
+pub mod hurd;
 #[cfg(target_os = "illumos")]
 pub mod illumos;
 #[cfg(target_os = "ios")]
@@ -146,10 +150,19 @@ pub mod redox;
 pub mod solaris;
 #[cfg(target_os = "solid_asp3")]
 pub mod solid;
+#[cfg(target_os = "tvos")]
+#[path = "ios/mod.rs"]
+pub(crate) mod tvos;
+#[cfg(target_os = "uefi")]
+pub mod uefi;
+#[cfg(target_os = "vita")]
+pub mod vita;
 #[cfg(target_os = "vxworks")]
 pub mod vxworks;
 #[cfg(target_os = "watchos")]
 pub(crate) mod watchos;
+#[cfg(target_os = "xous")]
+pub mod xous;
 
 #[cfg(any(unix, target_os = "wasi", doc))]
 pub mod fd;

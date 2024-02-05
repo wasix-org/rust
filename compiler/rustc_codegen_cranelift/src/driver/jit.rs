@@ -4,17 +4,13 @@
 use std::cell::RefCell;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Mutex, OnceLock};
 
+use cranelift_jit::{JITBuilder, JITModule};
 use rustc_codegen_ssa::CrateInfo;
 use rustc_middle::mir::mono::MonoItem;
 use rustc_session::Session;
 use rustc_span::Symbol;
-
-use cranelift_jit::{JITBuilder, JITModule};
-
-// FIXME use std::sync::OnceLock once it stabilizes
-use once_cell::sync::OnceCell;
 
 use crate::{prelude::*, BackendConfig};
 use crate::{CodegenCx, CodegenMode};
@@ -29,7 +25,7 @@ thread_local! {
 }
 
 /// The Sender owned by the rustc thread
-static GLOBAL_MESSAGE_SENDER: OnceCell<Mutex<mpsc::Sender<UnsafeMessage>>> = OnceCell::new();
+static GLOBAL_MESSAGE_SENDER: OnceLock<Mutex<mpsc::Sender<UnsafeMessage>>> = OnceLock::new();
 
 /// A message that is sent from the jitted runtime to the rustc thread.
 /// Senders are responsible for upholding `Send` semantics.
@@ -98,11 +94,11 @@ fn create_jit_module(
 
 pub(crate) fn run_jit(tcx: TyCtxt<'_>, backend_config: BackendConfig) -> ! {
     if !tcx.sess.opts.output_types.should_codegen() {
-        tcx.sess.fatal("JIT mode doesn't work with `cargo check`");
+        tcx.dcx().fatal("JIT mode doesn't work with `cargo check`");
     }
 
-    if !tcx.sess.crate_types().contains(&rustc_session::config::CrateType::Executable) {
-        tcx.sess.fatal("can't jit non-executable crate");
+    if !tcx.crate_types().contains(&rustc_session::config::CrateType::Executable) {
+        tcx.dcx().fatal("can't jit non-executable crate");
     }
 
     let (mut jit_module, mut cx) = create_jit_module(
@@ -117,9 +113,9 @@ pub(crate) fn run_jit(tcx: TyCtxt<'_>, backend_config: BackendConfig) -> ! {
         .iter()
         .map(|cgu| cgu.items_in_deterministic_order(tcx).into_iter())
         .flatten()
-        .collect::<FxHashMap<_, (_, _)>>()
+        .collect::<FxHashMap<_, _>>()
         .into_iter()
-        .collect::<Vec<(_, (_, _))>>();
+        .collect::<Vec<(_, _)>>();
 
     tcx.sess.time("codegen mono items", || {
         super::predefine_mono_items(tcx, &mut jit_module, &mono_items);
@@ -145,17 +141,17 @@ pub(crate) fn run_jit(tcx: TyCtxt<'_>, backend_config: BackendConfig) -> ! {
                 }
                 MonoItem::GlobalAsm(item_id) => {
                     let item = tcx.hir().item(item_id);
-                    tcx.sess.span_fatal(item.span, "Global asm is not supported in JIT mode");
+                    tcx.dcx().span_fatal(item.span, "Global asm is not supported in JIT mode");
                 }
             }
         }
     });
 
     if !cx.global_asm.is_empty() {
-        tcx.sess.fatal("Inline asm is not supported in JIT mode");
+        tcx.dcx().fatal("Inline asm is not supported in JIT mode");
     }
 
-    tcx.sess.abort_if_errors();
+    tcx.dcx().abort_if_errors();
 
     jit_module.finalize_definitions().unwrap();
     unsafe { cx.unwind_context.register_jit(&jit_module) };
@@ -224,6 +220,10 @@ pub(crate) fn codegen_and_compile_fn<'tcx>(
     module: &mut dyn Module,
     instance: Instance<'tcx>,
 ) {
+    cranelift_codegen::timing::set_thread_profiler(Box::new(super::MeasuremeProfiler(
+        cx.profiler.clone(),
+    )));
+
     tcx.prof.generic_activity("codegen and compile fn").run(|| {
         let _inst_guard =
             crate::PrintOnPanic(|| format!("{:?} {}", instance, tcx.symbol_name(instance).name));
@@ -311,15 +311,20 @@ fn dep_symbol_lookup_fn(
         .find(|(crate_type, _data)| *crate_type == rustc_session::config::CrateType::Executable)
         .unwrap()
         .1;
-    for &cnum in &crate_info.used_crates {
+    // `used_crates` is in reverse postorder in terms of dependencies. Reverse the order here to
+    // get a postorder which ensures that all dependencies of a dylib are loaded before the dylib
+    // itself. This helps the dynamic linker to find dylibs not in the regular dynamic library
+    // search path.
+    for &cnum in crate_info.used_crates.iter().rev() {
         let src = &crate_info.used_crate_source[&cnum];
         match data[cnum.as_usize() - 1] {
             Linkage::NotLinked | Linkage::IncludedFromDylib => {}
             Linkage::Static => {
                 let name = crate_info.crate_name[&cnum];
-                let mut err = sess.struct_err(&format!("Can't load static lib {}", name));
-                err.note("rustc_codegen_cranelift can only load dylibs in JIT mode.");
-                err.emit();
+                sess.dcx()
+                    .struct_err(format!("Can't load static lib {}", name))
+                    .note("rustc_codegen_cranelift can only load dylibs in JIT mode.")
+                    .emit();
             }
             Linkage::Dynamic => {
                 dylib_paths.push(src.dylib.as_ref().unwrap().0.clone());
@@ -334,7 +339,7 @@ fn dep_symbol_lookup_fn(
             .collect::<Box<[_]>>(),
     );
 
-    sess.abort_if_errors();
+    sess.dcx().abort_if_errors();
 
     Box::new(move |sym_name| {
         for dylib in &*imported_dylibs {

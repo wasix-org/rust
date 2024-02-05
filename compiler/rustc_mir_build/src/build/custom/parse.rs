@@ -1,5 +1,6 @@
-use rustc_index::vec::IndexVec;
-use rustc_middle::{mir::*, thir::*, ty::Ty};
+use rustc_index::IndexSlice;
+use rustc_middle::ty::{self, Ty};
+use rustc_middle::{mir::*, thir::*};
 use rustc_span::Span;
 
 use super::{PResult, ParseCtxt, ParseError};
@@ -26,10 +27,13 @@ macro_rules! parse_by_kind {
         $expr_name:pat,
         $expected:literal,
         $(
-            @call($name:literal, $args:ident) => $call_expr:expr,
+            @call($name:ident, $args:ident) => $call_expr:expr,
         )*
         $(
-            $pat:pat => $expr:expr,
+            @variant($adt:ident, $variant:ident) => $variant_expr:expr,
+        )*
+        $(
+            $pat:pat $(if $guard:expr)? => $expr:expr,
         )*
     ) => {{
         let expr_id = $self.preparse($expr_id);
@@ -41,14 +45,20 @@ macro_rules! parse_by_kind {
                 ExprKind::Call { ty, fun: _, args: $args, .. } if {
                     match ty.kind() {
                         ty::FnDef(did, _) => {
-                            $self.tcx.is_diagnostic_item(rustc_span::Symbol::intern($name), *did)
+                            $self.tcx.is_diagnostic_item(rustc_span::sym::$name, *did)
                         }
                         _ => false,
                     }
                 } => $call_expr,
             )*
             $(
-                $pat => $expr,
+                ExprKind::Adt(box AdtExpr { adt_def, variant_index, .. }) if {
+                    $self.tcx.is_diagnostic_item(rustc_span::sym::$adt, adt_def.did()) &&
+                    adt_def.variants()[*variant_index].name == rustc_span::sym::$variant
+                } => $variant_expr,
+            )*
+            $(
+                $pat $(if $guard)? => $expr,
             )*
             #[allow(unreachable_patterns)]
             _ => return Err($self.expr_error(expr_id, $expected))
@@ -74,14 +84,14 @@ impl<'tcx, 'body> ParseCtxt<'tcx, 'body> {
             kind @ StmtKind::Let { pattern, .. } => {
                 return Err(ParseError {
                     span: pattern.span,
-                    item_description: format!("{:?}", kind),
+                    item_description: format!("{kind:?}"),
                     expected: "expression".to_string(),
                 });
             }
         }
     }
 
-    pub fn parse_args(&mut self, params: &IndexVec<ParamId, Param<'tcx>>) -> PResult<()> {
+    pub fn parse_args(&mut self, params: &IndexSlice<ParamId, Param<'tcx>>) -> PResult<()> {
         for param in params.iter() {
             let (var, span) = {
                 let pat = param.pat.as_ref().unwrap();
@@ -159,11 +169,20 @@ impl<'tcx, 'body> ParseCtxt<'tcx, 'body> {
         );
         self.parse_local_decls(local_decls.iter().copied())?;
 
+        let (debuginfo, rest) = parse_by_kind!(self, rest, _, "body with debuginfo",
+            ExprKind::Block { block } => {
+                let block = &self.thir[*block];
+                (&block.stmts, block.expr.unwrap())
+            },
+        );
+        self.parse_debuginfo(debuginfo.iter().copied())?;
+
         let block_defs = parse_by_kind!(self, rest, _, "body with block defs",
             ExprKind::Block { block } => &self.thir[*block].stmts,
         );
         for (i, block_def) in block_defs.iter().enumerate() {
-            let block = self.parse_block_def(self.statement_as_expr(*block_def)?)?;
+            let is_cleanup = self.body.basic_blocks_mut()[BasicBlock::from_usize(i)].is_cleanup;
+            let block = self.parse_block_def(self.statement_as_expr(*block_def)?, is_cleanup)?;
             self.body.basic_blocks_mut()[BasicBlock::from_usize(i)] = block;
         }
 
@@ -172,13 +191,26 @@ impl<'tcx, 'body> ParseCtxt<'tcx, 'body> {
 
     fn parse_block_decls(&mut self, stmts: impl Iterator<Item = StmtId>) -> PResult<()> {
         for stmt in stmts {
-            let (var, _, _) = self.parse_let_statement(stmt)?;
-            let data = BasicBlockData::new(None);
-            let block = self.body.basic_blocks_mut().push(data);
-            self.block_map.insert(var, block);
+            self.parse_basic_block_decl(stmt)?;
         }
-
         Ok(())
+    }
+
+    fn parse_basic_block_decl(&mut self, stmt: StmtId) -> PResult<()> {
+        match &self.thir[stmt].kind {
+            StmtKind::Let { pattern, initializer: Some(initializer), .. } => {
+                let (var, ..) = self.parse_var(pattern)?;
+                let mut data = BasicBlockData::new(None);
+                data.is_cleanup = parse_by_kind!(self, *initializer, _, "basic block declaration",
+                    @variant(mir_basic_block, Normal) => false,
+                    @variant(mir_basic_block, Cleanup) => true,
+                );
+                let block = self.body.basic_blocks_mut().push(data);
+                self.block_map.insert(var, block);
+                Ok(())
+            }
+            _ => Err(self.stmt_error(stmt, "let statement with an initializer")),
+        }
     }
 
     fn parse_local_decls(&mut self, mut stmts: impl Iterator<Item = StmtId>) -> PResult<()> {
@@ -190,6 +222,53 @@ impl<'tcx, 'body> ParseCtxt<'tcx, 'body> {
             let decl = LocalDecl::new(ty, span);
             let local = self.body.local_decls.push(decl);
             self.local_map.insert(var, local);
+        }
+
+        Ok(())
+    }
+
+    fn parse_debuginfo(&mut self, stmts: impl Iterator<Item = StmtId>) -> PResult<()> {
+        for stmt in stmts {
+            let stmt = &self.thir[stmt];
+            let expr = match stmt.kind {
+                StmtKind::Let { span, .. } => {
+                    return Err(ParseError {
+                        span,
+                        item_description: format!("{:?}", stmt),
+                        expected: "debuginfo".to_string(),
+                    });
+                }
+                StmtKind::Expr { expr, .. } => expr,
+            };
+            let span = self.thir[expr].span;
+            let (name, operand) = parse_by_kind!(self, expr, _, "debuginfo",
+                @call(mir_debuginfo, args) => {
+                    (args[0], args[1])
+                },
+            );
+            let name = parse_by_kind!(self, name, _, "debuginfo",
+                ExprKind::Literal { lit, neg: false } => lit,
+            );
+            let Some(name) = name.node.str() else {
+                return Err(ParseError {
+                    span,
+                    item_description: format!("{:?}", name),
+                    expected: "string".to_string(),
+                });
+            };
+            let operand = self.parse_operand(operand)?;
+            let value = match operand {
+                Operand::Constant(c) => VarDebugInfoContents::Const(*c),
+                Operand::Copy(p) | Operand::Move(p) => VarDebugInfoContents::Place(p),
+            };
+            let dbginfo = VarDebugInfo {
+                name,
+                source_info: SourceInfo { span, scope: self.source_scope },
+                composite: None,
+                argument_index: None,
+                value,
+            };
+            self.body.var_debug_info.push(dbginfo);
         }
 
         Ok(())
@@ -225,12 +304,13 @@ impl<'tcx, 'body> ParseCtxt<'tcx, 'body> {
         }
     }
 
-    fn parse_block_def(&self, expr_id: ExprId) -> PResult<BasicBlockData<'tcx>> {
+    fn parse_block_def(&self, expr_id: ExprId, is_cleanup: bool) -> PResult<BasicBlockData<'tcx>> {
         let block = parse_by_kind!(self, expr_id, _, "basic block",
             ExprKind::Block { block } => &self.thir[*block],
         );
 
         let mut data = BasicBlockData::new(None);
+        data.is_cleanup = is_cleanup;
         for stmt_id in &*block.stmts {
             let stmt = self.statement_as_expr(*stmt_id)?;
             let span = self.thir[stmt].span;
@@ -241,9 +321,7 @@ impl<'tcx, 'body> ParseCtxt<'tcx, 'body> {
             });
         }
 
-        let Some(trailing) = block.expr else {
-            return Err(self.expr_error(expr_id, "terminator"))
-        };
+        let Some(trailing) = block.expr else { return Err(self.expr_error(expr_id, "terminator")) };
         let span = self.thir[trailing].span;
         let terminator = self.parse_terminator(trailing)?;
         data.terminator = Some(Terminator {

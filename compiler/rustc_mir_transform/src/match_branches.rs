@@ -1,4 +1,3 @@
-use crate::MirPass;
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
 use std::iter;
@@ -41,17 +40,17 @@ pub struct MatchBranchSimplification;
 
 impl<'tcx> MirPass<'tcx> for MatchBranchSimplification {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
-        sess.mir_opt_level() >= 3
+        sess.mir_opt_level() >= 1
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         let def_id = body.source.def_id();
-        let param_env = tcx.param_env(def_id);
+        let param_env = tcx.param_env_reveal_all_normalized(def_id);
 
         let bbs = body.basic_blocks.as_mut();
         let mut should_cleanup = false;
         'outer: for bb_idx in bbs.indices() {
-            if !tcx.consider_optimizing(|| format!("MatchBranchSimplification {:?} ", def_id)) {
+            if !tcx.consider_optimizing(|| format!("MatchBranchSimplification {def_id:?} ")) {
                 continue;
             }
 
@@ -62,7 +61,12 @@ impl<'tcx> MirPass<'tcx> for MatchBranchSimplification {
                     ..
                 } if targets.iter().len() == 1 => {
                     let (value, target) = targets.iter().next().unwrap();
-                    if target == targets.otherwise() {
+                    // We require that this block and the two possible target blocks all be
+                    // distinct.
+                    if target == targets.otherwise()
+                        || bb_idx == target
+                        || bb_idx == targets.otherwise()
+                    {
                         continue;
                     }
                     (discr, value, target, targets.otherwise())
@@ -93,10 +97,10 @@ impl<'tcx> MirPass<'tcx> for MatchBranchSimplification {
                         StatementKind::Assign(box (lhs_f, Rvalue::Use(Operand::Constant(f_c)))),
                         StatementKind::Assign(box (lhs_s, Rvalue::Use(Operand::Constant(s_c)))),
                     ) if lhs_f == lhs_s
-                        && f_c.literal.ty().is_bool()
-                        && s_c.literal.ty().is_bool()
-                        && f_c.literal.try_eval_bool(tcx, param_env).is_some()
-                        && s_c.literal.try_eval_bool(tcx, param_env).is_some() => {}
+                        && f_c.const_.ty().is_bool()
+                        && s_c.const_.ty().is_bool()
+                        && f_c.const_.try_eval_bool(tcx, param_env).is_some()
+                        && s_c.const_.try_eval_bool(tcx, param_env).is_some() => {}
 
                     // Otherwise we cannot optimize. Try another block.
                     _ => continue 'outer,
@@ -123,8 +127,8 @@ impl<'tcx> MirPass<'tcx> for MatchBranchSimplification {
                         StatementKind::Assign(box (_, Rvalue::Use(Operand::Constant(s_c)))),
                     ) => {
                         // From earlier loop we know that we are dealing with bool constants only:
-                        let f_b = f_c.literal.try_eval_bool(tcx, param_env).unwrap();
-                        let s_b = s_c.literal.try_eval_bool(tcx, param_env).unwrap();
+                        let f_b = f_c.const_.try_eval_bool(tcx, param_env).unwrap();
+                        let s_b = s_c.const_.try_eval_bool(tcx, param_env).unwrap();
                         if f_b == s_b {
                             // Same value in both blocks. Use statement as is.
                             (*f).clone()
@@ -170,7 +174,7 @@ impl<'tcx> MirPass<'tcx> for MatchBranchSimplification {
         }
 
         if should_cleanup {
-            simplify_cfg(tcx, body);
+            simplify_cfg(body);
         }
     }
 }

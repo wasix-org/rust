@@ -1,3 +1,5 @@
+cargo-features = ["public-dependency"]
+
 [package]
 name = "std"
 version = "0.0.0"
@@ -10,45 +12,43 @@ edition = "2021"
 crate-type = ["dylib", "rlib"]
 
 [dependencies]
-alloc = { path = "../alloc" }
+alloc = { path = "../alloc", public = true }
 cfg-if = { version = "1.0", features = ['rustc-dep-of-std'] }
 panic_unwind = { path = "../panic_unwind", optional = true }
 panic_abort = { path = "../panic_abort" }
-core = { path = "../core" }
-# FIXME: use target specific dependency
-#libc = { version = "0.2.126", default-features = false, features = ['rustc-dep-of-std'] }
-libc = { git = "https://github.com/wasix-org/libc.git", branch = "v0.2.147", default-features = false, features = ['rustc-dep-of-std'] }
-compiler_builtins = { version = "0.1.87" }
+core = { path = "../core", public = true }
+libc = { git = "https://github.com/wasix-org/libc.git", branch = "v0.2.152", default-features = false, features = ['rustc-dep-of-std'], public = true }
+compiler_builtins = { version = "0.1.104" }
 profiler_builtins = { path = "../profiler_builtins", optional = true }
 unwind = { path = "../unwind" }
-hashbrown = { version = "0.12", default-features = false, features = ['rustc-dep-of-std'] }
+hashbrown = { version = "0.14", default-features = false, features = ['rustc-dep-of-std'] }
 std_detect = { path = "../stdarch/crates/std_detect", default-features = false, features = ['rustc-dep-of-std'] }
 
 # Dependencies of the `backtrace` crate
-addr2line = { version = "0.17.0", optional = true, default-features = false }
 rustc-demangle = { version = "0.1.21", features = ['rustc-dep-of-std'] }
-miniz_oxide = { version = "0.5.0", optional = true, default-features = false }
-[dependencies.object]
-version = "0.29.0"
-optional = true
-default-features = false
-features = ['read_core', 'elf', 'macho', 'pe', 'unaligned', 'archive']
+
+[target.'cfg(not(all(windows, target_env = "msvc", not(target_vendor = "uwp"))))'.dependencies]
+miniz_oxide = { version = "0.7.0", optional = true, default-features = false }
+addr2line = { version = "0.21.0", optional = true, default-features = false }
+
+[target.'cfg(all(not(target_os = "aix"), not(all(windows, target_env = "msvc", not(target_vendor = "uwp")))))'.dependencies]
+object = { version = "0.32.0", default-features = false, optional = true, features = ['read_core', 'elf', 'macho', 'pe', 'unaligned', 'archive'] }
+
+[target.'cfg(target_os = "aix")'.dependencies]
+object = { version = "0.32.0", default-features = false, optional = true, features = ['read_core', 'xcoff', 'unaligned', 'archive'] }
 
 [dev-dependencies]
 rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
 rand_xorshift = "0.3.0"
 
-[patch.crates-io]
-libc = { git = "https://github.com/wasix-org/libc.git", branch = "v0.2.147", default-features = false, features = ['rustc-dep-of-std'] }
-
-[target.'cfg(any(all(target_family = "wasm", not(target_os = "emscripten")), all(target_vendor = "fortanix", target_env = "sgx")))'.dependencies]
-dlmalloc = { version = "0.2.3", features = ['rustc-dep-of-std'] }
+[target.'cfg(any(all(target_family = "wasm", target_os = "unknown"), target_os = "xous", all(target_vendor = "fortanix", target_env = "sgx")))'.dependencies]
+dlmalloc = { version = "0.2.4", features = ['rustc-dep-of-std'] }
 
 [target.x86_64-fortanix-unknown-sgx.dependencies]
-fortanix-sgx-abi = { version = "0.5.0", features = ['rustc-dep-of-std'] }
+fortanix-sgx-abi = { version = "0.5.0", features = ['rustc-dep-of-std'], public = true }
 
 [target.'cfg(target_os = "hermit")'.dependencies]
-hermit-abi = { version = "0.3.0", features = ['rustc-dep-of-std'] }
+hermit-abi = { version = "0.3.2", features = ['rustc-dep-of-std'], public = true }
 
 [target.wasm32-unknown-wasi.dependencies]
 wasi = { version = "0.11.0", features = ['rustc-dep-of-std'], default-features = false }
@@ -58,6 +58,10 @@ wasi = { package = "wasix", version = "0.12.9", features = ['rustc-dep-of-std'],
 
 [target.wasm64-wasmer-wasi.dependencies]
 wasi = { package = "wasix", version = "0.12.9", features = ['rustc-dep-of-std'], default-features = false }
+
+[target.'cfg(target_os = "uefi")'.dependencies]
+r-efi = { version = "4.2.0", features = ['rustc-dep-of-std'] }
+r-efi-alloc = { version = "1.0.0", features = ['rustc-dep-of-std'] }
 
 [features]
 backtrace = [
@@ -74,11 +78,12 @@ compiler-builtins-c = ["alloc/compiler-builtins-c"]
 compiler-builtins-mem = ["alloc/compiler-builtins-mem"]
 compiler-builtins-no-asm = ["alloc/compiler-builtins-no-asm"]
 compiler-builtins-mangled-names = ["alloc/compiler-builtins-mangled-names"]
+compiler-builtins-weak-intrinsics = ["alloc/compiler-builtins-weak-intrinsics"]
 llvm-libunwind = ["unwind/llvm-libunwind"]
 system-llvm-libunwind = ["unwind/system-llvm-libunwind"]
 
 # Make panics and failed asserts immediately abort without formatting any message
-panic_immediate_abort = ["core/panic_immediate_abort"]
+panic_immediate_abort = ["core/panic_immediate_abort", "alloc/panic_immediate_abort"]
 
 # Enable std_detect default features for stdarch/crates/std_detect:
 # https://github.com/rust-lang/stdarch/blob/master/crates/std_detect/Cargo.toml

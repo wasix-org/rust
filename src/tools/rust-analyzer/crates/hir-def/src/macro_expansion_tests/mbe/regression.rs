@@ -13,36 +13,96 @@ fn test_vec() {
     check(
         r#"
 macro_rules! vec {
-   ($($item:expr),*) => {{
-           let mut v = Vec::new();
-           $( v.push($item); )*
-           v
-    }};
+    () => (
+        $crate::__rust_force_expr!($crate::vec::Vec::new())
+    );
+    ($elem:expr; $n:expr) => (
+        $crate::__rust_force_expr!($crate::vec::from_elem($elem, $n))
+    );
+    ($($x:expr),+ $(,)?) => (
+        $crate::__rust_force_expr!(<[_]>::into_vec(
+            // This rustc_box is not required, but it produces a dramatic improvement in compile
+            // time when constructing arrays with many elements.
+            #[rustc_box]
+            $crate::boxed::Box::new([$($x),+])
+        ))
+    );
 }
+
+macro_rules! __rust_force_expr {
+    ($e:expr) => {
+        $e
+    };
+}
+
 fn main() {
     vec!();
     vec![1u32,2];
+    vec![a.];
 }
 "#,
         expect![[r#"
 macro_rules! vec {
-   ($($item:expr),*) => {{
-           let mut v = Vec::new();
-           $( v.push($item); )*
-           v
-    }};
+    () => (
+        $crate::__rust_force_expr!($crate::vec::Vec::new())
+    );
+    ($elem:expr; $n:expr) => (
+        $crate::__rust_force_expr!($crate::vec::from_elem($elem, $n))
+    );
+    ($($x:expr),+ $(,)?) => (
+        $crate::__rust_force_expr!(<[_]>::into_vec(
+            // This rustc_box is not required, but it produces a dramatic improvement in compile
+            // time when constructing arrays with many elements.
+            #[rustc_box]
+            $crate::boxed::Box::new([$($x),+])
+        ))
+    );
 }
+
+macro_rules! __rust_force_expr {
+    ($e:expr) => {
+        $e
+    };
+}
+
 fn main() {
-     {
-        let mut v = Vec::new();
-        v
+    $crate::__rust_force_expr!($crate:: vec:: Vec:: new());
+    $crate::__rust_force_expr!(<[_]>:: into_vec(#[rustc_box]$crate:: boxed:: Box:: new([1u32, 2])));
+    /* error: expected Expr */$crate::__rust_force_expr!($crate:: vec:: from_elem((a.), $n));
+}
+"#]],
+    );
+    // FIXME we should ahev testing infra for multi level expansion tests
+    check(
+        r#"
+macro_rules! __rust_force_expr {
+    ($e:expr) => {
+        $e
     };
-     {
-        let mut v = Vec::new();
-        v.push(1u32);
-        v.push(2);
-        v
+}
+
+fn main() {
+    __rust_force_expr!(crate:: vec:: Vec:: new());
+    __rust_force_expr!(<[_]>:: into_vec(#[rustc_box] crate:: boxed:: Box:: new([1u32, 2])));
+    __rust_force_expr/*+errors*/!(crate:: vec:: from_elem((a.), $n));
+}
+"#,
+        expect![[r#"
+macro_rules! __rust_force_expr {
+    ($e:expr) => {
+        $e
     };
+}
+
+fn main() {
+    (crate ::vec::Vec::new());
+    (<[_]>::into_vec(#[rustc_box] crate ::boxed::Box::new([1u32, 2])));
+    /* error: expected Expr *//* parse error: expected field name or number */
+/* parse error: expected expression */
+/* parse error: expected R_PAREN */
+/* parse error: expected COMMA */
+/* parse error: expected expression, item or let statement */
+(crate ::vec::from_elem((a.), $n));
 }
 "#]],
     );
@@ -297,55 +357,55 @@ macro_rules! impl_fn_for_zst  {
 
 #[derive(Clone)] struct CharEscapeDebugContinue;
 impl Fn<(char, )> for CharEscapeDebugContinue {
-    #[inline] extern "rust-call"fn call(&self , (c, ): (char, )) -> char::EscapeDebug { {
+    #[inline] extern "rust-call" fn call(&self , (c, ): (char, )) -> char::EscapeDebug { {
             c.escape_debug_ext(false )
         }
     }
 }
 impl FnMut<(char, )> for CharEscapeDebugContinue {
-    #[inline] extern "rust-call"fn call_mut(&mut self , (c, ): (char, )) -> char::EscapeDebug {
+    #[inline] extern "rust-call" fn call_mut(&mut self , (c, ): (char, )) -> char::EscapeDebug {
         Fn::call(&*self , (c, ))
     }
 }
 impl FnOnce<(char, )> for CharEscapeDebugContinue {
     type Output = char::EscapeDebug;
-    #[inline] extern "rust-call"fn call_once(self , (c, ): (char, )) -> char::EscapeDebug {
+    #[inline] extern "rust-call" fn call_once(self , (c, ): (char, )) -> char::EscapeDebug {
         Fn::call(&self , (c, ))
     }
 }
 #[derive(Clone)] struct CharEscapeUnicode;
 impl Fn<(char, )> for CharEscapeUnicode {
-    #[inline] extern "rust-call"fn call(&self , (c, ): (char, )) -> char::EscapeUnicode { {
+    #[inline] extern "rust-call" fn call(&self , (c, ): (char, )) -> char::EscapeUnicode { {
             c.escape_unicode()
         }
     }
 }
 impl FnMut<(char, )> for CharEscapeUnicode {
-    #[inline] extern "rust-call"fn call_mut(&mut self , (c, ): (char, )) -> char::EscapeUnicode {
+    #[inline] extern "rust-call" fn call_mut(&mut self , (c, ): (char, )) -> char::EscapeUnicode {
         Fn::call(&*self , (c, ))
     }
 }
 impl FnOnce<(char, )> for CharEscapeUnicode {
     type Output = char::EscapeUnicode;
-    #[inline] extern "rust-call"fn call_once(self , (c, ): (char, )) -> char::EscapeUnicode {
+    #[inline] extern "rust-call" fn call_once(self , (c, ): (char, )) -> char::EscapeUnicode {
         Fn::call(&self , (c, ))
     }
 }
 #[derive(Clone)] struct CharEscapeDefault;
 impl Fn<(char, )> for CharEscapeDefault {
-    #[inline] extern "rust-call"fn call(&self , (c, ): (char, )) -> char::EscapeDefault { {
+    #[inline] extern "rust-call" fn call(&self , (c, ): (char, )) -> char::EscapeDefault { {
             c.escape_default()
         }
     }
 }
 impl FnMut<(char, )> for CharEscapeDefault {
-    #[inline] extern "rust-call"fn call_mut(&mut self , (c, ): (char, )) -> char::EscapeDefault {
+    #[inline] extern "rust-call" fn call_mut(&mut self , (c, ): (char, )) -> char::EscapeDefault {
         Fn::call(&*self , (c, ))
     }
 }
 impl FnOnce<(char, )> for CharEscapeDefault {
     type Output = char::EscapeDefault;
-    #[inline] extern "rust-call"fn call_once(self , (c, ): (char, )) -> char::EscapeDefault {
+    #[inline] extern "rust-call" fn call_once(self , (c, ): (char, )) -> char::EscapeDefault {
         Fn::call(&self , (c, ))
     }
 }
@@ -827,12 +887,13 @@ macro_rules! rgb_color {
 /* parse error: expected type */
 /* parse error: expected R_PAREN */
 /* parse error: expected R_ANGLE */
+/* parse error: expected `::` */
 /* parse error: expected COMMA */
 /* parse error: expected R_ANGLE */
 /* parse error: expected SEMICOLON */
 /* parse error: expected expression, item or let statement */
 pub fn new() {
-    let _ = 0as u32<<(8+8);
+    let _ = 0 as u32<<(8+8);
 }
 // MACRO_ITEMS@0..31
 //   FN@0..31
@@ -907,4 +968,125 @@ macro_rules! with_std {
 #[cfg(feature = "std")] mod f;
 "##]],
     )
+}
+
+#[test]
+fn eager_regression_15403() {
+    check(
+        r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! format_args {}
+
+fn main() {
+    format_args /* +errors */ !("{}", line.1.);
+}
+
+"#,
+        expect![[r##"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! format_args {}
+
+fn main() {
+    /* parse error: expected field name or number */
+builtin #format_args ("{}", line.1.);
+}
+
+"##]],
+    );
+}
+
+#[test]
+fn eager_regression_154032() {
+    check(
+        r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! format_args {}
+
+fn main() {
+    format_args /* +errors */ !("{}", &[0 2]);
+}
+
+"#,
+        expect![[r##"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! format_args {}
+
+fn main() {
+    /* parse error: expected COMMA */
+/* parse error: expected R_BRACK */
+/* parse error: expected COMMA */
+/* parse error: expected COMMA */
+/* parse error: expected expression */
+/* parse error: expected R_PAREN */
+/* parse error: expected expression, item or let statement */
+/* parse error: expected expression, item or let statement */
+builtin #format_args ("{}", &[0 2]);
+}
+
+"##]],
+    );
+}
+
+#[test]
+fn eager_concat_line() {
+    check(
+        r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! concat {}
+
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! line {}
+
+fn main() {
+    concat!("event ", line!());
+}
+
+"#,
+        expect![[r##"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! concat {}
+
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! line {}
+
+fn main() {
+    "event 0u32";
+}
+
+"##]],
+    );
+}
+
+#[test]
+fn eager_concat_bytes_panic() {
+    check(
+        r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! concat_bytes {}
+
+fn main() {
+    let x = concat_bytes!(2);
+}
+
+"#,
+        expect![[r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! concat_bytes {}
+
+fn main() {
+    let x = /* error: unexpected token in input */[];
+}
+
+"#]],
+    );
 }

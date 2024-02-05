@@ -3,6 +3,8 @@
 use crate::sys::c;
 use crate::thread;
 
+use super::api;
+
 pub struct Handler;
 
 impl Handler {
@@ -10,7 +12,7 @@ impl Handler {
         // This API isn't available on XP, so don't panic in that case and just
         // pray it works out ok.
         if c::SetThreadStackGuarantee(&mut 0x5000) == 0
-            && c::GetLastError() as u32 != c::ERROR_CALL_NOT_IMPLEMENTED as u32
+            && api::get_last_error().code != c::ERROR_CALL_NOT_IMPLEMENTED
         {
             panic!("failed to reserve stack space for exception handling");
         }
@@ -18,7 +20,7 @@ impl Handler {
     }
 }
 
-extern "system" fn vectored_handler(ExceptionInfo: *mut c::EXCEPTION_POINTERS) -> c::LONG {
+unsafe extern "system" fn vectored_handler(ExceptionInfo: *mut c::EXCEPTION_POINTERS) -> c::LONG {
     unsafe {
         let rec = &(*(*ExceptionInfo).ExceptionRecord);
         let code = rec.ExceptionCode;
@@ -34,7 +36,7 @@ extern "system" fn vectored_handler(ExceptionInfo: *mut c::EXCEPTION_POINTERS) -
 }
 
 pub unsafe fn init() {
-    if c::AddVectoredExceptionHandler(0, vectored_handler).is_null() {
+    if c::AddVectoredExceptionHandler(0, Some(vectored_handler)).is_null() {
         panic!("failed to install exception handler");
     }
     // Set the thread stack guarantee for the main thread.

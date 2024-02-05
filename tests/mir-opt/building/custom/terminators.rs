@@ -1,3 +1,4 @@
+// skip-filecheck
 #![feature(custom_mir, core_intrinsics)]
 
 extern crate core;
@@ -12,7 +13,7 @@ fn ident<T>(t: T) -> T {
 fn direct_call(x: i32) -> i32 {
     mir!(
         {
-            Call(RET, retblock, ident(x))
+            Call(RET = ident(x), ReturnTo(retblock), UnwindContinue())
         }
 
         retblock = {
@@ -26,7 +27,7 @@ fn direct_call(x: i32) -> i32 {
 fn indirect_call(x: i32, f: fn(i32) -> i32) -> i32 {
     mir!(
         {
-            Call(RET, retblock, f(x))
+            Call(RET = f(x), ReturnTo(retblock), UnwindContinue())
         }
 
         retblock = {
@@ -48,10 +49,11 @@ impl<'a> Drop for WriteOnDrop<'a> {
 fn drop_first<'a>(a: WriteOnDrop<'a>, b: WriteOnDrop<'a>) {
     mir!(
         {
-            DropAndReplace(a, Move(b), retblock)
+            Drop(a, ReturnTo(retblock), UnwindContinue())
         }
 
         retblock = {
+            a = Move(b);
             Return()
         }
     )
@@ -62,7 +64,7 @@ fn drop_first<'a>(a: WriteOnDrop<'a>, b: WriteOnDrop<'a>) {
 fn drop_second<'a>(a: WriteOnDrop<'a>, b: WriteOnDrop<'a>) {
     mir!(
         {
-            Drop(b, retblock)
+            Drop(b, ReturnTo(retblock), UnwindContinue())
         }
 
         retblock = {

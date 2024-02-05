@@ -1,13 +1,13 @@
-// ignore-test This is currently broken
 // check-pass
-// revisions: mir thir
-// [thir]compile-flags: -Z thir-unsafeck
+// ignore-test This is currently broken
 
 #![allow(incomplete_features)]
 #![warn(unused_unsafe)]
 #![feature(inline_const_pat)]
 
-const unsafe fn require_unsafe() -> usize { 1 }
+const unsafe fn require_unsafe() -> usize {
+    1
+}
 
 fn main() {
     unsafe {
@@ -17,6 +17,15 @@ fn main() {
                 unsafe {}
                 //~^ WARNING unnecessary `unsafe` block
             } => (),
+        }
+
+        match 1 {
+            const {
+                unsafe {}
+                //~^ WARNING unnecessary `unsafe` block
+                require_unsafe()
+            }..=4 => (),
+            _ => (),
         }
     }
 }

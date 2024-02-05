@@ -33,6 +33,11 @@ pub fn method_context(cx: &LateContext<'_>, id: LocalDefId) -> MethodLateContext
     }
 }
 
+fn assoc_item_in_trait_impl(cx: &LateContext<'_>, ii: &hir::ImplItem<'_>) -> bool {
+    let item = cx.tcx.associated_item(ii.owner_id);
+    item.trait_item_def_id.is_some()
+}
+
 declare_lint! {
     /// The `non_camel_case_types` lint detects types, variants, traits and
     /// type parameters that don't have camel case names.
@@ -177,6 +182,7 @@ impl EarlyLintPass for NonCamelCaseTypes {
             // trait impls where we should have warned for the trait definition already.
             ast::ItemKind::Impl(box ast::Impl { of_trait: None, items, .. }) => {
                 for it in items {
+                    // FIXME: this doesn't respect `#[allow(..)]` on the item itself.
                     if let ast::AssocItemKind::Type(..) = it.kind {
                         self.check_case(cx, "associated type", &it.ident);
                     }
@@ -328,8 +334,7 @@ impl<'tcx> LateLintPass<'tcx> for NonSnakeCase {
         let crate_ident = if let Some(name) = &cx.tcx.sess.opts.crate_name {
             Some(Ident::from_str(name))
         } else {
-            cx.sess()
-                .find_by_name(&cx.tcx.hir().attrs(hir::CRATE_HIR_ID), sym::crate_name)
+            attr::find_by_name(cx.tcx.hir().attrs(hir::CRATE_HIR_ID), sym::crate_name)
                 .and_then(|attr| attr.meta())
                 .and_then(|meta| {
                     meta.name_value_literal().and_then(|lit| {
@@ -384,9 +389,7 @@ impl<'tcx> LateLintPass<'tcx> for NonSnakeCase {
         match &fk {
             FnKind::Method(ident, sig, ..) => match method_context(cx, id) {
                 MethodLateContext::PlainImpl => {
-                    if sig.header.abi != Abi::Rust
-                        && cx.tcx.has_attr(id.to_def_id(), sym::no_mangle)
-                    {
+                    if sig.header.abi != Abi::Rust && cx.tcx.has_attr(id, sym::no_mangle) {
                         return;
                     }
                     self.check_snake_case(cx, "method", ident);
@@ -398,7 +401,7 @@ impl<'tcx> LateLintPass<'tcx> for NonSnakeCase {
             },
             FnKind::ItemFn(ident, _, header) => {
                 // Skip foreign-ABI #[no_mangle] functions (Issue #31924)
-                if header.abi != Abi::Rust && cx.tcx.has_attr(id.to_def_id(), sym::no_mangle) {
+                if header.abi != Abi::Rust && cx.tcx.has_attr(id, sym::no_mangle) {
                     return;
                 }
                 self.check_snake_case(cx, "function", ident);
@@ -470,7 +473,7 @@ impl NonUpperCaseGlobals {
     fn check_upper_case(cx: &LateContext<'_>, sort: &str, ident: &Ident) {
         let name = ident.name.as_str();
         if name.chars().any(|c| c.is_lowercase()) {
-            let uc = NonSnakeCase::to_snake_case(&name).to_uppercase();
+            let uc = NonSnakeCase::to_snake_case(name).to_uppercase();
             // We cannot provide meaningful suggestions
             // if the characters are in the category of "Lowercase Letter".
             let sub = if *name != uc {
@@ -491,7 +494,7 @@ impl<'tcx> LateLintPass<'tcx> for NonUpperCaseGlobals {
     fn check_item(&mut self, cx: &LateContext<'_>, it: &hir::Item<'_>) {
         let attrs = cx.tcx.hir().attrs(it.hir_id());
         match it.kind {
-            hir::ItemKind::Static(..) if !cx.sess().contains_name(attrs, sym::no_mangle) => {
+            hir::ItemKind::Static(..) if !attr::contains_name(attrs, sym::no_mangle) => {
                 NonUpperCaseGlobals::check_upper_case(cx, "static variable", &it.ident);
             }
             hir::ItemKind::Const(..) => {
@@ -508,14 +511,16 @@ impl<'tcx> LateLintPass<'tcx> for NonUpperCaseGlobals {
     }
 
     fn check_impl_item(&mut self, cx: &LateContext<'_>, ii: &hir::ImplItem<'_>) {
-        if let hir::ImplItemKind::Const(..) = ii.kind {
+        if let hir::ImplItemKind::Const(..) = ii.kind
+            && !assoc_item_in_trait_impl(cx, ii)
+        {
             NonUpperCaseGlobals::check_upper_case(cx, "associated constant", &ii.ident);
         }
     }
 
     fn check_pat(&mut self, cx: &LateContext<'_>, p: &hir::Pat<'_>) {
         // Lint for constants that look like binding identifiers (#7526)
-        if let PatKind::Path(hir::QPath::Resolved(None, ref path)) = p.kind {
+        if let PatKind::Path(hir::QPath::Resolved(None, path)) = p.kind {
             if let Res::Def(DefKind::Const, _) = path.res {
                 if path.segments.len() == 1 {
                     NonUpperCaseGlobals::check_upper_case(
@@ -529,7 +534,11 @@ impl<'tcx> LateLintPass<'tcx> for NonUpperCaseGlobals {
     }
 
     fn check_generic_param(&mut self, cx: &LateContext<'_>, param: &hir::GenericParam<'_>) {
-        if let GenericParamKind::Const { .. } = param.kind {
+        if let GenericParamKind::Const { is_host_effect, .. } = param.kind {
+            // `host` params are explicitly allowed to be lowercase.
+            if is_host_effect {
+                return;
+            }
             NonUpperCaseGlobals::check_upper_case(cx, "const parameter", &param.name.ident());
         }
     }

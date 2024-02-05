@@ -1,7 +1,7 @@
 //! This module generates [moniker](https://microsoft.github.io/language-server-protocol/specifications/lsif/0.6.0/specification/#exportsImports)
 //! for LSIF and LSP.
 
-use hir::{AsAssocItem, AssocItemContainer, Crate, Name, Semantics};
+use hir::{Adt, AsAssocItem, AssocItemContainer, Crate, DescendPreference, MacroKind, Semantics};
 use ide_db::{
     base_db::{CrateOrigin, FilePosition, LangCrateOrigin},
     defs::{Definition, IdentClass},
@@ -25,9 +25,65 @@ pub enum MonikerDescriptorKind {
     Meta,
 }
 
+// Subset of scip_types::SymbolInformation::Kind
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SymbolInformationKind {
+    AssociatedType,
+    Attribute,
+    Constant,
+    Enum,
+    EnumMember,
+    Field,
+    Function,
+    Macro,
+    Method,
+    Module,
+    Parameter,
+    SelfParameter,
+    StaticMethod,
+    StaticVariable,
+    Struct,
+    Trait,
+    TraitMethod,
+    Type,
+    TypeAlias,
+    TypeParameter,
+    Union,
+    Variable,
+}
+
+impl From<SymbolInformationKind> for MonikerDescriptorKind {
+    fn from(value: SymbolInformationKind) -> Self {
+        match value {
+            SymbolInformationKind::AssociatedType => Self::TypeParameter,
+            SymbolInformationKind::Attribute => Self::Macro,
+            SymbolInformationKind::Constant => Self::Term,
+            SymbolInformationKind::Enum => Self::Type,
+            SymbolInformationKind::EnumMember => Self::Type,
+            SymbolInformationKind::Field => Self::Term,
+            SymbolInformationKind::Function => Self::Method,
+            SymbolInformationKind::Macro => Self::Macro,
+            SymbolInformationKind::Method => Self::Method,
+            SymbolInformationKind::Module => Self::Namespace,
+            SymbolInformationKind::Parameter => Self::Parameter,
+            SymbolInformationKind::SelfParameter => Self::Parameter,
+            SymbolInformationKind::StaticMethod => Self::Method,
+            SymbolInformationKind::StaticVariable => Self::Meta,
+            SymbolInformationKind::Struct => Self::Type,
+            SymbolInformationKind::Trait => Self::Type,
+            SymbolInformationKind::TraitMethod => Self::Method,
+            SymbolInformationKind::Type => Self::Type,
+            SymbolInformationKind::TypeAlias => Self::Type,
+            SymbolInformationKind::TypeParameter => Self::TypeParameter,
+            SymbolInformationKind::Union => Self::Type,
+            SymbolInformationKind::Variable => Self::Term,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MonikerDescriptor {
-    pub name: Name,
+    pub name: String,
     pub desc: MonikerDescriptorKind,
 }
 
@@ -41,11 +97,7 @@ impl ToString for MonikerIdentifier {
     fn to_string(&self) -> String {
         match self {
             MonikerIdentifier { description, crate_name } => {
-                format!(
-                    "{}::{}",
-                    crate_name,
-                    description.iter().map(|x| x.name.to_string()).join("::")
-                )
+                format!("{}::{}", crate_name, description.iter().map(|x| &x.name).join("::"))
             }
         }
     }
@@ -103,7 +155,7 @@ pub(crate) fn moniker(
         });
     }
     let navs = sema
-        .descend_into_macros(original_token.clone())
+        .descend_into_macros(DescendPreference::None, original_token.clone())
         .into_iter()
         .filter_map(|token| {
             IdentClass::classify_token(sema, &token).map(IdentClass::definitions_no_ops).map(|it| {
@@ -114,6 +166,69 @@ pub(crate) fn moniker(
         .unique()
         .collect::<Vec<_>>();
     Some(RangeInfo::new(original_token.text_range(), navs))
+}
+
+pub(crate) fn def_to_kind(db: &RootDatabase, def: Definition) -> SymbolInformationKind {
+    use SymbolInformationKind::*;
+
+    match def {
+        Definition::Macro(it) => match it.kind(db) {
+            MacroKind::Declarative => Macro,
+            MacroKind::Derive => Attribute,
+            MacroKind::BuiltIn => Macro,
+            MacroKind::Attr => Attribute,
+            MacroKind::ProcMacro => Macro,
+        },
+        Definition::Field(..) | Definition::TupleField(..) => Field,
+        Definition::Module(..) => Module,
+        Definition::Function(it) => {
+            if it.as_assoc_item(db).is_some() {
+                if it.has_self_param(db) {
+                    if it.has_body(db) {
+                        Method
+                    } else {
+                        TraitMethod
+                    }
+                } else {
+                    StaticMethod
+                }
+            } else {
+                Function
+            }
+        }
+        Definition::Adt(Adt::Struct(..)) => Struct,
+        Definition::Adt(Adt::Union(..)) => Union,
+        Definition::Adt(Adt::Enum(..)) => Enum,
+        Definition::Variant(..) => EnumMember,
+        Definition::Const(..) => Constant,
+        Definition::Static(..) => StaticVariable,
+        Definition::Trait(..) => Trait,
+        Definition::TraitAlias(..) => Trait,
+        Definition::TypeAlias(it) => {
+            if it.as_assoc_item(db).is_some() {
+                AssociatedType
+            } else {
+                TypeAlias
+            }
+        }
+        Definition::BuiltinType(..) => Type,
+        Definition::SelfType(..) => TypeAlias,
+        Definition::GenericParam(..) => TypeParameter,
+        Definition::Local(it) => {
+            if it.is_self(db) {
+                SelfParameter
+            } else if it.is_param(db) {
+                Parameter
+            } else {
+                Variable
+            }
+        }
+        Definition::Label(..) => Variable, // For lack of a better variant
+        Definition::DeriveHelper(..) => Attribute,
+        Definition::BuiltinAttr(..) => Attribute,
+        Definition::ToolModule(..) => Module,
+        Definition::ExternCrateDecl(..) => Module,
+    }
 }
 
 pub(crate) fn def_to_moniker(
@@ -136,7 +251,10 @@ pub(crate) fn def_to_moniker(
     let krate = module.krate();
     let mut description = vec![];
     description.extend(module.path_to_root(db).into_iter().filter_map(|x| {
-        Some(MonikerDescriptor { name: x.name(db)?, desc: MonikerDescriptorKind::Namespace })
+        Some(MonikerDescriptor {
+            name: x.name(db)?.display(db).to_string(),
+            desc: def_to_kind(db, x.into()).into(),
+        })
     }));
 
     // Handle associated items within a trait
@@ -147,8 +265,8 @@ pub(crate) fn def_to_moniker(
                 // Because different traits can have functions with the same name,
                 // we have to include the trait name as part of the moniker for uniqueness.
                 description.push(MonikerDescriptor {
-                    name: trait_.name(db),
-                    desc: MonikerDescriptorKind::Type,
+                    name: trait_.name(db).display(db).to_string(),
+                    desc: def_to_kind(db, trait_.into()).into(),
                 });
             }
             AssocItemContainer::Impl(impl_) => {
@@ -156,15 +274,15 @@ pub(crate) fn def_to_moniker(
                 // we add both the struct name and the trait name to the path
                 if let Some(adt) = impl_.self_ty(db).as_adt() {
                     description.push(MonikerDescriptor {
-                        name: adt.name(db),
-                        desc: MonikerDescriptorKind::Type,
+                        name: adt.name(db).display(db).to_string(),
+                        desc: def_to_kind(db, adt.into()).into(),
                     });
                 }
 
                 if let Some(trait_) = impl_.trait_(db) {
                     description.push(MonikerDescriptor {
-                        name: trait_.name(db),
-                        desc: MonikerDescriptorKind::Type,
+                        name: trait_.name(db).display(db).to_string(),
+                        desc: def_to_kind(db, trait_.into()).into(),
                     });
                 }
             }
@@ -173,10 +291,26 @@ pub(crate) fn def_to_moniker(
 
     if let Definition::Field(it) = def {
         description.push(MonikerDescriptor {
-            name: it.parent_def(db).name(db),
-            desc: MonikerDescriptorKind::Type,
+            name: it.parent_def(db).name(db).display(db).to_string(),
+            desc: def_to_kind(db, it.parent_def(db).into()).into(),
         });
     }
+
+    // Qualify locals/parameters by their parent definition name.
+    if let Definition::Local(it) = def {
+        let parent = Definition::try_from(it.parent(db)).ok();
+        if let Some(parent) = parent {
+            let parent_name = parent.name(db);
+            if let Some(name) = parent_name {
+                description.push(MonikerDescriptor {
+                    name: name.display(db).to_string(),
+                    desc: def_to_kind(db, parent).into(),
+                });
+            }
+        }
+    }
+
+    let desc = def_to_kind(db, def).into();
 
     let name_desc = match def {
         // These are handled by top-level guard (for performance).
@@ -191,44 +325,53 @@ pub(crate) fn def_to_moniker(
                 return None;
             }
 
-            MonikerDescriptor { name: local.name(db), desc: MonikerDescriptorKind::Parameter }
+            MonikerDescriptor { name: local.name(db).display(db).to_string(), desc }
         }
         Definition::Macro(m) => {
-            MonikerDescriptor { name: m.name(db), desc: MonikerDescriptorKind::Macro }
+            MonikerDescriptor { name: m.name(db).display(db).to_string(), desc }
         }
         Definition::Function(f) => {
-            MonikerDescriptor { name: f.name(db), desc: MonikerDescriptorKind::Method }
+            MonikerDescriptor { name: f.name(db).display(db).to_string(), desc }
         }
         Definition::Variant(v) => {
-            MonikerDescriptor { name: v.name(db), desc: MonikerDescriptorKind::Type }
+            MonikerDescriptor { name: v.name(db).display(db).to_string(), desc }
         }
         Definition::Const(c) => {
-            MonikerDescriptor { name: c.name(db)?, desc: MonikerDescriptorKind::Term }
+            MonikerDescriptor { name: c.name(db)?.display(db).to_string(), desc }
         }
         Definition::Trait(trait_) => {
-            MonikerDescriptor { name: trait_.name(db), desc: MonikerDescriptorKind::Type }
+            MonikerDescriptor { name: trait_.name(db).display(db).to_string(), desc }
+        }
+        Definition::TraitAlias(ta) => {
+            MonikerDescriptor { name: ta.name(db).display(db).to_string(), desc }
         }
         Definition::TypeAlias(ta) => {
-            MonikerDescriptor { name: ta.name(db), desc: MonikerDescriptorKind::TypeParameter }
+            MonikerDescriptor { name: ta.name(db).display(db).to_string(), desc }
         }
         Definition::Module(m) => {
-            MonikerDescriptor { name: m.name(db)?, desc: MonikerDescriptorKind::Namespace }
+            MonikerDescriptor { name: m.name(db)?.display(db).to_string(), desc }
         }
         Definition::BuiltinType(b) => {
-            MonikerDescriptor { name: b.name(), desc: MonikerDescriptorKind::Type }
+            MonikerDescriptor { name: b.name().display(db).to_string(), desc }
         }
         Definition::SelfType(imp) => MonikerDescriptor {
-            name: imp.self_ty(db).as_adt()?.name(db),
-            desc: MonikerDescriptorKind::Type,
+            name: imp.self_ty(db).as_adt()?.name(db).display(db).to_string(),
+            desc,
         },
         Definition::Field(it) => {
-            MonikerDescriptor { name: it.name(db), desc: MonikerDescriptorKind::Term }
+            MonikerDescriptor { name: it.name(db).display(db).to_string(), desc }
+        }
+        Definition::TupleField(it) => {
+            MonikerDescriptor { name: it.name().display(db).to_string(), desc }
         }
         Definition::Adt(adt) => {
-            MonikerDescriptor { name: adt.name(db), desc: MonikerDescriptorKind::Type }
+            MonikerDescriptor { name: adt.name(db).display(db).to_string(), desc }
         }
         Definition::Static(s) => {
-            MonikerDescriptor { name: s.name(db), desc: MonikerDescriptorKind::Meta }
+            MonikerDescriptor { name: s.name(db).display(db).to_string(), desc }
+        }
+        Definition::ExternCrateDecl(m) => {
+            MonikerDescriptor { name: m.name(db).display(db).to_string(), desc }
         }
     };
 
@@ -242,10 +385,16 @@ pub(crate) fn def_to_moniker(
         kind: if krate == from_crate { MonikerKind::Export } else { MonikerKind::Import },
         package_information: {
             let (name, repo, version) = match krate.origin(db) {
-                CrateOrigin::CratesIo { repo, name } => (
+                CrateOrigin::Library { repo, name } => (name, repo, krate.version(db)),
+                CrateOrigin::Local { repo, name } => (
                     name.unwrap_or(krate.display_name(db)?.canonical_name().to_string()),
                     repo,
                     krate.version(db),
+                ),
+                CrateOrigin::Rustc { name } => (
+                    name.clone(),
+                    Some("https://github.com/rust-lang/rust/".to_string()),
+                    Some(format!("https://github.com/rust-lang/rust/compiler/{name}",)),
                 ),
                 CrateOrigin::Lang(lang) => (
                     krate.display_name(db)?.canonical_name().to_string(),
@@ -297,7 +446,7 @@ use foo::module::func;
 fn main() {
     func$0();
 }
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod module {
     pub fn func() {}
 }
@@ -313,7 +462,7 @@ use foo::module::func;
 fn main() {
     func();
 }
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod module {
     pub fn func$0() {}
 }
@@ -328,7 +477,7 @@ pub mod module {
     fn moniker_for_trait() {
         check_moniker(
             r#"
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod module {
     pub trait MyTrait {
         pub fn func$0() {}
@@ -345,7 +494,7 @@ pub mod module {
     fn moniker_for_trait_constant() {
         check_moniker(
             r#"
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod module {
     pub trait MyTrait {
         const MY_CONST$0: u8;
@@ -362,7 +511,7 @@ pub mod module {
     fn moniker_for_trait_type() {
         check_moniker(
             r#"
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod module {
     pub trait MyTrait {
         type MyType$0;
@@ -379,7 +528,7 @@ pub mod module {
     fn moniker_for_trait_impl_function() {
         check_moniker(
             r#"
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod module {
     pub trait MyTrait {
         pub fn func() {}
@@ -407,7 +556,7 @@ use foo::St;
 fn main() {
     let x = St { a$0: 2 };
 }
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub struct St {
     pub a: i32,
 }
@@ -427,7 +576,7 @@ use foo::module::func;
 fn main() {
     func();
 }
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod module {
     pub fn func() {
         let x$0 = 2;

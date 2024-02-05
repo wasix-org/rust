@@ -1,3 +1,5 @@
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // unit-test: RenameReturnPlace
 
 // EMIT_MIR nrvo_simple.nrvo.RenameReturnPlace.diff

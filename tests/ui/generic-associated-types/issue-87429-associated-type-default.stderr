@@ -12,9 +12,10 @@ LL |     type Member<'a>: for<'b> PartialEq<Self::Member<'b>> = Foo;
    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Family2::Member`
 help: consider annotating `Foo` with `#[derive(PartialEq)]`
    |
-LL | #[derive(PartialEq)]
+LL + #[derive(PartialEq)]
+LL | struct Foo;
    |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0277`.

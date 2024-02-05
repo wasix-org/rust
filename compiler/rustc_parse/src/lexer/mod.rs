@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::errors;
 use crate::lexer::unicode_chars::UNICODE_ARRAY;
 use crate::make_unclosed_delims_error;
@@ -5,10 +7,10 @@ use rustc_ast::ast::{self, AttrStyle};
 use rustc_ast::token::{self, CommentKind, Delimiter, Token, TokenKind};
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::util::unicode::contains_text_flow_control_chars;
-use rustc_errors::{error_code, Applicability, Diagnostic, DiagnosticBuilder, StashKey};
-use rustc_lexer::unescape::{self, Mode};
-use rustc_lexer::Cursor;
+use rustc_errors::{error_code, Applicability, DiagCtxt, Diagnostic, StashKey};
+use rustc_lexer::unescape::{self, EscapeError, Mode};
 use rustc_lexer::{Base, DocStyle, RawStrError};
+use rustc_lexer::{Cursor, LiteralKind};
 use rustc_session::lint::builtin::{
     RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX, TEXT_DIRECTION_CODEPOINT_IN_COMMENT,
 };
@@ -62,25 +64,26 @@ pub(crate) fn parse_token_trees<'a>(
         override_span,
         nbsp_is_whitespace: false,
     };
-    let (token_trees, unmatched_delims) =
+    let (stream, res, unmatched_delims) =
         tokentrees::TokenTreesReader::parse_all_token_trees(string_reader);
-    match token_trees {
-        Ok(stream) if unmatched_delims.is_empty() => Ok(stream),
+    match res {
+        Ok(()) if unmatched_delims.is_empty() => Ok(stream),
         _ => {
-            // Return error if there are unmatched delimiters or unclosng delimiters.
+            // Return error if there are unmatched delimiters or unclosed delimiters.
             // We emit delimiter mismatch errors first, then emit the unclosing delimiter mismatch
             // because the delimiter mismatch is more likely to be the root cause of error
 
             let mut buffer = Vec::with_capacity(1);
-            // Not using `emit_unclosed_delims` to use `db.buffer`
             for unmatched in unmatched_delims {
-                if let Some(err) = make_unclosed_delims_error(unmatched, &sess) {
+                if let Some(err) = make_unclosed_delims_error(unmatched, sess) {
                     err.buffer(&mut buffer);
                 }
             }
-            if let Err(err) = token_trees {
-                // Add unclosing delimiter error
-                err.buffer(&mut buffer);
+            if let Err(errs) = res {
+                // Add unclosing delimiter or diff marker errors
+                for err in errs {
+                    err.buffer(&mut buffer);
+                }
             }
             Err(buffer)
         }
@@ -105,6 +108,10 @@ struct StringReader<'a> {
 }
 
 impl<'a> StringReader<'a> {
+    pub fn dcx(&self) -> &'a DiagCtxt {
+        &self.sess.dcx
+    }
+
     fn mk_sp(&self, lo: BytePos, hi: BytePos) -> Span {
         self.override_span.unwrap_or_else(|| Span::with_root_ctxt(lo, hi))
     }
@@ -116,6 +123,7 @@ impl<'a> StringReader<'a> {
         let mut swallow_next_invalid = 0;
         // Skip trivial (whitespace & comments) tokens
         loop {
+            let str_before = self.cursor.as_str();
             let token = self.cursor.advance_token();
             let start = self.pos;
             self.pos = self.pos + BytePos(token.len);
@@ -163,27 +171,21 @@ impl<'a> StringReader<'a> {
                     continue;
                 }
                 rustc_lexer::TokenKind::Ident => {
-                    let sym = nfc_normalize(self.str_from(start));
-                    let span = self.mk_sp(start, self.pos);
-                    self.sess.symbol_gallery.insert(sym, span);
-                    token::Ident(sym, false)
+                    self.ident(start)
                 }
                 rustc_lexer::TokenKind::RawIdent => {
                     let sym = nfc_normalize(self.str_from(start + BytePos(2)));
                     let span = self.mk_sp(start, self.pos);
                     self.sess.symbol_gallery.insert(sym, span);
                     if !sym.can_be_raw() {
-                        self.sess.emit_err(errors::CannotBeRawIdent { span, ident: sym });
+                        self.dcx().emit_err(errors::CannotBeRawIdent { span, ident: sym });
                     }
-                    self.sess.raw_identifier_spans.borrow_mut().push(span);
+                    self.sess.raw_identifier_spans.push(span);
                     token::Ident(sym, true)
                 }
                 rustc_lexer::TokenKind::UnknownPrefix => {
                     self.report_unknown_prefix(start);
-                    let sym = nfc_normalize(self.str_from(start));
-                    let span = self.mk_sp(start, self.pos);
-                    self.sess.symbol_gallery.insert(sym, span);
-                    token::Ident(sym, false)
+                    self.ident(start)
                 }
                 rustc_lexer::TokenKind::InvalidIdent
                     // Do not recover an identifier with emoji if the codepoint is a confusable
@@ -201,6 +203,27 @@ impl<'a> StringReader<'a> {
                         .push(span);
                     token::Ident(sym, false)
                 }
+                // split up (raw) c string literals to an ident and a string literal when edition < 2021.
+                rustc_lexer::TokenKind::Literal {
+                    kind: kind @ (LiteralKind::CStr { .. } | LiteralKind::RawCStr { .. }),
+                    suffix_start: _,
+                } if !self.mk_sp(start, self.pos).edition().at_least_rust_2021() => {
+                    let prefix_len = match kind {
+                        LiteralKind::CStr { .. } => 1,
+                        LiteralKind::RawCStr { .. } => 2,
+                        _ => unreachable!(),
+                    };
+
+                    // reset the state so that only the prefix ("c" or "cr")
+                    // was consumed.
+                    let lit_start = start + BytePos(prefix_len);
+                    self.pos = lit_start;
+                    self.cursor = Cursor::new(&str_before[prefix_len as usize..]);
+
+                    self.report_unknown_prefix(start);
+                    let prefix_span = self.mk_sp(start, lit_start);
+                    return (Token::new(self.ident(start), prefix_span), preceded_by_whitespace);
+                }
                 rustc_lexer::TokenKind::Literal { kind, suffix_start } => {
                     let suffix_start = start + BytePos(suffix_start);
                     let (kind, symbol) = self.cook_lexer_literal(start, suffix_start, kind);
@@ -208,12 +231,8 @@ impl<'a> StringReader<'a> {
                         let string = self.str_from(suffix_start);
                         if string == "_" {
                             self.sess
-                                .span_diagnostic
-                                .struct_span_err(
-                                    self.mk_sp(suffix_start, self.pos),
-                                    "underscore literal suffix is not allowed",
-                                )
-                                .emit();
+                                .dcx
+                                .emit_err(errors::UnderscoreLiteralSuffix { span: self.mk_sp(suffix_start, self.pos) });
                             None
                         } else {
                             Some(Symbol::intern(string))
@@ -223,21 +242,16 @@ impl<'a> StringReader<'a> {
                     };
                     token::Literal(token::Lit { kind, symbol, suffix })
                 }
-                rustc_lexer::TokenKind::Lifetime { starts_with_number, contains_emoji } => {
+                rustc_lexer::TokenKind::Lifetime { starts_with_number } => {
                     // Include the leading `'` in the real identifier, for macro
                     // expansion purposes. See #12512 for the gory details of why
                     // this is necessary.
                     let lifetime_name = self.str_from(start);
                     if starts_with_number {
                         let span = self.mk_sp(start, self.pos);
-                        let mut diag = self.sess.struct_err("lifetimes or labels cannot start with a number");
-                        diag.set_span(span);
-                        diag.stash(span, StashKey::LifetimeIsChar);
-                    } else if contains_emoji {
-                        let span = self.mk_sp(start, self.pos);
-                        let mut diag = self.sess.struct_err("lifetimes or labels cannot contain emojis");
-                        diag.set_span(span);
-                        diag.stash(span, StashKey::LifetimeContainsEmoji);
+                        self.dcx().struct_err("lifetimes cannot start with a number")
+                            .span_mv(span)
+                            .stash(span, StashKey::LifetimeIsChar);
                     }
                     let ident = Symbol::intern(lifetime_name);
                     token::Lifetime(ident)
@@ -296,7 +310,7 @@ impl<'a> StringReader<'a> {
                     // fancier error recovery to it, as there will be less overall work to do this
                     // way.
                     let (token, sugg) = unicode_chars::check_for_substitution(self, start, c, repeats+1);
-                    self.sess.emit_err(errors::UnknownTokenStart {
+                    self.dcx().emit_err(errors::UnknownTokenStart {
                         span: self.mk_sp(start, self.pos + Pos::from_usize(repeats * c.len_utf8())),
                         escaped: escaped_char(c),
                         sugg,
@@ -321,16 +335,11 @@ impl<'a> StringReader<'a> {
         }
     }
 
-    fn struct_fatal_span_char(
-        &self,
-        from_pos: BytePos,
-        to_pos: BytePos,
-        m: &str,
-        c: char,
-    ) -> DiagnosticBuilder<'a, !> {
-        self.sess
-            .span_diagnostic
-            .struct_span_fatal(self.mk_sp(from_pos, to_pos), &format!("{}: {}", m, escaped_char(c)))
+    fn ident(&self, start: BytePos) -> TokenKind {
+        let sym = nfc_normalize(self.str_from(start));
+        let span = self.mk_sp(start, self.pos);
+        self.sess.symbol_gallery.insert(sym, span);
+        token::Ident(sym, false)
     }
 
     /// Detect usages of Unicode codepoints changing the direction of the text on screen and loudly
@@ -342,7 +351,7 @@ impl<'a> StringReader<'a> {
         if contains_text_flow_control_chars(content) {
             let span = self.mk_sp(start, self.pos);
             self.sess.buffer_lint_with_diagnostic(
-                &TEXT_DIRECTION_CODEPOINT_IN_COMMENT,
+                TEXT_DIRECTION_CODEPOINT_IN_COMMENT,
                 span,
                 ast::CRATE_NODE_ID,
                 "unicode codepoint changing visible direction of text present in comment",
@@ -365,7 +374,7 @@ impl<'a> StringReader<'a> {
                     content_start + BytePos(idx as u32 + 1),
                 );
                 let block = matches!(comment_kind, CommentKind::Block);
-                self.sess.emit_err(errors::CrDocComment { span, block });
+                self.dcx().emit_err(errors::CrDocComment { span, block });
             }
         }
 
@@ -386,43 +395,60 @@ impl<'a> StringReader<'a> {
         match kind {
             rustc_lexer::LiteralKind::Char { terminated } => {
                 if !terminated {
-                    self.sess.span_diagnostic.span_fatal_with_code(
-                        self.mk_sp(start, end),
-                        "unterminated character literal",
-                        error_code!(E0762),
-                    )
+                    self.dcx()
+                        .struct_span_fatal(self.mk_sp(start, end), "unterminated character literal")
+                        .code_mv(error_code!(E0762))
+                        .emit()
                 }
                 self.cook_quoted(token::Char, Mode::Char, start, end, 1, 1) // ' '
             }
             rustc_lexer::LiteralKind::Byte { terminated } => {
                 if !terminated {
-                    self.sess.span_diagnostic.span_fatal_with_code(
-                        self.mk_sp(start + BytePos(1), end),
-                        "unterminated byte constant",
-                        error_code!(E0763),
-                    )
+                    self.dcx()
+                        .struct_span_fatal(
+                            self.mk_sp(start + BytePos(1), end),
+                            "unterminated byte constant",
+                        )
+                        .code_mv(error_code!(E0763))
+                        .emit()
                 }
                 self.cook_quoted(token::Byte, Mode::Byte, start, end, 2, 1) // b' '
             }
             rustc_lexer::LiteralKind::Str { terminated } => {
                 if !terminated {
-                    self.sess.span_diagnostic.span_fatal_with_code(
-                        self.mk_sp(start, end),
-                        "unterminated double quote string",
-                        error_code!(E0765),
-                    )
+                    self.dcx()
+                        .struct_span_fatal(
+                            self.mk_sp(start, end),
+                            "unterminated double quote string",
+                        )
+                        .code_mv(error_code!(E0765))
+                        .emit()
                 }
                 self.cook_quoted(token::Str, Mode::Str, start, end, 1, 1) // " "
             }
             rustc_lexer::LiteralKind::ByteStr { terminated } => {
                 if !terminated {
-                    self.sess.span_diagnostic.span_fatal_with_code(
-                        self.mk_sp(start + BytePos(1), end),
-                        "unterminated double quote byte string",
-                        error_code!(E0766),
-                    )
+                    self.dcx()
+                        .struct_span_fatal(
+                            self.mk_sp(start + BytePos(1), end),
+                            "unterminated double quote byte string",
+                        )
+                        .code_mv(error_code!(E0766))
+                        .emit()
                 }
                 self.cook_quoted(token::ByteStr, Mode::ByteStr, start, end, 2, 1) // b" "
+            }
+            rustc_lexer::LiteralKind::CStr { terminated } => {
+                if !terminated {
+                    self.dcx()
+                        .struct_span_fatal(
+                            self.mk_sp(start + BytePos(1), end),
+                            "unterminated C string",
+                        )
+                        .code_mv(error_code!(E0767))
+                        .emit()
+                }
+                self.cook_c_string(token::CStr, Mode::CStr, start, end, 2, 1) // c" "
             }
             rustc_lexer::LiteralKind::RawStr { n_hashes } => {
                 if let Some(n_hashes) = n_hashes {
@@ -442,10 +468,19 @@ impl<'a> StringReader<'a> {
                     self.report_raw_str_error(start, 2);
                 }
             }
+            rustc_lexer::LiteralKind::RawCStr { n_hashes } => {
+                if let Some(n_hashes) = n_hashes {
+                    let n = u32::from(n_hashes);
+                    let kind = token::CStrRaw(n_hashes);
+                    self.cook_c_string(kind, Mode::RawCStr, start, end, 3 + n, 1 + n) // cr##" "##
+                } else {
+                    self.report_raw_str_error(start, 2);
+                }
+            }
             rustc_lexer::LiteralKind::Int { base, empty_int } => {
                 if empty_int {
                     let span = self.mk_sp(start, end);
-                    self.sess.emit_err(errors::NoDigitsLiteral { span });
+                    self.dcx().emit_err(errors::NoDigitsLiteral { span });
                     (token::Integer, sym::integer(0))
                 } else {
                     if matches!(base, Base::Binary | Base::Octal) {
@@ -457,7 +492,7 @@ impl<'a> StringReader<'a> {
                                 start + BytePos::from_usize(2 + idx + c.len_utf8()),
                             );
                             if c != '_' && c.to_digit(base).is_none() {
-                                self.sess.emit_err(errors::InvalidDigitLiteral { span, base });
+                                self.dcx().emit_err(errors::InvalidDigitLiteral { span, base });
                             }
                         }
                     }
@@ -467,7 +502,7 @@ impl<'a> StringReader<'a> {
             rustc_lexer::LiteralKind::Float { base, empty_exponent } => {
                 if empty_exponent {
                     let span = self.mk_sp(start, self.pos);
-                    self.sess.emit_err(errors::EmptyExponentFloat { span });
+                    self.dcx().emit_err(errors::EmptyExponentFloat { span });
                 }
                 let base = match base {
                     Base::Hexadecimal => Some("hexadecimal"),
@@ -477,7 +512,7 @@ impl<'a> StringReader<'a> {
                 };
                 if let Some(base) = base {
                     let span = self.mk_sp(start, end);
-                    self.sess.emit_err(errors::FloatLiteralUnsupportedBase { span, base });
+                    self.dcx().emit_err(errors::FloatLiteralUnsupportedBase { span, base });
                 }
                 (token::Float, self.symbol_from_to(start, end))
             }
@@ -526,13 +561,16 @@ impl<'a> StringReader<'a> {
     }
 
     fn report_non_started_raw_string(&self, start: BytePos, bad_char: char) -> ! {
-        self.struct_fatal_span_char(
-            start,
-            self.pos,
-            "found invalid character; only `#` is allowed in raw string delimitation",
-            bad_char,
-        )
-        .emit()
+        self.sess
+            .dcx
+            .struct_span_fatal(
+                self.mk_sp(start, self.pos),
+                format!(
+                    "found invalid character; only `#` is allowed in raw string delimitation: {}",
+                    escaped_char(bad_char)
+                ),
+            )
+            .emit()
     }
 
     fn report_unterminated_raw_string(
@@ -542,24 +580,21 @@ impl<'a> StringReader<'a> {
         possible_offset: Option<u32>,
         found_terminators: u32,
     ) -> ! {
-        let mut err = self.sess.span_diagnostic.struct_span_fatal_with_code(
-            self.mk_sp(start, start),
-            "unterminated raw string",
-            error_code!(E0748),
-        );
-
+        let mut err =
+            self.dcx().struct_span_fatal(self.mk_sp(start, start), "unterminated raw string");
+        err.code(error_code!(E0748));
         err.span_label(self.mk_sp(start, start), "unterminated raw string");
 
         if n_hashes > 0 {
-            err.note(&format!(
+            err.note(format!(
                 "this raw string should be terminated with `\"{}`",
                 "#".repeat(n_hashes as usize)
             ));
         }
 
         if let Some(possible_offset) = possible_offset {
-            let lo = start + BytePos(possible_offset as u32);
-            let hi = lo + BytePos(found_terminators as u32);
+            let lo = start + BytePos(possible_offset);
+            let hi = lo + BytePos(found_terminators);
             let span = self.mk_sp(lo, hi);
             err.span_suggestion(
                 span,
@@ -578,11 +613,8 @@ impl<'a> StringReader<'a> {
             None => "unterminated block comment",
         };
         let last_bpos = self.pos;
-        let mut err = self.sess.span_diagnostic.struct_span_fatal_with_code(
-            self.mk_sp(start, last_bpos),
-            msg,
-            error_code!(E0758),
-        );
+        let mut err = self.dcx().struct_span_fatal(self.mk_sp(start, last_bpos), msg);
+        err.code(error_code!(E0758));
         let mut nested_block_comment_open_idxs = vec![];
         let mut last_nested_block_comment_idxs = None;
         let mut content_chars = self.str_from(start).char_indices().peekable();
@@ -640,24 +672,24 @@ impl<'a> StringReader<'a> {
             } else {
                 None
             };
-            self.sess.emit_err(errors::UnknownPrefix { span: prefix_span, prefix, sugg });
+            self.dcx().emit_err(errors::UnknownPrefix { span: prefix_span, prefix, sugg });
         } else {
             // Before Rust 2021, only emit a lint for migration.
             self.sess.buffer_lint_with_diagnostic(
-                &RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX,
+                RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX,
                 prefix_span,
                 ast::CRATE_NODE_ID,
-                &format!("prefix `{prefix}` is unknown"),
+                format!("prefix `{prefix}` is unknown"),
                 BuiltinLintDiagnostics::ReservedPrefix(prefix_span),
             );
         }
     }
 
     fn report_too_many_hashes(&self, start: BytePos, num: u32) -> ! {
-        self.sess.emit_fatal(errors::TooManyHashes { span: self.mk_sp(start, self.pos), num });
+        self.dcx().emit_fatal(errors::TooManyHashes { span: self.mk_sp(start, self.pos), num });
     }
 
-    fn cook_quoted(
+    fn cook_common(
         &self,
         kind: token::LitKind,
         mode: Mode,
@@ -665,12 +697,13 @@ impl<'a> StringReader<'a> {
         end: BytePos,
         prefix_len: u32,
         postfix_len: u32,
+        unescape: fn(&str, Mode, &mut dyn FnMut(Range<usize>, Result<(), EscapeError>)),
     ) -> (token::LitKind, Symbol) {
         let mut has_fatal_err = false;
         let content_start = start + BytePos(prefix_len);
         let content_end = end - BytePos(postfix_len);
         let lit_content = self.str_from_to(content_start, content_end);
-        unescape::unescape_literal(lit_content, mode, &mut |range, result| {
+        unescape(lit_content, mode, &mut |range, result| {
             // Here we only check for errors. The actual unescaping is done later.
             if let Err(err) = result {
                 let span_with_quotes = self.mk_sp(start, end);
@@ -682,7 +715,7 @@ impl<'a> StringReader<'a> {
                     has_fatal_err = true;
                 }
                 emit_unescape_error(
-                    &self.sess.span_diagnostic,
+                    self.dcx(),
                     lit_content,
                     span_with_quotes,
                     span,
@@ -700,6 +733,38 @@ impl<'a> StringReader<'a> {
         } else {
             (token::Err, self.symbol_from_to(start, end))
         }
+    }
+
+    fn cook_quoted(
+        &self,
+        kind: token::LitKind,
+        mode: Mode,
+        start: BytePos,
+        end: BytePos,
+        prefix_len: u32,
+        postfix_len: u32,
+    ) -> (token::LitKind, Symbol) {
+        self.cook_common(kind, mode, start, end, prefix_len, postfix_len, |src, mode, callback| {
+            unescape::unescape_literal(src, mode, &mut |span, result| {
+                callback(span, result.map(drop))
+            })
+        })
+    }
+
+    fn cook_c_string(
+        &self,
+        kind: token::LitKind,
+        mode: Mode,
+        start: BytePos,
+        end: BytePos,
+        prefix_len: u32,
+        postfix_len: u32,
+    ) -> (token::LitKind, Symbol) {
+        self.cook_common(kind, mode, start, end, prefix_len, postfix_len, |src, mode, callback| {
+            unescape::unescape_c_string(src, mode, &mut |span, result| {
+                callback(span, result.map(drop))
+            })
+        })
     }
 }
 

@@ -9,98 +9,12 @@ use rustc_apfloat::{
 use rustc_macros::HashStable;
 use rustc_target::abi::{HasDataLayout, Size};
 
-use crate::ty::{ParamEnv, ScalarInt, Ty, TyCtxt};
+use crate::ty::ScalarInt;
 
 use super::{
-    AllocId, AllocRange, ConstAllocation, InterpResult, Pointer, PointerArithmetic, Provenance,
+    AllocId, CtfeProvenance, InterpResult, Pointer, PointerArithmetic, Provenance,
     ScalarSizeMismatch,
 };
-
-/// Represents the result of const evaluation via the `eval_to_allocation` query.
-#[derive(Copy, Clone, HashStable, TyEncodable, TyDecodable, Debug, Hash, Eq, PartialEq)]
-pub struct ConstAlloc<'tcx> {
-    /// The value lives here, at offset 0, and that allocation definitely is an `AllocKind::Memory`
-    /// (so you can use `AllocMap::unwrap_memory`).
-    pub alloc_id: AllocId,
-    pub ty: Ty<'tcx>,
-}
-
-/// Represents a constant value in Rust. `Scalar` and `Slice` are optimizations for
-/// array length computations, enum discriminants and the pattern matching logic.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, TyEncodable, TyDecodable, Hash)]
-#[derive(HashStable, Lift)]
-pub enum ConstValue<'tcx> {
-    /// Used only for types with `layout::abi::Scalar` ABI.
-    ///
-    /// Not using the enum `Value` to encode that this must not be `Uninit`.
-    Scalar(Scalar),
-
-    /// Only used for ZSTs.
-    ZeroSized,
-
-    /// Used only for `&[u8]` and `&str`
-    Slice { data: ConstAllocation<'tcx>, start: usize, end: usize },
-
-    /// A value not represented/representable by `Scalar` or `Slice`
-    ByRef {
-        /// The backing memory of the value, may contain more memory than needed for just the value
-        /// in order to share `ConstAllocation`s between values
-        alloc: ConstAllocation<'tcx>,
-        /// Offset into `alloc`
-        offset: Size,
-    },
-}
-
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-static_assert_size!(ConstValue<'_>, 32);
-
-impl<'tcx> ConstValue<'tcx> {
-    #[inline]
-    pub fn try_to_scalar(&self) -> Option<Scalar<AllocId>> {
-        match *self {
-            ConstValue::ByRef { .. } | ConstValue::Slice { .. } | ConstValue::ZeroSized => None,
-            ConstValue::Scalar(val) => Some(val),
-        }
-    }
-
-    pub fn try_to_scalar_int(&self) -> Option<ScalarInt> {
-        self.try_to_scalar()?.try_to_int().ok()
-    }
-
-    pub fn try_to_bits(&self, size: Size) -> Option<u128> {
-        self.try_to_scalar_int()?.to_bits(size).ok()
-    }
-
-    pub fn try_to_bool(&self) -> Option<bool> {
-        self.try_to_scalar_int()?.try_into().ok()
-    }
-
-    pub fn try_to_target_usize(&self, tcx: TyCtxt<'tcx>) -> Option<u64> {
-        self.try_to_scalar_int()?.try_to_target_usize(tcx).ok()
-    }
-
-    pub fn try_to_bits_for_ty(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        param_env: ParamEnv<'tcx>,
-        ty: Ty<'tcx>,
-    ) -> Option<u128> {
-        let size = tcx.layout_of(param_env.with_reveal_all_normalized(tcx).and(ty)).ok()?.size;
-        self.try_to_bits(size)
-    }
-
-    pub fn from_bool(b: bool) -> Self {
-        ConstValue::Scalar(Scalar::from_bool(b))
-    }
-
-    pub fn from_u64(i: u64) -> Self {
-        ConstValue::Scalar(Scalar::from_u64(i))
-    }
-
-    pub fn from_target_usize(i: u64, cx: &impl HasDataLayout) -> Self {
-        ConstValue::Scalar(Scalar::from_target_usize(i, cx))
-    }
-}
 
 /// A `Scalar` represents an immediate, primitive value existing outside of a
 /// `memory::Allocation`. It is in many ways like a small chunk of an `Allocation`, up to 16 bytes in
@@ -111,7 +25,7 @@ impl<'tcx> ConstValue<'tcx> {
 /// Do *not* match on a `Scalar`! Use the various `to_*` methods instead.
 #[derive(Clone, Copy, Eq, PartialEq, TyEncodable, TyDecodable, Hash)]
 #[derive(HashStable)]
-pub enum Scalar<Prov = AllocId> {
+pub enum Scalar<Prov = CtfeProvenance> {
     /// The raw bytes of a simple value.
     Int(ScalarInt),
 
@@ -131,8 +45,8 @@ static_assert_size!(Scalar, 24);
 impl<Prov: Provenance> fmt::Debug for Scalar<Prov> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Scalar::Ptr(ptr, _size) => write!(f, "{:?}", ptr),
-            Scalar::Int(int) => write!(f, "{:?}", int),
+            Scalar::Ptr(ptr, _size) => write!(f, "{ptr:?}"),
+            Scalar::Int(int) => write!(f, "{int:?}"),
         }
     }
 }
@@ -140,8 +54,8 @@ impl<Prov: Provenance> fmt::Debug for Scalar<Prov> {
 impl<Prov: Provenance> fmt::Display for Scalar<Prov> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Scalar::Ptr(ptr, _size) => write!(f, "pointer to {:?}", ptr),
-            Scalar::Int(int) => write!(f, "{}", int),
+            Scalar::Ptr(ptr, _size) => write!(f, "pointer to {ptr:?}"),
+            Scalar::Int(int) => write!(f, "{int}"),
         }
     }
 }
@@ -149,8 +63,8 @@ impl<Prov: Provenance> fmt::Display for Scalar<Prov> {
 impl<Prov: Provenance> fmt::LowerHex for Scalar<Prov> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Scalar::Ptr(ptr, _size) => write!(f, "pointer to {:?}", ptr),
-            Scalar::Int(int) => write!(f, "{:#x}", int),
+            Scalar::Ptr(ptr, _size) => write!(f, "pointer to {ptr:?}"),
+            Scalar::Int(int) => write!(f, "{int:#x}"),
         }
     }
 }
@@ -241,6 +155,11 @@ impl<Prov> Scalar<Prov> {
     }
 
     #[inline]
+    pub fn from_u128(i: u128) -> Self {
+        Scalar::Int(i.into())
+    }
+
+    #[inline]
     pub fn from_target_usize(i: u64, cx: &impl HasDataLayout) -> Self {
         Self::from_uint(i, cx.data_layout().pointer_size)
     }
@@ -255,6 +174,16 @@ impl<Prov> Scalar<Prov> {
         let i = i.into();
         Self::try_from_int(i, size)
             .unwrap_or_else(|| bug!("Signed value {:#x} does not fit in {} bits", i, size.bits()))
+    }
+
+    #[inline]
+    pub fn from_i8(i: i8) -> Self {
+        Self::from_int(i, Size::from_bits(8))
+    }
+
+    #[inline]
+    pub fn from_i16(i: i16) -> Self {
+        Self::from_int(i, Size::from_bits(16))
     }
 
     #[inline]
@@ -311,6 +240,14 @@ impl<Prov> Scalar<Prov> {
             }
         })
     }
+
+    #[inline]
+    pub fn size(self) -> Size {
+        match self {
+            Scalar::Int(int) => int.size(),
+            Scalar::Ptr(_ptr, sz) => Size::from_bytes(sz),
+        }
+    }
 }
 
 impl<'tcx, Prov: Provenance> Scalar<Prov> {
@@ -333,6 +270,9 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     /// Will perform ptr-to-int casts if needed and possible.
     /// If that fails, we know the offset is relative, so we return an "erased" Scalar
     /// (which is useful for error messages but not much else).
+    ///
+    /// The error type is `AllocId`, not `CtfeProvenance`, since `AllocId` is the "minimal"
+    /// component all provenance types must have.
     #[inline]
     pub fn try_to_int(self) -> Result<ScalarInt, Scalar<AllocId>> {
         match self {
@@ -361,21 +301,23 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     #[inline]
     pub fn to_bits(self, target_size: Size) -> InterpResult<'tcx, u128> {
         assert_ne!(target_size.bytes(), 0, "you should never look at the bits of a ZST");
-        self.try_to_int().map_err(|_| err_unsup!(ReadPointerAsBytes))?.to_bits(target_size).map_err(
-            |size| {
+        self.try_to_int()
+            .map_err(|_| err_unsup!(ReadPointerAsInt(None)))?
+            .to_bits(target_size)
+            .map_err(|size| {
                 err_ub!(ScalarSizeMismatch(ScalarSizeMismatch {
                     target_size: target_size.bytes(),
                     data_size: size.bytes(),
                 }))
                 .into()
-            },
-        )
+            })
     }
 
     #[inline(always)]
     #[cfg_attr(debug_assertions, track_caller)] // only in debug builds due to perf (see #98980)
     pub fn assert_bits(self, target_size: Size) -> u128 {
-        self.to_bits(target_size).unwrap()
+        self.to_bits(target_size)
+            .unwrap_or_else(|_| panic!("assertion failed: {self:?} fits {target_size:?}"))
     }
 
     pub fn to_bool(self) -> InterpResult<'tcx, bool> {
@@ -475,29 +417,18 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     }
 
     #[inline]
+    pub fn to_float<F: Float>(self) -> InterpResult<'tcx, F> {
+        // Going through `to_uint` to check size and truncation.
+        Ok(F::from_bits(self.to_uint(Size::from_bits(F::BITS))?))
+    }
+
+    #[inline]
     pub fn to_f32(self) -> InterpResult<'tcx, Single> {
-        // Going through `u32` to check size and truncation.
-        Ok(Single::from_bits(self.to_u32()?.into()))
+        self.to_float()
     }
 
     #[inline]
     pub fn to_f64(self) -> InterpResult<'tcx, Double> {
-        // Going through `u64` to check size and truncation.
-        Ok(Double::from_bits(self.to_u64()?.into()))
-    }
-}
-
-/// Gets the bytes of a constant slice value.
-pub fn get_slice_bytes<'tcx>(cx: &impl HasDataLayout, val: ConstValue<'tcx>) -> &'tcx [u8] {
-    if let ConstValue::Slice { data, start, end } = val {
-        let len = end - start;
-        data.inner()
-            .get_bytes_strip_provenance(
-                cx,
-                AllocRange { start: Size::from_bytes(start), size: Size::from_bytes(len) },
-            )
-            .unwrap_or_else(|err| bug!("const slice is invalid: {:?}", err))
-    } else {
-        bug!("expected const slice, but found another const value");
+        self.to_float()
     }
 }

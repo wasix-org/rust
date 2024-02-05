@@ -1,4 +1,5 @@
-#![feature(trait_upcasting)]
+// revisions: current next
+//[next] compile-flags: -Znext-solver
 
 trait Foo: Bar<i32> + Bar<u32> {}
 trait Bar<T> {
@@ -15,7 +16,6 @@ fn test_specific(x: &dyn Foo) {
 fn test_unknown_version(x: &dyn Foo) {
     let _ = x as &dyn Bar<_>; // Ambiguous
                               //~^ ERROR non-primitive cast
-                              //~^^ ERROR the trait bound `&dyn Foo: Bar<_>` is not satisfied
 }
 
 fn test_infer_version(x: &dyn Foo) {

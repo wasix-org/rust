@@ -40,7 +40,9 @@ pub(crate) fn is_short_pattern(pat: &ast::Pat, pat_str: &str) -> bool {
 
 fn is_short_pattern_inner(pat: &ast::Pat) -> bool {
     match pat.kind {
-        ast::PatKind::Rest | ast::PatKind::Wild | ast::PatKind::Lit(_) => true,
+        ast::PatKind::Rest | ast::PatKind::Never | ast::PatKind::Wild | ast::PatKind::Lit(_) => {
+            true
+        }
         ast::PatKind::Ident(_, _, ref pat) => pat.is_none(),
         ast::PatKind::Struct(..)
         | ast::PatKind::MacCall(..)
@@ -193,6 +195,7 @@ impl Rewrite for Pat {
                     None
                 }
             }
+            PatKind::Never => None,
             PatKind::Range(ref lhs, ref rhs, ref end_kind) => {
                 let infix = match end_kind.node {
                     RangeEnd::Included(RangeSyntax::DotDotDot) => "...",
@@ -208,7 +211,7 @@ impl Rewrite for Pat {
                         None => "",
                         Some(_) => " ",
                     };
-                    format!("{}{}{}", lhs_spacing, infix, rhs_spacing)
+                    format!("{lhs_spacing}{infix}{rhs_spacing}")
                 } else {
                     infix.to_owned()
                 };
@@ -256,9 +259,15 @@ impl Rewrite for Pat {
                 None,
                 None,
             ),
-            PatKind::Struct(ref qself, ref path, ref fields, ellipsis) => {
-                rewrite_struct_pat(qself, path, fields, ellipsis, self.span, context, shape)
-            }
+            PatKind::Struct(ref qself, ref path, ref fields, rest) => rewrite_struct_pat(
+                qself,
+                path,
+                fields,
+                rest == ast::PatFieldsRest::Rest,
+                self.span,
+                context,
+                shape,
+            ),
             PatKind::MacCall(ref mac) => {
                 rewrite_macro(mac, None, context, shape, MacroPosition::Pat)
             }
@@ -283,7 +292,7 @@ fn rewrite_struct_pat(
     let path_str = rewrite_path(context, PathContext::Expr, qself, path, path_shape)?;
 
     if fields.is_empty() && !ellipsis {
-        return Some(format!("{} {{}}", path_str));
+        return Some(format!("{path_str} {{}}"));
     }
 
     let (ellipsis_str, terminator) = if ellipsis { (", ..", "..") } else { ("", "}") };
@@ -344,7 +353,7 @@ fn rewrite_struct_pat(
 
     // ast::Pat doesn't have attrs so use &[]
     let fields_str = wrap_struct_field(context, &[], &fields_str, shape, v_shape, one_line_width)?;
-    Some(format!("{} {{{}}}", path_str, fields_str))
+    Some(format!("{path_str} {{{fields_str}}}"))
 }
 
 impl Rewrite for PatField {
@@ -376,7 +385,7 @@ impl Rewrite for PatField {
             let id_str = rewrite_ident(context, self.ident);
             let one_line_width = id_str.len() + 2 + pat_str.len();
             let pat_and_id_str = if one_line_width <= shape.width {
-                format!("{}: {}", id_str, pat_str)
+                format!("{id_str}: {pat_str}")
             } else {
                 format!(
                     "{}:\n{}{}",

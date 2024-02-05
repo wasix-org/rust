@@ -1,8 +1,9 @@
 [workspace]
+resolver = "1"
 members = [
   "compiler/rustc",
   "library/std",
-  "library/test",
+  "library/sysroot",
   "src/rustdoc-json-types",
   "src/tools/build_helper",
   "src/tools/cargotest",
@@ -22,12 +23,6 @@ members = [
   "src/tools/remote-test-server",
   "src/tools/rust-installer",
   "src/tools/rust-demangler",
-  "src/tools/cargo",
-  "src/tools/cargo/crates/credential/cargo-credential-1password",
-  "src/tools/cargo/crates/credential/cargo-credential-macos-keychain",
-  "src/tools/cargo/crates/credential/cargo-credential-wincred",
-  "src/tools/cargo/crates/mdman",
-  # "src/tools/cargo/crates/resolver-tests",
   "src/tools/rustdoc",
   "src/tools/rls",
   "src/tools/rustfmt",
@@ -44,6 +39,11 @@ members = [
   "src/tools/lld-wrapper",
   "src/tools/collect-license-metadata",
   "src/tools/generate-copyright",
+  "src/tools/suggest-tests",
+  "src/tools/generate-windows-sys",
+  "src/tools/rustdoc-gui-test",
+  "src/tools/opt-dist",
+  "src/tools/coverage-dump",
 ]
 
 exclude = [
@@ -104,12 +104,15 @@ gimli.debug = 0
 miniz_oxide.debug = 0
 object.debug = 0
 
-[patch.crates-io]
-# See comments in `src/tools/rustc-workspace-hack/README.md` for what's going on
-# here
-rustc-workspace-hack = { path = 'src/tools/rustc-workspace-hack' }
-libc = { git = "https://github.com/wasix-org/libc.git", branch = "v0.2.147" }
+# These are very thin wrappers around executing lld with the right binary name.
+# Basically nothing within them can go wrong without having been explicitly logged anyway.
+# We ship these in every rustc tarball and even after compression they add up
+# to around 0.6MB of data every user needs to download (and 15MB on disk).
+[profile.release.package.lld-wrapper]
+debug = 0
+strip = true
 
+[patch.crates-io]
 # See comments in `library/rustc-std-workspace-core/README.md` for what's going on
 # here
 rustc-std-workspace-core = { path = 'library/rustc-std-workspace-core' }

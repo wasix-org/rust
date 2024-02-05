@@ -9,8 +9,9 @@
 //! * All unstable lang features have tests to ensure they are actually unstable.
 //! * Language features in a group are sorted by feature name.
 
-use crate::walk::{filter_dirs, walk, walk_many};
+use crate::walk::{filter_dirs, filter_not_rust, walk, walk_many};
 use std::collections::hash_map::{Entry, HashMap};
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::num::NonZeroU32;
@@ -29,7 +30,7 @@ const FEATURE_GROUP_END_PREFIX: &str = "// feature-group-end";
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Status {
-    Stable,
+    Accepted,
     Removed,
     Unstable,
 }
@@ -37,7 +38,7 @@ pub enum Status {
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let as_str = match *self {
-            Status::Stable => "stable",
+            Status::Accepted => "accepted",
             Status::Unstable => "unstable",
             Status::Removed => "removed",
         };
@@ -101,17 +102,15 @@ pub fn check(
             &tests_path.join("rustdoc-ui"),
             &tests_path.join("rustdoc"),
         ],
-        filter_dirs,
+        |path, _is_dir| {
+            filter_dirs(path)
+                || filter_not_rust(path)
+                || path.file_name() == Some(OsStr::new("features.rs"))
+                || path.file_name() == Some(OsStr::new("diagnostic_list.rs"))
+        },
         &mut |entry, contents| {
             let file = entry.path();
             let filename = file.file_name().unwrap().to_string_lossy();
-            if !filename.ends_with(".rs")
-                || filename == "features.rs"
-                || filename == "diagnostic_list.rs"
-            {
-                return;
-            }
-
             let filen_underscore = filename.replace('-', "_").replace(".rs", "");
             let filename_is_gate_test = test_filen_gate(&filen_underscore, &mut features);
 
@@ -161,10 +160,10 @@ pub fn check(
     for &(name, _) in gate_untested.iter() {
         println!("Expected a gate test for the feature '{name}'.");
         println!(
-            "Hint: create a failing test file named 'feature-gate-{}.rs'\
-                \n      in the 'ui' test suite, with its failures due to\
-                \n      missing usage of `#![feature({})]`.",
-            name, name
+            "Hint: create a failing test file named 'tests/ui/feature-gates/feature-gate-{}.rs',\
+                \n      with its failures due to missing usage of `#![feature({})]`.",
+            name.replace("_", "-"),
+            name
         );
         println!(
             "Hint: If you already have such a test and don't want to rename it,\
@@ -280,9 +279,9 @@ fn test_filen_gate(filen_underscore: &str, features: &mut Features) -> bool {
 
 pub fn collect_lang_features(base_compiler_path: &Path, bad: &mut bool) -> Features {
     let mut features = Features::new();
-    collect_lang_features_in(&mut features, base_compiler_path, "active.rs", bad);
     collect_lang_features_in(&mut features, base_compiler_path, "accepted.rs", bad);
     collect_lang_features_in(&mut features, base_compiler_path, "removed.rs", bad);
+    collect_lang_features_in(&mut features, base_compiler_path, "unstable.rs", bad);
     features
 }
 
@@ -337,10 +336,11 @@ fn collect_lang_features_in(features: &mut Features, base: &Path, file: &str, ba
 
         let mut parts = line.split(',');
         let level = match parts.next().map(|l| l.trim().trim_start_matches('(')) {
-            Some("active") => Status::Unstable,
+            Some("unstable") => Status::Unstable,
             Some("incomplete") => Status::Unstable,
+            Some("internal") => Status::Unstable,
             Some("removed") => Status::Removed,
-            Some("accepted") => Status::Stable,
+            Some("accepted") => Status::Accepted,
             _ => continue,
         };
         let name = parts.next().unwrap().trim();
@@ -449,7 +449,7 @@ fn get_and_check_lib_features(
         Ok((name, f)) => {
             let mut check_features = |f: &Feature, list: &Features, display: &str| {
                 if let Some(ref s) = list.get(name) {
-                    if f.tracking_issue != s.tracking_issue && f.level != Status::Stable {
+                    if f.tracking_issue != s.tracking_issue && f.level != Status::Accepted {
                         tidy_error!(
                             bad,
                             "{}:{}: `issue` \"{}\" mismatches the {} `issue` of \"{}\"",
@@ -479,7 +479,7 @@ fn map_lib_features(
 ) {
     walk(
         base_src_path,
-        |path| filter_dirs(path) || path.ends_with("tests"),
+        |path, _is_dir| filter_dirs(path) || path.ends_with("tests"),
         &mut |entry, contents| {
             let file = entry.path();
             let filename = file.file_name().unwrap().to_string_lossy();
@@ -566,7 +566,7 @@ fn map_lib_features(
                 let level = if line.contains("[unstable(") {
                     Status::Unstable
                 } else if line.contains("[stable(") {
-                    Status::Stable
+                    Status::Accepted
                 } else {
                     continue;
                 };
@@ -581,7 +581,7 @@ fn map_lib_features(
                     Some(Err(_err)) => {
                         err!("malformed stability attribute: can't parse `since` key");
                     }
-                    None if level == Status::Stable => {
+                    None if level == Status::Accepted => {
                         err!("malformed stability attribute: missing the `since` key");
                     }
                     None => None,

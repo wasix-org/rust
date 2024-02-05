@@ -1,7 +1,6 @@
 // Original implementation taken from rust-memchr.
 // Copyright 2015 Andrew Gallant, bluss and Nicolas Koch
 
-use crate::cmp;
 use crate::mem;
 
 const LO_USIZE: usize = usize::repeat_u8(0x01);
@@ -19,20 +18,6 @@ const USIZE_BYTES: usize = mem::size_of::<usize>();
 #[rustc_const_stable(feature = "const_memchr", since = "1.65.0")]
 const fn contains_zero_byte(x: usize) -> bool {
     x.wrapping_sub(LO_USIZE) & !x & HI_USIZE != 0
-}
-
-#[inline]
-#[cfg(target_pointer_width = "16")]
-#[rustc_const_stable(feature = "const_memchr", since = "1.65.0")]
-const fn repeat_byte(b: u8) -> usize {
-    (b as usize) << 8 | b as usize
-}
-
-#[inline]
-#[cfg(not(target_pointer_width = "16"))]
-#[rustc_const_stable(feature = "const_memchr", since = "1.65.0")]
-const fn repeat_byte(b: u8) -> usize {
-    (b as usize) * (usize::MAX / 255)
 }
 
 /// Returns the first index matching the byte `x` in `text`.
@@ -83,14 +68,18 @@ const fn memchr_aligned(x: u8, text: &[u8]) -> Option<usize> {
     let mut offset = ptr.align_offset(USIZE_BYTES);
 
     if offset > 0 {
-        offset = cmp::min(offset, len);
-        if let Some(index) = memchr_naive(x, &text[..offset]) {
+        // FIXME(const-hack, fee1-dead): replace with min
+        offset = if offset < len { offset } else { len };
+        // FIXME(const-hack, fee1-dead): replace with range slicing
+        // SAFETY: offset is within bounds
+        let slice = unsafe { super::from_raw_parts(text.as_ptr(), offset) };
+        if let Some(index) = memchr_naive(x, slice) {
             return Some(index);
         }
     }
 
     // search the body of the text
-    let repeated_x = repeat_byte(x);
+    let repeated_x = usize::repeat_u8(x);
     while offset <= len - 2 * USIZE_BYTES {
         // SAFETY: the while's predicate guarantees a distance of at least 2 * usize_bytes
         // between the offset and the end of the slice.
@@ -110,7 +99,10 @@ const fn memchr_aligned(x: u8, text: &[u8]) -> Option<usize> {
 
     // Find the byte after the point the body loop stopped.
     // FIXME(const-hack): Use `?` instead.
-    if let Some(i) = memchr_naive(x, &text[offset..]) { Some(offset + i) } else { None }
+    // FIXME(const-hack, fee1-dead): use range slicing
+    // SAFETY: offset is within bounds
+    let slice = unsafe { super::from_raw_parts(text.as_ptr().add(offset), text.len() - offset) };
+    if let Some(i) = memchr_naive(x, slice) { Some(offset + i) } else { None }
 }
 
 /// Returns the last index matching the byte `x` in `text`.
@@ -143,7 +135,7 @@ pub fn memrchr(x: u8, text: &[u8]) -> Option<usize> {
     // Search the body of the text, make sure we don't cross min_aligned_offset.
     // offset is always aligned, so just testing `>` is sufficient and avoids possible
     // overflow.
-    let repeated_x = repeat_byte(x);
+    let repeated_x = usize::repeat_u8(x);
     let chunk_bytes = mem::size_of::<Chunk>();
 
     while offset > min_aligned_offset {

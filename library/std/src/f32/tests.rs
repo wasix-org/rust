@@ -209,6 +209,7 @@ fn test_ceil() {
 
 #[test]
 fn test_round() {
+    assert_approx_eq!(2.5f32.round(), 3.0f32);
     assert_approx_eq!(1.0f32.round(), 1.0f32);
     assert_approx_eq!(1.3f32.round(), 1.0f32);
     assert_approx_eq!(1.5f32.round(), 2.0f32);
@@ -219,6 +220,21 @@ fn test_round() {
     assert_approx_eq!((-1.3f32).round(), -1.0f32);
     assert_approx_eq!((-1.5f32).round(), -2.0f32);
     assert_approx_eq!((-1.7f32).round(), -2.0f32);
+}
+
+#[test]
+fn test_round_ties_even() {
+    assert_approx_eq!(2.5f32.round_ties_even(), 2.0f32);
+    assert_approx_eq!(1.0f32.round_ties_even(), 1.0f32);
+    assert_approx_eq!(1.3f32.round_ties_even(), 1.0f32);
+    assert_approx_eq!(1.5f32.round_ties_even(), 2.0f32);
+    assert_approx_eq!(1.7f32.round_ties_even(), 2.0f32);
+    assert_approx_eq!(0.0f32.round_ties_even(), 0.0f32);
+    assert_approx_eq!((-0.0f32).round_ties_even(), -0.0f32);
+    assert_approx_eq!((-1.0f32).round_ties_even(), -1.0f32);
+    assert_approx_eq!((-1.3f32).round_ties_even(), -1.0f32);
+    assert_approx_eq!((-1.5f32).round_ties_even(), -2.0f32);
+    assert_approx_eq!((-1.7f32).round_ties_even(), -2.0f32);
 }
 
 #[test]
@@ -634,6 +650,38 @@ fn test_atanh() {
 
     assert_approx_eq!(0.5f32.atanh(), 0.54930614433405484569762261846126285f32);
     assert_approx_eq!((-0.5f32).atanh(), -0.54930614433405484569762261846126285f32);
+}
+
+#[test]
+fn test_gamma() {
+    // precision can differ between platforms
+    assert_approx_eq!(1.0f32.gamma(), 1.0f32);
+    assert_approx_eq!(2.0f32.gamma(), 1.0f32);
+    assert_approx_eq!(3.0f32.gamma(), 2.0f32);
+    assert_approx_eq!(4.0f32.gamma(), 6.0f32);
+    assert_approx_eq!(5.0f32.gamma(), 24.0f32);
+    assert_approx_eq!(0.5f32.gamma(), consts::PI.sqrt());
+    assert_approx_eq!((-0.5f32).gamma(), -2.0 * consts::PI.sqrt());
+    assert_eq!(0.0f32.gamma(), f32::INFINITY);
+    assert_eq!((-0.0f32).gamma(), f32::NEG_INFINITY);
+    assert!((-1.0f32).gamma().is_nan());
+    assert!((-2.0f32).gamma().is_nan());
+    assert!(f32::NAN.gamma().is_nan());
+    assert!(f32::NEG_INFINITY.gamma().is_nan());
+    assert_eq!(f32::INFINITY.gamma(), f32::INFINITY);
+    assert_eq!(171.71f32.gamma(), f32::INFINITY);
+}
+
+#[test]
+fn test_ln_gamma() {
+    assert_approx_eq!(1.0f32.ln_gamma().0, 0.0f32);
+    assert_eq!(1.0f32.ln_gamma().1, 1);
+    assert_approx_eq!(2.0f32.ln_gamma().0, 0.0f32);
+    assert_eq!(2.0f32.ln_gamma().1, 1);
+    assert_approx_eq!(3.0f32.ln_gamma().0, 2.0f32.ln());
+    assert_eq!(3.0f32.ln_gamma().1, 1);
+    assert_approx_eq!((-0.5f32).ln_gamma().0, (2.0 * consts::PI.sqrt()).ln());
+    assert_eq!((-0.5f32).ln_gamma().1, -1);
 }
 
 #[test]

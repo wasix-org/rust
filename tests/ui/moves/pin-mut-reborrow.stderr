@@ -16,8 +16,8 @@ LL |     fn foo(self: Pin<&mut Self>) {}
 help: consider reborrowing the `Pin` instead of moving it
    |
 LL |     foo.as_mut().foo();
-   |         +++++++++
+   |        +++++++++
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0382`.

@@ -1,6 +1,6 @@
 use std::iter::successors;
 
-use hir::Semantics;
+use hir::{DescendPreference, Semantics};
 use ide_db::RootDatabase;
 use syntax::{
     algo::{self, skip_trivia_token},
@@ -16,8 +16,6 @@ use crate::FileRange;
 //
 // Extends or shrinks the current selection to the encompassing syntactic construct
 // (expression, statement, item, module, etc). It works with multiple cursors.
-//
-// This is a standard LSP feature and not a protocol extension.
 //
 // |===
 // | Editor  | Shortcut
@@ -39,7 +37,7 @@ fn try_extend_selection(
 ) -> Option<TextRange> {
     let range = frange.range;
 
-    let string_kinds = [COMMENT, STRING, BYTE_STRING];
+    let string_kinds = [COMMENT, STRING, BYTE_STRING, C_STRING];
     let list_kinds = [
         RECORD_PAT_FIELD_LIST,
         MATCH_ARM_LIST,
@@ -110,7 +108,7 @@ fn try_extend_selection(
 
     let node = shallowest_node(&node);
 
-    if node.parent().map(|n| list_kinds.contains(&n.kind())) == Some(true) {
+    if node.parent().is_some_and(|n| list_kinds.contains(&n.kind())) {
         if let Some(range) = extend_list_item(&node) {
             return Some(range);
         }
@@ -142,8 +140,10 @@ fn extend_tokens_from_range(
 
     // compute original mapped token range
     let extended = {
-        let fst_expanded = sema.descend_into_macros_single(first_token.clone());
-        let lst_expanded = sema.descend_into_macros_single(last_token.clone());
+        let fst_expanded =
+            sema.descend_into_macros_single(DescendPreference::None, first_token.clone());
+        let lst_expanded =
+            sema.descend_into_macros_single(DescendPreference::None, last_token.clone());
         let mut lca =
             algo::least_common_ancestor(&fst_expanded.parent()?, &lst_expanded.parent()?)?;
         lca = shallowest_node(&lca);
@@ -154,13 +154,16 @@ fn extend_tokens_from_range(
     };
 
     // Compute parent node range
-    let validate = |token: &SyntaxToken| -> bool {
-        let expanded = sema.descend_into_macros_single(token.clone());
-        let parent = match expanded.parent() {
-            Some(it) => it,
-            None => return false,
-        };
-        algo::least_common_ancestor(&extended, &parent).as_ref() == Some(&extended)
+    let validate = || {
+        let extended = &extended;
+        move |token: &SyntaxToken| -> bool {
+            let expanded = sema.descend_into_macros_single(DescendPreference::None, token.clone());
+            let parent = match expanded.parent() {
+                Some(it) => it,
+                None => return false,
+            };
+            algo::least_common_ancestor(extended, &parent).as_ref() == Some(extended)
+        }
     };
 
     // Find the first and last text range under expanded parent
@@ -168,14 +171,14 @@ fn extend_tokens_from_range(
         let token = token.prev_token()?;
         skip_trivia_token(token, Direction::Prev)
     })
-    .take_while(validate)
+    .take_while(validate())
     .last()?;
 
     let last = successors(Some(last_token), |token| {
         let token = token.next_token()?;
         skip_trivia_token(token, Direction::Next)
     })
-    .take_while(validate)
+    .take_while(validate())
     .last()?;
 
     let range = first.text_range().cover(last.text_range());

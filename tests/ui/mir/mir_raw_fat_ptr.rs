@@ -1,7 +1,9 @@
 // run-pass
 // check raw fat pointer ops in mir
 // FIXME: please improve this when we get monomorphization support
+
 #![feature(raw_ref_op)]
+#![allow(ambiguous_wide_pointer_comparisons)]
 
 use std::mem;
 
@@ -103,7 +105,7 @@ impl<T> Foo for T {
     }
 }
 
-#[allow(unused_tuple_struct_fields)]
+#[allow(dead_code)]
 struct S<T:?Sized>(u32, T);
 
 fn main_ref() {

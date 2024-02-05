@@ -2,7 +2,12 @@ error[E0560]: struct `Demo` has no field named `inocently_mispellable`
   --> $DIR/issue-42599_available_fields_note.rs:16:39
    |
 LL |             Self { secret_integer: 2, inocently_mispellable: () }
-   |                                       ^^^^^^^^^^^^^^^^^^^^^ help: a field with a similar name exists: `innocently_misspellable`
+   |                                       ^^^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+help: a field with a similar name exists
+   |
+LL |             Self { secret_integer: 2, innocently_misspellable: () }
+   |                                       ~~~~~~~~~~~~~~~~~~~~~~~
 
 error[E0560]: struct `Demo` has no field named `egregiously_nonexistent_field`
   --> $DIR/issue-42599_available_fields_note.rs:21:39
@@ -10,13 +15,18 @@ error[E0560]: struct `Demo` has no field named `egregiously_nonexistent_field`
 LL |             Self { secret_integer: 3, egregiously_nonexistent_field: () }
    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Demo` does not have this field
    |
-   = note: available fields are: `favorite_integer`, `secret_integer`, `innocently_misspellable`, `another_field`, `yet_another_field` ... and 2 others
+   = note: available fields are: `favorite_integer`, `innocently_misspellable`, `another_field`, `yet_another_field`, `always_more_fields`, `and_ever`
 
 error[E0609]: no field `inocently_mispellable` on type `Demo`
   --> $DIR/issue-42599_available_fields_note.rs:32:41
    |
 LL |     let innocent_field_misaccess = demo.inocently_mispellable;
-   |                                         ^^^^^^^^^^^^^^^^^^^^^ help: a field with a similar name exists: `innocently_misspellable`
+   |                                         ^^^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+help: a field with a similar name exists
+   |
+LL |     let innocent_field_misaccess = demo.innocently_misspellable;
+   |                                         ~~~~~~~~~~~~~~~~~~~~~~~
 
 error[E0609]: no field `egregiously_nonexistent_field` on type `Demo`
   --> $DIR/issue-42599_available_fields_note.rs:35:42

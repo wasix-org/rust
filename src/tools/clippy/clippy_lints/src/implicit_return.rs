@@ -1,16 +1,14 @@
-use clippy_utils::{
-    diagnostics::span_lint_hir_and_then,
-    get_async_fn_body, is_async_fn,
-    source::{snippet_with_applicability, snippet_with_context, walk_span_to_context},
-    visitors::for_each_expr,
-};
+use clippy_utils::diagnostics::span_lint_hir_and_then;
+use clippy_utils::source::{snippet_with_applicability, snippet_with_context, walk_span_to_context};
+use clippy_utils::visitors::for_each_expr;
+use clippy_utils::{get_async_fn_body, is_async_fn};
 use core::ops::ControlFlow;
 use rustc_errors::Applicability;
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{Block, Body, Expr, ExprKind, FnDecl, FnRetTy, HirId};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::{Span, SyntaxContext};
 
@@ -26,13 +24,13 @@ declare_clippy_lint! {
     /// corresponding statements.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn foo(x: usize) -> usize {
     ///     x
     /// }
     /// ```
     /// add return
-    /// ```rust
+    /// ```no_run
     /// fn foo(x: usize) -> usize {
     ///     return x;
     /// }
@@ -227,7 +225,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitReturn {
         _: LocalDefId,
     ) {
         if (!matches!(kind, FnKind::Closure) && matches!(decl.output, FnRetTy::DefaultReturn(_)))
-            || span.ctxt() != body.value.span.ctxt()
+            || !span.eq_ctxt(body.value.span)
             || in_external_macro(cx.sess(), span)
         {
             return;

@@ -3,32 +3,12 @@
 #![feature(io_error_more)]
 
 use std::fs::{remove_file, File};
+use std::mem::transmute;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
-fn tmp() -> PathBuf {
-    use std::ffi::{c_char, CStr, CString};
-
-    let path = std::env::var("MIRI_TEMP")
-        .unwrap_or_else(|_| std::env::temp_dir().into_os_string().into_string().unwrap());
-    // These are host paths. We need to convert them to the target.
-    let path = CString::new(path).unwrap();
-    let mut out = Vec::with_capacity(1024);
-
-    unsafe {
-        extern "Rust" {
-            fn miri_host_to_target_path(
-                path: *const c_char,
-                out: *mut c_char,
-                out_size: usize,
-            ) -> usize;
-        }
-        let ret = miri_host_to_target_path(path.as_ptr(), out.as_mut_ptr(), out.capacity());
-        assert_eq!(ret, 0);
-        let out = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
-        PathBuf::from(out)
-    }
-}
+#[path = "../../utils/mod.rs"]
+mod utils;
 
 /// Test allocating variant of `realpath`.
 fn test_posix_realpath_alloc() {
@@ -38,7 +18,7 @@ fn test_posix_realpath_alloc() {
     use std::os::unix::ffi::OsStringExt;
 
     let buf;
-    let path = tmp().join("miri_test_libc_posix_realpath_alloc");
+    let path = utils::tmp().join("miri_test_libc_posix_realpath_alloc");
     let c_path = CString::new(path.as_os_str().as_bytes()).expect("CString::new failed");
 
     // Cleanup before test.
@@ -63,7 +43,7 @@ fn test_posix_realpath_noalloc() {
     use std::ffi::{CStr, CString};
     use std::os::unix::ffi::OsStrExt;
 
-    let path = tmp().join("miri_test_libc_posix_realpath_noalloc");
+    let path = utils::tmp().join("miri_test_libc_posix_realpath_noalloc");
     let c_path = CString::new(path.as_os_str().as_bytes()).expect("CString::new failed");
 
     let mut v = vec![0; libc::PATH_MAX as usize];
@@ -90,7 +70,7 @@ fn test_posix_realpath_errors() {
     use std::ffi::CString;
     use std::io::ErrorKind;
 
-    // Test non-existent path returns an error.
+    // Test nonexistent path returns an error.
     let c_path = CString::new("./nothing_to_see_here").expect("CString::new failed");
     let r = unsafe { libc::realpath(c_path.as_ptr(), std::ptr::null_mut()) };
     assert!(r.is_null());
@@ -101,10 +81,9 @@ fn test_posix_realpath_errors() {
 
 #[cfg(target_os = "linux")]
 fn test_posix_fadvise() {
-    use std::convert::TryInto;
     use std::io::Write;
 
-    let path = tmp().join("miri_test_libc_posix_fadvise.txt");
+    let path = utils::tmp().join("miri_test_libc_posix_fadvise.txt");
     // Cleanup before test
     remove_file(&path).ok();
 
@@ -131,7 +110,7 @@ fn test_posix_fadvise() {
 fn test_sync_file_range() {
     use std::io::Write;
 
-    let path = tmp().join("miri_test_libc_sync_file_range.txt");
+    let path = utils::tmp().join("miri_test_libc_sync_file_range.txt");
     // Cleanup before test.
     remove_file(&path).ok();
 
@@ -199,7 +178,7 @@ fn test_clocks() {
     assert_eq!(is_error, 0);
     let is_error = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, tp.as_mut_ptr()) };
     assert_eq!(is_error, 0);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         let is_error = unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, tp.as_mut_ptr()) };
         assert_eq!(is_error, 0);
@@ -207,7 +186,7 @@ fn test_clocks() {
             unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_COARSE, tp.as_mut_ptr()) };
         assert_eq!(is_error, 0);
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(target_os = "macos")]
     {
         let is_error = unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, tp.as_mut_ptr()) };
         assert_eq!(is_error, 0);
@@ -244,7 +223,7 @@ fn test_isatty() {
         libc::isatty(libc::STDERR_FILENO);
 
         // But when we open a file, it is definitely not a TTY.
-        let path = tmp().join("notatty.txt");
+        let path = utils::tmp().join("notatty.txt");
         // Cleanup before test.
         remove_file(&path).ok();
         let file = File::create(&path).unwrap();
@@ -258,53 +237,128 @@ fn test_isatty() {
     }
 }
 
-fn test_posix_mkstemp() {
-    use std::ffi::CString;
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::io::FromRawFd;
-    use std::path::Path;
+fn test_memcpy() {
+    unsafe {
+        let src = [1i8, 2, 3];
+        let dest = libc::calloc(3, 1);
+        libc::memcpy(dest, src.as_ptr() as *const libc::c_void, 3);
+        let slc = std::slice::from_raw_parts(dest as *const i8, 3);
+        assert_eq!(*slc, [1i8, 2, 3]);
+        libc::free(dest);
+    }
 
-    let valid_template = "fooXXXXXX";
-    // C needs to own this as `mkstemp(3)` says:
-    // "Since it will be modified, `template` must not be a string constant, but
-    // should be declared as a character array."
-    // There seems to be no `as_mut_ptr` on `CString` so we need to use `into_raw`.
-    let ptr = CString::new(valid_template).unwrap().into_raw();
-    let fd = unsafe { libc::mkstemp(ptr) };
-    // Take ownership back in Rust to not leak memory.
-    let slice = unsafe { CString::from_raw(ptr) };
-    assert!(fd > 0);
-    let osstr = OsStr::from_bytes(slice.to_bytes());
-    let path: &Path = osstr.as_ref();
-    let name = path.file_name().unwrap().to_string_lossy();
-    assert!(name.ne("fooXXXXXX"));
-    assert!(name.starts_with("foo"));
-    assert_eq!(name.len(), 9);
-    assert_eq!(
-        name.chars().skip(3).filter(char::is_ascii_alphanumeric).collect::<Vec<char>>().len(),
-        6
-    );
-    let file = unsafe { File::from_raw_fd(fd) };
-    assert!(file.set_len(0).is_ok());
+    unsafe {
+        let src = [1i8, 2, 3];
+        let dest = libc::calloc(4, 1);
+        libc::memcpy(dest, src.as_ptr() as *const libc::c_void, 3);
+        let slc = std::slice::from_raw_parts(dest as *const i8, 4);
+        assert_eq!(*slc, [1i8, 2, 3, 0]);
+        libc::free(dest);
+    }
 
-    let invalid_templates = vec!["foo", "barXX", "XXXXXXbaz", "whatXXXXXXever", "X"];
-    for t in invalid_templates {
-        let ptr = CString::new(t).unwrap().into_raw();
-        let fd = unsafe { libc::mkstemp(ptr) };
-        let _ = unsafe { CString::from_raw(ptr) };
-        // "On error, -1 is returned, and errno is set to
-        // indicate the error"
-        assert_eq!(fd, -1);
-        let e = std::io::Error::last_os_error();
-        assert_eq!(e.raw_os_error(), Some(libc::EINVAL));
-        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+    unsafe {
+        let src = 123_i32;
+        let mut dest = 0_i32;
+        libc::memcpy(
+            &mut dest as *mut i32 as *mut libc::c_void,
+            &src as *const i32 as *const libc::c_void,
+            std::mem::size_of::<i32>(),
+        );
+        assert_eq!(dest, src);
+    }
+
+    unsafe {
+        let src = Some(123);
+        let mut dest: Option<i32> = None;
+        libc::memcpy(
+            &mut dest as *mut Option<i32> as *mut libc::c_void,
+            &src as *const Option<i32> as *const libc::c_void,
+            std::mem::size_of::<Option<i32>>(),
+        );
+        assert_eq!(dest, src);
+    }
+
+    unsafe {
+        let src = &123;
+        let mut dest = &42;
+        libc::memcpy(
+            &mut dest as *mut &'static i32 as *mut libc::c_void,
+            &src as *const &'static i32 as *const libc::c_void,
+            std::mem::size_of::<&'static i32>(),
+        );
+        assert_eq!(*dest, 123);
+    }
+}
+
+fn test_strcpy() {
+    use std::ffi::{CStr, CString};
+
+    // case: src_size equals dest_size
+    unsafe {
+        let src = CString::new("rust").unwrap();
+        let size = src.as_bytes_with_nul().len();
+        let dest = libc::malloc(size);
+        libc::strcpy(dest as *mut libc::c_char, src.as_ptr());
+        assert_eq!(CStr::from_ptr(dest as *const libc::c_char), src.as_ref());
+        libc::free(dest);
+    }
+
+    // case: src_size is less than dest_size
+    unsafe {
+        let src = CString::new("rust").unwrap();
+        let size = src.as_bytes_with_nul().len();
+        let dest = libc::malloc(size + 1);
+        libc::strcpy(dest as *mut libc::c_char, src.as_ptr());
+        assert_eq!(CStr::from_ptr(dest as *const libc::c_char), src.as_ref());
+        libc::free(dest);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn test_sigrt() {
+    let min = libc::SIGRTMIN();
+    let max = libc::SIGRTMAX();
+
+    // "The Linux kernel supports a range of 33 different real-time
+    // signals, numbered 32 to 64"
+    assert!(min >= 32);
+    assert!(max >= 32);
+    assert!(min <= 64);
+    assert!(max <= 64);
+
+    // "POSIX.1-2001 requires that an implementation support at least
+    // _POSIX_RTSIG_MAX (8) real-time signals."
+    assert!(min < max);
+    assert!(max - min >= 8)
+}
+
+fn test_dlsym() {
+    let addr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, b"notasymbol\0".as_ptr().cast()) };
+    assert!(addr as usize == 0);
+
+    let addr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, b"isatty\0".as_ptr().cast()) };
+    assert!(addr as usize != 0);
+    let isatty: extern "C" fn(i32) -> i32 = unsafe { transmute(addr) };
+    assert_eq!(isatty(999), 0);
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap();
+    assert_eq!(errno, libc::EBADF);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn test_reallocarray() {
+    unsafe {
+        let mut p = libc::reallocarray(std::ptr::null_mut(), 4096, 2);
+        assert!(!p.is_null());
+        libc::free(p);
+        p = libc::malloc(16);
+        let r = libc::reallocarray(p, 2, 32);
+        assert!(!r.is_null());
+        libc::free(r);
     }
 }
 
 fn main() {
     test_posix_gettimeofday();
-    test_posix_mkstemp();
 
     test_posix_realpath_alloc();
     test_posix_realpath_noalloc();
@@ -313,11 +367,22 @@ fn main() {
     test_thread_local_errno();
 
     test_isatty();
+
     test_clocks();
 
+    test_dlsym();
+
+    test_memcpy();
+    test_strcpy();
+
+    #[cfg(not(target_os = "macos"))] // reallocarray does not exist on macOS
+    test_reallocarray();
+
+    // These are Linux-specific
     #[cfg(target_os = "linux")]
     {
         test_posix_fadvise();
         test_sync_file_range();
+        test_sigrt();
     }
 }

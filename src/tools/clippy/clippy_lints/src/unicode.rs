@@ -6,8 +6,8 @@ use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, HirId};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
+use rustc_session::declare_lint_pass;
+use rustc_span::Span;
 use unicode_normalization::UnicodeNormalization;
 
 declare_clippy_lint! {
@@ -39,12 +39,12 @@ declare_clippy_lint! {
     /// requirements, activating this lint could be useful.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = String::from("€");
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let x = String::from("\u{20ac}");
     /// ```
     #[clippy::version = "pre 1.29.0"]
@@ -76,7 +76,7 @@ declare_lint_pass!(Unicode => [INVISIBLE_CHARACTERS, NON_ASCII_LITERAL, UNICODE_
 
 impl LateLintPass<'_> for Unicode {
     fn check_expr(&mut self, cx: &LateContext<'_>, expr: &'_ Expr<'_>) {
-        if let ExprKind::Lit(ref lit) = expr.kind {
+        if let ExprKind::Lit(lit) = expr.kind {
             if let LitKind::Str(_, _) | LitKind::Char(_) = lit.node {
                 check_str(cx, lit.span, expr.hir_id);
             }

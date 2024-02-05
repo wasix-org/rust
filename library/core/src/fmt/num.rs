@@ -15,7 +15,7 @@ trait DisplayInt:
     fn zero() -> Self;
     fn from_u8(u: u8) -> Self;
     fn to_u8(&self) -> u8;
-    fn to_u16(&self) -> u16;
+    #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
     fn to_u32(&self) -> u32;
     fn to_u64(&self) -> u64;
     fn to_u128(&self) -> u128;
@@ -27,7 +27,7 @@ macro_rules! impl_int {
           fn zero() -> Self { 0 }
           fn from_u8(u: u8) -> Self { u as Self }
           fn to_u8(&self) -> u8 { *self as u8 }
-          fn to_u16(&self) -> u16 { *self as u16 }
+          #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
           fn to_u32(&self) -> u32 { *self as u32 }
           fn to_u64(&self) -> u64 { *self as u64 }
           fn to_u128(&self) -> u128 { *self as u128 }
@@ -40,7 +40,7 @@ macro_rules! impl_uint {
           fn zero() -> Self { 0 }
           fn from_u8(u: u8) -> Self { u as Self }
           fn to_u8(&self) -> u8 { *self as u8 }
-          fn to_u16(&self) -> u16 { *self as u16 }
+          #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
           fn to_u32(&self) -> u32 { *self as u32 }
           fn to_u64(&self) -> u64 { *self as u64 }
           fn to_u128(&self) -> u128 { *self as u128 }
@@ -52,8 +52,12 @@ impl_int! { i8 i16 i32 i64 i128 isize }
 impl_uint! { u8 u16 u32 u64 u128 usize }
 
 /// A type that represents a specific radix
+///
+/// # Safety
+///
+/// `digit` must return an ASCII character.
 #[doc(hidden)]
-trait GenericRadix: Sized {
+unsafe trait GenericRadix: Sized {
     /// The number of digits.
     const BASE: u8;
 
@@ -129,7 +133,7 @@ struct UpperHex;
 
 macro_rules! radix {
     ($T:ident, $base:expr, $prefix:expr, $($x:pat => $conv:expr),+) => {
-        impl GenericRadix for $T {
+        unsafe impl GenericRadix for $T {
             const BASE: u8 = $base;
             const PREFIX: &'static str = $prefix;
             fn digit(x: u8) -> u8 {
@@ -305,7 +309,6 @@ macro_rules! impl_Exp {
                     n /= 10;
                     exponent += 1;
                 }
-
                 let (added_precision, subtracted_precision) = match f.precision() {
                     Some(fmt_prec) => {
                         // number of decimal digits minus 1
@@ -327,9 +330,15 @@ macro_rules! impl_Exp {
                     let rem = n % 10;
                     n /= 10;
                     exponent += 1;
-                    // round up last digit
-                    if rem >= 5 {
+                    // round up last digit, round to even on a tie
+                    if rem > 5 || (rem == 5 && (n % 2 != 0 || subtracted_precision > 1 )) {
                         n += 1;
+                        // if the digit is rounded to the next power
+                        // instead adjust the exponent
+                        if n.ilog10() > (n - 1).ilog10() {
+                            n /= 10;
+                            exponent += 1;
+                        }
                     }
                 }
                 (n, exponent, exponent, added_precision)
@@ -407,7 +416,7 @@ macro_rules! impl_Exp {
             let parts = &[
                 numfmt::Part::Copy(buf_slice),
                 numfmt::Part::Zero(added_precision),
-                numfmt::Part::Copy(exp_slice)
+                numfmt::Part::Copy(exp_slice),
             ];
             let sign = if !is_nonnegative {
                 "-"
@@ -416,8 +425,9 @@ macro_rules! impl_Exp {
             } else {
                 ""
             };
-            let formatted = numfmt::Formatted{sign, parts};
-            f.pad_formatted_parts(&formatted)
+            let formatted = numfmt::Formatted { sign, parts };
+            // SAFETY: `buf_slice` and `exp_slice` contain only ASCII characters.
+            unsafe { f.pad_formatted_parts(&formatted) }
         }
 
         $(

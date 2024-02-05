@@ -1,5 +1,10 @@
+//@aux-build:proc_macros.rs
+
 #![allow(unused, clippy::needless_lifetimes)]
 #![warn(clippy::extra_unused_type_parameters)]
+
+extern crate proc_macros;
+use proc_macros::with_span;
 
 fn unused_ty<T>(x: u8) {
     unimplemented!()
@@ -21,14 +26,7 @@ fn used_ret<T: Default>(x: u8) -> T {
     T::default()
 }
 
-fn unused_bounded<T: Default, U>(x: U) {
-    unimplemented!();
-}
-
-fn unused_where_clause<T, U>(x: U)
-where
-    T: Default,
-{
+fn unused_bounded<T: Default, U, V: Default>(x: U) {
     unimplemented!();
 }
 
@@ -104,6 +102,29 @@ mod issue10319 {
     where
         T: Send,
     {
+    }
+}
+
+with_span!(
+    span
+
+    fn should_not_lint<T>(x: u8) {
+        unimplemented!()
+    }
+);
+
+mod issue11302 {
+    use std::fmt::Debug;
+    use std::marker::PhantomData;
+
+    #[derive(Debug)]
+    struct Wrapper<T>(PhantomData<T>);
+
+    fn store<T: 'static>(v: &mut Vec<Box<dyn Debug>>)
+    where
+        Wrapper<T>: Debug,
+    {
+        v.push(Box::new(Wrapper(PhantomData)));
     }
 }
 

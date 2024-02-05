@@ -2,7 +2,9 @@ error[E0271]: type mismatch resolving `<T as Deref>::Target == T`
   --> $DIR/hr-associated-type-projection-1.rs:13:33
    |
 LL | impl<T: Copy + std::ops::Deref> UnsafeCopy<'_, T> for T {
-   |      - this type parameter      ^^^^^^^^^^^^^^^^^ expected type parameter `T`, found associated type
+   |      -                          ^^^^^^^^^^^^^^^^^ expected type parameter `T`, found associated type
+   |      |
+   |      expected this type parameter
    |
    = note: expected type parameter `T`
              found associated type `<T as Deref>::Target`
@@ -19,6 +21,6 @@ help: consider further restricting this bound
 LL | impl<T: Copy + std::ops::Deref<Target = T>> UnsafeCopy<'_, T> for T {
    |                               ++++++++++++
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0271`.

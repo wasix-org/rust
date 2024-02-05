@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![warn(clippy::manual_map)]
 #![allow(clippy::toplevel_ref_arg)]
 
@@ -48,9 +46,7 @@ fn main() {
     // Lint. `s` is captured by reference, so no lifetime issues.
     let s = Some(String::new());
     let _ = match &s {
-        Some(x) => Some({
-            if let Some(ref s) = s { (x.clone(), s) } else { panic!() }
-        }),
+        Some(x) => Some({ if let Some(ref s) = s { (x.clone(), s) } else { panic!() } }),
         None => None,
     };
 

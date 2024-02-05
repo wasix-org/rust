@@ -8,8 +8,7 @@ use clippy_utils::{
 };
 use rustc_errors::Applicability;
 use rustc_hir::LangItem::OptionNone;
-use rustc_hir::{Arm, BindingAnnotation, ByRef, Expr, ExprKind, FnRetTy, Guard, Node, Pat, PatKind, Path, QPath};
-use rustc_hir_analysis::hir_ty_to_ty;
+use rustc_hir::{Arm, BindingAnnotation, ByRef, Expr, ExprKind, ItemKind, Node, Pat, PatKind, Path, QPath};
 use rustc_lint::LateContext;
 use rustc_span::sym;
 
@@ -67,18 +66,9 @@ fn check_all_arms(cx: &LateContext<'_>, match_expr: &Expr<'_>, arms: &[Arm<'_>])
         let arm_expr = peel_blocks_with_stmt(arm.body);
 
         if let Some(guard_expr) = &arm.guard {
-            match guard_expr {
-                // gives up if `pat if expr` can have side effects
-                Guard::If(if_cond) => {
-                    if if_cond.can_have_side_effects() {
-                        return false;
-                    }
-                },
-                // gives up `pat if let ...` arm
-                Guard::IfLet(_) => {
-                    return false;
-                },
-            };
+            if guard_expr.can_have_side_effects() {
+                return false;
+            }
         }
 
         if let PatKind::Wild = arm.pat.kind {
@@ -141,11 +131,15 @@ fn expr_ty_matches_p_ty(cx: &LateContext<'_>, expr: &Expr<'_>, p_expr: &Expr<'_>
                 return same_type_and_consts(results.node_type(local.hir_id), results.expr_ty(expr));
             },
             // compare match_expr ty with RetTy in `fn foo() -> RetTy`
-            Node::Item(..) => {
-                if let Some(fn_decl) = p_node.fn_decl() {
-                    if let FnRetTy::Return(ret_ty) = fn_decl.output {
-                        return same_type_and_consts(hir_ty_to_ty(cx.tcx, ret_ty), cx.typeck_results().expr_ty(expr));
-                    }
+            Node::Item(item) => {
+                if let ItemKind::Fn(..) = item.kind {
+                    let output = cx
+                        .tcx
+                        .fn_sig(item.owner_id)
+                        .instantiate_identity()
+                        .output()
+                        .skip_binder();
+                    return same_type_and_consts(output, cx.typeck_results().expr_ty(expr));
                 }
             },
             // check the parent expr for this whole block `{ match match_expr {..} }`

@@ -560,8 +560,10 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
                         placeholder_value.autoref_kind = self
                             .sema
                             .resolve_method_call_as_callable(code)
-                            .and_then(|callable| callable.receiver_param(self.sema.db))
-                            .map(|self_param| self_param.kind())
+                            .and_then(|callable| {
+                                let (self_param, _) = callable.receiver_param(self.sema.db)?;
+                                Some(self_param.source(self.sema.db)?.value.kind())
+                            })
                             .unwrap_or(ast::SelfParamKind::Owned);
                     }
                 }
@@ -649,7 +651,7 @@ impl Match {
         for (path, resolved_path) in &template.resolved_paths {
             if let hir::PathResolution::Def(module_def) = resolved_path.resolution {
                 let mod_path =
-                    module.find_use_path(sema.db, module_def, false).ok_or_else(|| {
+                    module.find_use_path(sema.db, module_def, false, true).ok_or_else(|| {
                         match_error!("Failed to render template path `{}` at match location")
                     })?;
                 self.rendered_template_paths.insert(path.clone(), mod_path);

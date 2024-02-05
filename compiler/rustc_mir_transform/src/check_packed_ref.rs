@@ -1,10 +1,9 @@
-use rustc_errors::struct_span_err;
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, TyCtxt};
 
-use crate::util;
 use crate::MirLint;
+use crate::{errors, util};
 
 pub struct CheckPackedRef;
 
@@ -13,7 +12,7 @@ impl<'tcx> MirLint<'tcx> for CheckPackedRef {
         let param_env = tcx.param_env(body.source.def_id());
         let source_info = SourceInfo::outermost(body.span);
         let mut checker = PackedRefChecker { body, tcx, param_env, source_info };
-        checker.visit_body(&body);
+        checker.visit_body(body);
     }
 }
 
@@ -47,24 +46,14 @@ impl<'tcx> Visitor<'tcx> for PackedRefChecker<'_, 'tcx> {
                     // If we ever reach here it means that the generated derive
                     // code is somehow doing an unaligned reference, which it
                     // shouldn't do.
-                    span_bug!(self.source_info.span, "builtin derive created an unaligned reference");
-                } else {
-                    struct_span_err!(
-                        self.tcx.sess,
+                    span_bug!(
                         self.source_info.span,
-                        E0793,
-                        "reference to packed field is unaligned"
-                    )
-                    .note(
-                        "fields of packed structs are not properly aligned, and creating \
-                        a misaligned reference is undefined behavior (even if that \
-                        reference is never dereferenced)",
-                    ).help(
-                        "copy the field contents to a local variable, or replace the \
-                        reference with a raw pointer and use `read_unaligned`/`write_unaligned` \
-                        (loads and stores via `*p` must be properly aligned even when using raw pointers)"
-                    )
-                    .emit();
+                        "builtin derive created an unaligned reference"
+                    );
+                } else {
+                    self.tcx
+                        .dcx()
+                        .emit_err(errors::UnalignedPackedRef { span: self.source_info.span });
                 }
             }
         }

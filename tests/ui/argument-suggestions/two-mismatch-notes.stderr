@@ -11,7 +11,6 @@ LL |     foo(f, w);
    |         ^
    = note: expected fn pointer `fn(i32)`
                  found fn item `fn(u32) {f}`
-   = note: when the arguments and return types match, functions can be coerced to function pointers
 note: expected `Wrapper<i32>`, found `Wrapper<isize>`
   --> $DIR/two-mismatch-notes.rs:10:12
    |
@@ -25,6 +24,6 @@ note: function defined here
 LL | fn foo(_: fn(i32), _: Wrapper<i32>) {}
    |    ^^^ ----------  ---------------
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0308`.

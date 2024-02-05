@@ -43,7 +43,7 @@ impl Graph {
     /// The parent of a given impl, which is the `DefId` of the trait when the
     /// impl is a "specialization root".
     pub fn parent(&self, child: DefId) -> DefId {
-        *self.parent.get(&child).unwrap_or_else(|| panic!("Failed to get parent for {:?}", child))
+        *self.parent.get(&child).unwrap_or_else(|| panic!("Failed to get parent for {child:?}"))
     }
 }
 
@@ -72,11 +72,11 @@ impl OverlapMode {
                     .as_local()
                     .into_iter()
                     .flat_map(|local_def_id| {
-                        tcx.hir().attrs(tcx.hir().local_def_id_to_hir_id(local_def_id))
+                        tcx.hir().attrs(tcx.local_def_id_to_hir_id(local_def_id))
                     })
                     .find(|attr| attr.has_name(sym::rustc_strict_coherence))
                     .map(|attr| attr.span);
-                tcx.sess.emit_err(StrictCoherenceNeedsNegativeCoherence {
+                tcx.dcx().emit_err(StrictCoherenceNeedsNegativeCoherence {
                     span: tcx.def_span(trait_id),
                     attr_span,
                 });
@@ -228,7 +228,7 @@ impl<'tcx> Ancestors<'tcx> {
             if let Some(item) = node.item(tcx, trait_item_def_id) {
                 if finalizing_node.is_none() {
                     let is_specializable = item.defaultness(tcx).is_default()
-                        || tcx.impl_defaultness(node.def_id()).is_default();
+                        || tcx.defaultness(node.def_id()).is_default();
 
                     if !is_specializable {
                         finalizing_node = Some(node);
@@ -259,7 +259,9 @@ pub fn ancestors(
 
     if let Some(reported) = specialization_graph.has_errored {
         Err(reported)
-    } else if let Err(reported) = tcx.type_of(start_from_impl).subst_identity().error_reported() {
+    } else if let Err(reported) =
+        tcx.type_of(start_from_impl).instantiate_identity().error_reported()
+    {
         Err(reported)
     } else {
         Ok(Ancestors {

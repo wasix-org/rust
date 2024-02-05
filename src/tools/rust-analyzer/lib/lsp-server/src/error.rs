@@ -2,8 +2,23 @@ use std::fmt;
 
 use crate::{Notification, Request};
 
-#[derive(Debug, Clone)]
-pub struct ProtocolError(pub(crate) String);
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolError(String, bool);
+
+impl ProtocolError {
+    pub(crate) fn new(msg: impl Into<String>) -> Self {
+        ProtocolError(msg.into(), false)
+    }
+
+    pub(crate) fn disconnected() -> ProtocolError {
+        ProtocolError("disconnected channel".into(), true)
+    }
+
+    /// Whether this error occured due to a disconnected channel.
+    pub fn channel_is_disconnected(&self) -> bool {
+        self.1
+    }
+}
 
 impl std::error::Error for ProtocolError {}
 

@@ -9,22 +9,22 @@
 //! - constants (e.g. `const FOO: u8 = 10;`)
 //! - static items (e.g. `static FOO: u8 = 10;`)
 //! - match arm bindings (e.g. `foo @ Some(_)`)
+//! - modules (e.g. `mod foo { ... }` or `mod foo;`)
 
 mod case_conv;
 
 use std::fmt;
 
-use base_db::CrateId;
 use hir_def::{
-    adt::VariantData,
-    expr::{Pat, PatId},
+    data::adt::VariantData,
+    hir::{Pat, PatId},
     src::HasSource,
-    AdtId, AttrDefId, ConstId, EnumId, FunctionId, ItemContainerId, Lookup, ModuleDefId, StaticId,
-    StructId,
+    AdtId, AttrDefId, ConstId, EnumId, FunctionId, ItemContainerId, Lookup, ModuleDefId, ModuleId,
+    StaticId, StructId,
 };
 use hir_expand::{
     name::{AsName, Name},
-    HirFileId,
+    HirFileId, MacroFileIdExt,
 };
 use stdx::{always, never};
 use syntax::{
@@ -44,24 +44,20 @@ mod allow {
     pub(super) const NON_CAMEL_CASE_TYPES: &str = "non_camel_case_types";
 }
 
-pub fn incorrect_case(
-    db: &dyn HirDatabase,
-    krate: CrateId,
-    owner: ModuleDefId,
-) -> Vec<IncorrectCase> {
+pub fn incorrect_case(db: &dyn HirDatabase, owner: ModuleDefId) -> Vec<IncorrectCase> {
     let _p = profile::span("validate_module_item");
-    let mut validator = DeclValidator::new(db, krate);
+    let mut validator = DeclValidator::new(db);
     validator.validate_item(owner);
     validator.sink
 }
 
 #[derive(Debug)]
 pub enum CaseType {
-    // `some_var`
+    /// `some_var`
     LowerSnakeCase,
-    // `SOME_CONST`
+    /// `SOME_CONST`
     UpperSnakeCase,
-    // `SomeStruct`
+    /// `SomeStruct`
     UpperCamelCase,
 }
 
@@ -88,6 +84,7 @@ pub enum IdentType {
     Structure,
     Variable,
     Variant,
+    Module,
 }
 
 impl fmt::Display for IdentType {
@@ -102,6 +99,7 @@ impl fmt::Display for IdentType {
             IdentType::Structure => "Structure",
             IdentType::Variable => "Variable",
             IdentType::Variant => "Variant",
+            IdentType::Module => "Module",
         };
 
         repr.fmt(f)
@@ -120,7 +118,6 @@ pub struct IncorrectCase {
 
 pub(super) struct DeclValidator<'a> {
     db: &'a dyn HirDatabase,
-    krate: CrateId,
     pub(super) sink: Vec<IncorrectCase>,
 }
 
@@ -132,12 +129,13 @@ struct Replacement {
 }
 
 impl<'a> DeclValidator<'a> {
-    pub(super) fn new(db: &'a dyn HirDatabase, krate: CrateId) -> DeclValidator<'a> {
-        DeclValidator { db, krate, sink: Vec::new() }
+    pub(super) fn new(db: &'a dyn HirDatabase) -> DeclValidator<'a> {
+        DeclValidator { db, sink: Vec::new() }
     }
 
     pub(super) fn validate_item(&mut self, item: ModuleDefId) {
         match item {
+            ModuleDefId::ModuleId(module_id) => self.validate_module(module_id),
             ModuleDefId::FunctionId(func) => self.validate_func(func),
             ModuleDefId::AdtId(adt) => self.validate_adt(adt),
             ModuleDefId::ConstId(const_id) => self.validate_const(const_id),
@@ -169,22 +167,26 @@ impl<'a> DeclValidator<'a> {
                         || allows.contains(allow::NONSTANDARD_STYLE)
                 })
         };
-
-        is_allowed(id)
-            // go upwards one step or give up
-            || match id {
-                AttrDefId::ModuleId(m) => m.containing_module(self.db.upcast()).map(|v| v.into()),
-                AttrDefId::FunctionId(f) => Some(f.lookup(self.db.upcast()).container.into()),
-                AttrDefId::StaticId(sid) => Some(sid.lookup(self.db.upcast()).container.into()),
-                AttrDefId::ConstId(cid) => Some(cid.lookup(self.db.upcast()).container.into()),
-                AttrDefId::TraitId(tid) => Some(tid.lookup(self.db.upcast()).container.into()),
-                AttrDefId::ImplId(iid) => Some(iid.lookup(self.db.upcast()).container.into()),
-                AttrDefId::ExternBlockId(id) => Some(id.lookup(self.db.upcast()).container.into()),
+        let db = self.db.upcast();
+        let file_id_is_derive = || {
+            match id {
+                AttrDefId::ModuleId(m) => {
+                    m.def_map(db)[m.local_id].origin.file_id().map(Into::into)
+                }
+                AttrDefId::FunctionId(f) => Some(f.lookup(db).id.file_id()),
+                AttrDefId::StaticId(sid) => Some(sid.lookup(db).id.file_id()),
+                AttrDefId::ConstId(cid) => Some(cid.lookup(db).id.file_id()),
+                AttrDefId::TraitId(tid) => Some(tid.lookup(db).id.file_id()),
+                AttrDefId::TraitAliasId(taid) => Some(taid.lookup(db).id.file_id()),
+                AttrDefId::ImplId(iid) => Some(iid.lookup(db).id.file_id()),
+                AttrDefId::ExternBlockId(id) => Some(id.lookup(db).id.file_id()),
+                AttrDefId::ExternCrateId(id) => Some(id.lookup(db).id.file_id()),
+                AttrDefId::UseId(id) => Some(id.lookup(db).id.file_id()),
                 // These warnings should not explore macro definitions at all
                 AttrDefId::MacroId(_) => None,
                 AttrDefId::AdtId(aid) => match aid {
-                    AdtId::StructId(sid) => Some(sid.lookup(self.db.upcast()).container.into()),
-                    AdtId::EnumId(eid) => Some(eid.lookup(self.db.upcast()).container.into()),
+                    AdtId::StructId(sid) => Some(sid.lookup(db).id.file_id()),
+                    AdtId::EnumId(eid) => Some(eid.lookup(db).id.file_id()),
                     // Unions aren't yet supported
                     AdtId::UnionId(_) => None,
                 },
@@ -193,8 +195,92 @@ impl<'a> DeclValidator<'a> {
                 AttrDefId::TypeAliasId(_) => None,
                 AttrDefId::GenericParamId(_) => None,
             }
-            .map(|mid| self.allowed(mid, allow_name, true))
-            .unwrap_or(false)
+            .map_or(false, |file_id| {
+                matches!(file_id.macro_file(), Some(file_id) if file_id.is_custom_derive(db.upcast()) || file_id.is_builtin_derive(db.upcast()))
+            })
+        };
+
+        let parent = || {
+            match id {
+                AttrDefId::ModuleId(m) => m.containing_module(db).map(|v| v.into()),
+                AttrDefId::FunctionId(f) => Some(f.lookup(db).container.into()),
+                AttrDefId::StaticId(sid) => Some(sid.lookup(db).container.into()),
+                AttrDefId::ConstId(cid) => Some(cid.lookup(db).container.into()),
+                AttrDefId::TraitId(tid) => Some(tid.lookup(db).container.into()),
+                AttrDefId::TraitAliasId(taid) => Some(taid.lookup(db).container.into()),
+                AttrDefId::ImplId(iid) => Some(iid.lookup(db).container.into()),
+                AttrDefId::ExternBlockId(id) => Some(id.lookup(db).container.into()),
+                AttrDefId::ExternCrateId(id) => Some(id.lookup(db).container.into()),
+                AttrDefId::UseId(id) => Some(id.lookup(db).container.into()),
+                // These warnings should not explore macro definitions at all
+                AttrDefId::MacroId(_) => None,
+                AttrDefId::AdtId(aid) => match aid {
+                    AdtId::StructId(sid) => Some(sid.lookup(db).container.into()),
+                    AdtId::EnumId(eid) => Some(eid.lookup(db).container.into()),
+                    // Unions aren't yet supported
+                    AdtId::UnionId(_) => None,
+                },
+                AttrDefId::FieldId(_) => None,
+                AttrDefId::EnumVariantId(_) => None,
+                AttrDefId::TypeAliasId(_) => None,
+                AttrDefId::GenericParamId(_) => None,
+            }
+            .is_some_and(|mid| self.allowed(mid, allow_name, true))
+        };
+        is_allowed(id)
+            // FIXME: this is a hack to avoid false positives in derive macros currently
+            || file_id_is_derive()
+            // go upwards one step or give up
+            || parent()
+    }
+
+    fn validate_module(&mut self, module_id: ModuleId) {
+        // Check whether non-snake case identifiers are allowed for this module.
+        if self.allowed(module_id.into(), allow::NON_SNAKE_CASE, false) {
+            return;
+        }
+
+        // Check the module name.
+        let Some(module_name) = module_id.name(self.db.upcast()) else { return };
+        let module_name_replacement =
+            module_name.as_str().and_then(to_lower_snake_case).map(|new_name| Replacement {
+                current_name: module_name,
+                suggested_text: new_name,
+                expected_case: CaseType::LowerSnakeCase,
+            });
+
+        if let Some(module_name_replacement) = module_name_replacement {
+            let module_data = &module_id.def_map(self.db.upcast())[module_id.local_id];
+            let module_src = module_data.declaration_source(self.db.upcast());
+
+            if let Some(module_src) = module_src {
+                let ast_ptr = match module_src.value.name() {
+                    Some(name) => name,
+                    None => {
+                        never!(
+                            "Replacement ({:?}) was generated for a module without a name: {:?}",
+                            module_name_replacement,
+                            module_src
+                        );
+                        return;
+                    }
+                };
+
+                let diagnostic = IncorrectCase {
+                    file: module_src.file_id,
+                    ident_type: IdentType::Module,
+                    ident: AstPtr::new(&ast_ptr),
+                    expected_case: module_name_replacement.expected_case,
+                    ident_text: module_name_replacement
+                        .current_name
+                        .display(self.db.upcast())
+                        .to_string(),
+                    suggested_text: module_name_replacement.suggested_text,
+                };
+
+                self.sink.push(diagnostic);
+            }
+        }
     }
 
     fn validate_func(&mut self, func: FunctionId) {
@@ -204,38 +290,28 @@ impl<'a> DeclValidator<'a> {
             return;
         }
 
-        let body = self.db.body(func.into());
-
-        // Recursively validate inner scope items, such as static variables and constants.
-        for (_, block_def_map) in body.blocks(self.db.upcast()) {
-            for (_, module) in block_def_map.modules() {
-                for def_id in module.scope.declarations() {
-                    let mut validator = DeclValidator::new(self.db, self.krate);
-                    validator.validate_item(def_id);
-                }
-            }
-        }
-
         // Check whether non-snake case identifiers are allowed for this function.
         if self.allowed(func.into(), allow::NON_SNAKE_CASE, false) {
             return;
         }
 
         // Check the function name.
-        let function_name = data.name.to_string();
+        let function_name = data.name.display(self.db.upcast()).to_string();
         let fn_name_replacement = to_lower_snake_case(&function_name).map(|new_name| Replacement {
             current_name: data.name.clone(),
             suggested_text: new_name,
             expected_case: CaseType::LowerSnakeCase,
         });
 
+        let body = self.db.body(func.into());
+
         // Check the patterns inside the function body.
         // This includes function parameters.
         let pats_replacements = body
             .pats
             .iter()
-            .filter_map(|(id, pat)| match pat {
-                Pat::Bind { name, .. } => Some((id, name)),
+            .filter_map(|(pat_id, pat)| match pat {
+                Pat::Bind { id, .. } => Some((pat_id, &body.bindings[*id].name)),
                 _ => None,
             })
             .filter_map(|(id, bind_name)| {
@@ -243,7 +319,9 @@ impl<'a> DeclValidator<'a> {
                     id,
                     Replacement {
                         current_name: bind_name.clone(),
-                        suggested_text: to_lower_snake_case(&bind_name.to_string())?,
+                        suggested_text: to_lower_snake_case(
+                            &bind_name.display(self.db.upcast()).to_string(),
+                        )?,
                         expected_case: CaseType::LowerSnakeCase,
                     },
                 ))
@@ -286,7 +364,7 @@ impl<'a> DeclValidator<'a> {
             ident_type: IdentType::Function,
             ident: AstPtr::new(&ast_ptr),
             expected_case: fn_name_replacement.expected_case,
-            ident_text: fn_name_replacement.current_name.to_string(),
+            ident_text: fn_name_replacement.current_name.display(self.db.upcast()).to_string(),
             suggested_text: fn_name_replacement.suggested_text,
         };
 
@@ -309,45 +387,44 @@ impl<'a> DeclValidator<'a> {
 
         for (id, replacement) in pats_replacements {
             if let Ok(source_ptr) = source_map.pat_syntax(id) {
-                if let Some(expr) = source_ptr.value.as_ref().left() {
+                if let Some(ptr) = source_ptr.value.clone().cast::<ast::IdentPat>() {
                     let root = source_ptr.file_syntax(self.db.upcast());
-                    if let ast::Pat::IdentPat(ident_pat) = expr.to_node(&root) {
-                        let parent = match ident_pat.syntax().parent() {
-                            Some(parent) => parent,
-                            None => continue,
-                        };
-                        let name_ast = match ident_pat.name() {
-                            Some(name_ast) => name_ast,
-                            None => continue,
-                        };
+                    let ident_pat = ptr.to_node(&root);
+                    let parent = match ident_pat.syntax().parent() {
+                        Some(parent) => parent,
+                        None => continue,
+                    };
+                    let name_ast = match ident_pat.name() {
+                        Some(name_ast) => name_ast,
+                        None => continue,
+                    };
 
-                        let is_param = ast::Param::can_cast(parent.kind());
+                    let is_param = ast::Param::can_cast(parent.kind());
 
-                        // We have to check that it's either `let var = ...` or `var @ Variant(_)` statement,
-                        // because e.g. match arms are patterns as well.
-                        // In other words, we check that it's a named variable binding.
-                        let is_binding = ast::LetStmt::can_cast(parent.kind())
-                            || (ast::MatchArm::can_cast(parent.kind())
-                                && ident_pat.at_token().is_some());
-                        if !(is_param || is_binding) {
-                            // This pattern is not an actual variable declaration, e.g. `Some(val) => {..}` match arm.
-                            continue;
-                        }
-
-                        let ident_type =
-                            if is_param { IdentType::Parameter } else { IdentType::Variable };
-
-                        let diagnostic = IncorrectCase {
-                            file: source_ptr.file_id,
-                            ident_type,
-                            ident: AstPtr::new(&name_ast),
-                            expected_case: replacement.expected_case,
-                            ident_text: replacement.current_name.to_string(),
-                            suggested_text: replacement.suggested_text,
-                        };
-
-                        self.sink.push(diagnostic);
+                    // We have to check that it's either `let var = ...` or `var @ Variant(_)` statement,
+                    // because e.g. match arms are patterns as well.
+                    // In other words, we check that it's a named variable binding.
+                    let is_binding = ast::LetStmt::can_cast(parent.kind())
+                        || (ast::MatchArm::can_cast(parent.kind())
+                            && ident_pat.at_token().is_some());
+                    if !(is_param || is_binding) {
+                        // This pattern is not an actual variable declaration, e.g. `Some(val) => {..}` match arm.
+                        continue;
                     }
+
+                    let ident_type =
+                        if is_param { IdentType::Parameter } else { IdentType::Variable };
+
+                    let diagnostic = IncorrectCase {
+                        file: source_ptr.file_id,
+                        ident_type,
+                        ident: AstPtr::new(&name_ast),
+                        expected_case: replacement.expected_case,
+                        ident_text: replacement.current_name.display(self.db.upcast()).to_string(),
+                        suggested_text: replacement.suggested_text,
+                    };
+
+                    self.sink.push(diagnostic);
                 }
             }
         }
@@ -361,7 +438,7 @@ impl<'a> DeclValidator<'a> {
         let non_snake_case_allowed = self.allowed(struct_id.into(), allow::NON_SNAKE_CASE, false);
 
         // Check the structure name.
-        let struct_name = data.name.to_string();
+        let struct_name = data.name.display(self.db.upcast()).to_string();
         let struct_name_replacement = if !non_camel_case_allowed {
             to_camel_case(&struct_name).map(|new_name| Replacement {
                 current_name: data.name.clone(),
@@ -378,7 +455,7 @@ impl<'a> DeclValidator<'a> {
         if !non_snake_case_allowed {
             if let VariantData::Record(fields) = data.variant_data.as_ref() {
                 for (_, field) in fields.iter() {
-                    let field_name = field.name.to_string();
+                    let field_name = field.name.display(self.db.upcast()).to_string();
                     if let Some(new_name) = to_lower_snake_case(&field_name) {
                         let replacement = Replacement {
                             current_name: field.name.clone(),
@@ -433,7 +510,7 @@ impl<'a> DeclValidator<'a> {
                 ident_type: IdentType::Structure,
                 ident: AstPtr::new(&ast_ptr),
                 expected_case: replacement.expected_case,
-                ident_text: replacement.current_name.to_string(),
+                ident_text: replacement.current_name.display(self.db.upcast()).to_string(),
                 suggested_text: replacement.suggested_text,
             };
 
@@ -478,7 +555,7 @@ impl<'a> DeclValidator<'a> {
                 ident_type: IdentType::Field,
                 ident: AstPtr::new(&ast_ptr),
                 expected_case: field_to_rename.expected_case,
-                ident_text: field_to_rename.current_name.to_string(),
+                ident_text: field_to_rename.current_name.display(self.db.upcast()).to_string(),
                 suggested_text: field_to_rename.suggested_text,
             };
 
@@ -495,7 +572,7 @@ impl<'a> DeclValidator<'a> {
         }
 
         // Check the enum name.
-        let enum_name = data.name.to_string();
+        let enum_name = data.name.display(self.db.upcast()).to_string();
         let enum_name_replacement = to_camel_case(&enum_name).map(|new_name| Replacement {
             current_name: data.name.clone(),
             suggested_text: new_name,
@@ -505,11 +582,11 @@ impl<'a> DeclValidator<'a> {
         // Check the field names.
         let enum_fields_replacements = data
             .variants
-            .iter()
-            .filter_map(|(_, variant)| {
+            .values()
+            .filter_map(|variant| {
                 Some(Replacement {
                     current_name: variant.name.clone(),
-                    suggested_text: to_camel_case(&variant.name.to_string())?,
+                    suggested_text: to_camel_case(&variant.name.to_smol_str())?,
                     expected_case: CaseType::UpperCamelCase,
                 })
             })
@@ -557,7 +634,7 @@ impl<'a> DeclValidator<'a> {
                 ident_type: IdentType::Enum,
                 ident: AstPtr::new(&ast_ptr),
                 expected_case: replacement.expected_case,
-                ident_text: replacement.current_name.to_string(),
+                ident_text: replacement.current_name.display(self.db.upcast()).to_string(),
                 suggested_text: replacement.suggested_text,
             };
 
@@ -602,7 +679,7 @@ impl<'a> DeclValidator<'a> {
                 ident_type: IdentType::Variant,
                 ident: AstPtr::new(&ast_ptr),
                 expected_case: variant_to_rename.expected_case,
-                ident_text: variant_to_rename.current_name.to_string(),
+                ident_text: variant_to_rename.current_name.display(self.db.upcast()).to_string(),
                 suggested_text: variant_to_rename.suggested_text,
             };
 
@@ -622,7 +699,7 @@ impl<'a> DeclValidator<'a> {
             None => return,
         };
 
-        let const_name = name.to_string();
+        let const_name = name.to_smol_str();
         let replacement = if let Some(new_name) = to_upper_snake_case(&const_name) {
             Replacement {
                 current_name: name.clone(),
@@ -647,7 +724,7 @@ impl<'a> DeclValidator<'a> {
             ident_type: IdentType::Constant,
             ident: AstPtr::new(&ast_ptr),
             expected_case: replacement.expected_case,
-            ident_text: replacement.current_name.to_string(),
+            ident_text: replacement.current_name.display(self.db.upcast()).to_string(),
             suggested_text: replacement.suggested_text,
         };
 
@@ -667,7 +744,7 @@ impl<'a> DeclValidator<'a> {
 
         let name = &data.name;
 
-        let static_name = name.to_string();
+        let static_name = name.to_smol_str();
         let replacement = if let Some(new_name) = to_upper_snake_case(&static_name) {
             Replacement {
                 current_name: name.clone(),
@@ -692,7 +769,7 @@ impl<'a> DeclValidator<'a> {
             ident_type: IdentType::StaticVariable,
             ident: AstPtr::new(&ast_ptr),
             expected_case: replacement.expected_case,
-            ident_text: replacement.current_name.to_string(),
+            ident_text: replacement.current_name.display(self.db.upcast()).to_string(),
             suggested_text: replacement.suggested_text,
         };
 

@@ -1,27 +1,27 @@
 use crate::errors::{FailedWritingFile, RustcErrorFatal, RustcErrorUnexpectedAnnotation};
 use crate::interface::{Compiler, Result};
-use crate::passes;
+use crate::{errors, passes, util};
 
 use rustc_ast as ast;
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::CodegenResults;
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::svh::Svh;
-use rustc_data_structures::sync::{AppendOnlyVec, Lrc, OnceCell, RwLock, WorkerLocal};
-use rustc_hir::def_id::{CRATE_DEF_ID, LOCAL_CRATE};
+use rustc_data_structures::sync::{AppendOnlyIndexVec, FreezeLock, OnceLock, WorkerLocal};
+use rustc_hir::def::DefKind;
+use rustc_hir::def_id::{StableCrateId, CRATE_DEF_ID, LOCAL_CRATE};
 use rustc_hir::definitions::Definitions;
-use rustc_incremental::DepGraphFuture;
-use rustc_lint::LintStore;
+use rustc_incremental::setup_dep_graph;
 use rustc_metadata::creader::CStore;
 use rustc_middle::arena::Arena;
 use rustc_middle::dep_graph::DepGraph;
 use rustc_middle::ty::{GlobalCtxt, TyCtxt};
-use rustc_query_impl::Queries as TcxQueries;
-use rustc_session::config::{self, OutputFilenames, OutputType};
+use rustc_serialize::opaque::FileEncodeResult;
+use rustc_session::config::{self, CrateType, OutputFilenames, OutputType};
 use rustc_session::cstore::Untracked;
-use rustc_session::{output::find_crate_name, Session};
+use rustc_session::output::find_crate_name;
+use rustc_session::Session;
 use rustc_span::symbol::sym;
-use rustc_span::Symbol;
 use std::any::Any;
 use std::cell::{RefCell, RefMut};
 use std::sync::Arc;
@@ -80,131 +80,81 @@ impl<T> Default for Query<T> {
 
 pub struct Queries<'tcx> {
     compiler: &'tcx Compiler,
-    gcx_cell: OnceCell<GlobalCtxt<'tcx>>,
-    queries: OnceCell<TcxQueries<'tcx>>,
+    gcx_cell: OnceLock<GlobalCtxt<'tcx>>,
 
     arena: WorkerLocal<Arena<'tcx>>,
     hir_arena: WorkerLocal<rustc_hir::Arena<'tcx>>,
 
-    dep_graph_future: Query<Option<DepGraphFuture>>,
     parse: Query<ast::Crate>,
-    crate_name: Query<Symbol>,
-    register_plugins: Query<(ast::Crate, Lrc<LintStore>)>,
-    dep_graph: Query<DepGraph>,
     // This just points to what's in `gcx_cell`.
     gcx: Query<&'tcx GlobalCtxt<'tcx>>,
-    ongoing_codegen: Query<Box<dyn Any>>,
 }
 
 impl<'tcx> Queries<'tcx> {
     pub fn new(compiler: &'tcx Compiler) -> Queries<'tcx> {
         Queries {
             compiler,
-            gcx_cell: OnceCell::new(),
-            queries: OnceCell::new(),
+            gcx_cell: OnceLock::new(),
             arena: WorkerLocal::new(|_| Arena::default()),
             hir_arena: WorkerLocal::new(|_| rustc_hir::Arena::default()),
-            dep_graph_future: Default::default(),
             parse: Default::default(),
-            crate_name: Default::default(),
-            register_plugins: Default::default(),
-            dep_graph: Default::default(),
             gcx: Default::default(),
-            ongoing_codegen: Default::default(),
         }
     }
 
-    fn session(&self) -> &Lrc<Session> {
-        &self.compiler.sess
-    }
-    fn codegen_backend(&self) -> &Lrc<Box<dyn CodegenBackend>> {
-        self.compiler.codegen_backend()
-    }
-
-    fn dep_graph_future(&self) -> Result<QueryResult<'_, Option<DepGraphFuture>>> {
-        self.dep_graph_future.compute(|| {
-            let sess = self.session();
-            Ok(sess.opts.build_dep_graph().then(|| rustc_incremental::load_dep_graph(sess)))
-        })
+    pub fn finish(&self) -> FileEncodeResult {
+        if let Some(gcx) = self.gcx_cell.get() { gcx.finish() } else { Ok(0) }
     }
 
     pub fn parse(&self) -> Result<QueryResult<'_, ast::Crate>> {
-        self.parse
-            .compute(|| passes::parse(self.session()).map_err(|mut parse_error| parse_error.emit()))
-    }
-
-    pub fn register_plugins(&self) -> Result<QueryResult<'_, (ast::Crate, Lrc<LintStore>)>> {
-        self.register_plugins.compute(|| {
-            let crate_name = *self.crate_name()?.borrow();
-            let krate = self.parse()?.steal();
-
-            let empty: &(dyn Fn(&Session, &mut LintStore) + Sync + Send) = &|_, _| {};
-            let (krate, lint_store) = passes::register_plugins(
-                self.session(),
-                &*self.codegen_backend().metadata_loader(),
-                self.compiler.register_lints.as_deref().unwrap_or_else(|| empty),
-                krate,
-                crate_name,
-            )?;
-
-            // Compute the dependency graph (in the background). We want to do
-            // this as early as possible, to give the DepGraph maximum time to
-            // load before dep_graph() is called, but it also can't happen
-            // until after rustc_incremental::prepare_session_directory() is
-            // called, which happens within passes::register_plugins().
-            self.dep_graph_future().ok();
-
-            Ok((krate, Lrc::new(lint_store)))
-        })
-    }
-
-    fn crate_name(&self) -> Result<QueryResult<'_, Symbol>> {
-        self.crate_name.compute(|| {
-            Ok({
-                let parse_result = self.parse()?;
-                let krate = parse_result.borrow();
-                // parse `#[crate_name]` even if `--crate-name` was passed, to make sure it matches.
-                find_crate_name(self.session(), &krate.attrs)
-            })
-        })
-    }
-
-    fn dep_graph(&self) -> Result<QueryResult<'_, DepGraph>> {
-        self.dep_graph.compute(|| {
-            let sess = self.session();
-            let future_opt = self.dep_graph_future()?.steal();
-            let dep_graph = future_opt
-                .and_then(|future| {
-                    let (prev_graph, prev_work_products) =
-                        sess.time("blocked_on_dep_graph_loading", || future.open().open(sess));
-
-                    rustc_incremental::build_dep_graph(sess, prev_graph, prev_work_products)
-                })
-                .unwrap_or_else(DepGraph::new_disabled);
-            Ok(dep_graph)
+        self.parse.compute(|| {
+            passes::parse(&self.compiler.sess).map_err(|parse_error| parse_error.emit())
         })
     }
 
     pub fn global_ctxt(&'tcx self) -> Result<QueryResult<'_, &'tcx GlobalCtxt<'tcx>>> {
         self.gcx.compute(|| {
-            let crate_name = *self.crate_name()?.borrow();
-            let (krate, lint_store) = self.register_plugins()?.steal();
+            let sess = &self.compiler.sess;
 
-            let sess = self.session();
+            let mut krate = self.parse()?.steal();
 
-            let cstore = RwLock::new(Box::new(CStore::new(sess)) as _);
-            let definitions = RwLock::new(Definitions::new(sess.local_stable_crate_id()));
-            let source_span = AppendOnlyVec::new();
+            rustc_builtin_macros::cmdline_attrs::inject(
+                &mut krate,
+                &sess.parse_sess,
+                &sess.opts.unstable_opts.crate_attr,
+            );
+
+            let pre_configured_attrs =
+                rustc_expand::config::pre_configure_attrs(sess, &krate.attrs);
+
+            // parse `#[crate_name]` even if `--crate-name` was passed, to make sure it matches.
+            let crate_name = find_crate_name(sess, &pre_configured_attrs);
+            let crate_types = util::collect_crate_types(sess, &pre_configured_attrs);
+            let stable_crate_id = StableCrateId::new(
+                crate_name,
+                crate_types.contains(&CrateType::Executable),
+                sess.opts.cg.metadata.clone(),
+                sess.cfg_version,
+            );
+            let outputs = util::build_output_filenames(&pre_configured_attrs, sess);
+            let dep_graph = setup_dep_graph(sess, crate_name, stable_crate_id)?;
+
+            let cstore = FreezeLock::new(Box::new(CStore::new(
+                self.compiler.codegen_backend.metadata_loader(),
+                stable_crate_id,
+            )) as _);
+            let definitions = FreezeLock::new(Definitions::new(stable_crate_id));
+            let source_span = AppendOnlyIndexVec::new();
             let _id = source_span.push(krate.spans.inner_span);
             debug_assert_eq!(_id, CRATE_DEF_ID);
             let untracked = Untracked { cstore, source_span, definitions };
 
             let qcx = passes::create_global_ctxt(
                 self.compiler,
-                lint_store,
-                self.dep_graph()?.steal(),
+                crate_types,
+                stable_crate_id,
+                dep_graph,
                 untracked,
-                &self.queries,
                 &self.gcx_cell,
                 &self.arena,
                 &self.hir_arena,
@@ -215,34 +165,26 @@ impl<'tcx> Queries<'tcx> {
                 feed.crate_name(crate_name);
 
                 let feed = tcx.feed_unit_query();
-                feed.crate_for_resolver(tcx.arena.alloc(Steal::new(krate)));
-                feed.metadata_loader(
-                    tcx.arena.alloc(Steal::new(self.codegen_backend().metadata_loader())),
-                );
-                feed.features_query(tcx.sess.features_untracked());
+                feed.features_query(tcx.arena.alloc(rustc_expand::config::features(
+                    sess,
+                    &pre_configured_attrs,
+                    crate_name,
+                )));
+                feed.crate_for_resolver(tcx.arena.alloc(Steal::new((krate, pre_configured_attrs))));
+                feed.output_filenames(Arc::new(outputs));
+
+                let feed = tcx.feed_local_def_id(CRATE_DEF_ID);
+                feed.def_kind(DefKind::Mod);
             });
             Ok(qcx)
         })
     }
 
-    pub fn ongoing_codegen(&'tcx self) -> Result<QueryResult<'_, Box<dyn Any>>> {
-        self.ongoing_codegen.compute(|| {
-            self.global_ctxt()?.enter(|tcx| {
-                tcx.analysis(()).ok();
-
-                // Don't do code generation if there were any errors
-                self.session().compile_status()?;
-
-                // If we have any delayed bugs, for example because we created TyKind::Error earlier,
-                // it's likely that codegen will only cause more ICEs, obscuring the original problem
-                self.session().diagnostic().flush_delayed();
-
-                // Hook for UI tests.
-                Self::check_for_rustc_errors_attr(tcx);
-
-                Ok(passes::start_codegen(&***self.codegen_backend(), tcx))
-            })
-        })
+    pub fn write_dep_info(&'tcx self) -> Result<()> {
+        self.global_ctxt()?.enter(|tcx| {
+            passes::write_dep_info(tcx);
+        });
+        Ok(())
     }
 
     /// Check for the `#[rustc_error]` annotation, which forces an error in codegen. This is used
@@ -252,26 +194,26 @@ impl<'tcx> Queries<'tcx> {
         let Some((def_id, _)) = tcx.entry_fn(()) else { return };
         for attr in tcx.get_attrs(def_id, sym::rustc_error) {
             match attr.meta_item_list() {
-                // Check if there is a `#[rustc_error(delay_span_bug_from_inside_query)]`.
+                // Check if there is a `#[rustc_error(span_delayed_bug_from_inside_query)]`.
                 Some(list)
                     if list.iter().any(|list_item| {
                         matches!(
                             list_item.ident().map(|i| i.name),
-                            Some(sym::delay_span_bug_from_inside_query)
+                            Some(sym::span_delayed_bug_from_inside_query)
                         )
                     }) =>
                 {
-                    tcx.ensure().trigger_delay_span_bug(def_id);
+                    tcx.ensure().trigger_span_delayed_bug(def_id);
                 }
 
                 // Bare `#[rustc_error]`.
                 None => {
-                    tcx.sess.emit_fatal(RustcErrorFatal { span: tcx.def_span(def_id) });
+                    tcx.dcx().emit_fatal(RustcErrorFatal { span: tcx.def_span(def_id) });
                 }
 
                 // Some other attribute.
                 Some(_) => {
-                    tcx.sess.emit_warning(RustcErrorUnexpectedAnnotation {
+                    tcx.dcx().emit_warning(RustcErrorUnexpectedAnnotation {
                         span: tcx.def_span(def_id),
                     });
                 }
@@ -279,64 +221,61 @@ impl<'tcx> Queries<'tcx> {
         }
     }
 
-    pub fn linker(&'tcx self) -> Result<Linker> {
-        let sess = self.session().clone();
-        let codegen_backend = self.codegen_backend().clone();
+    pub fn codegen_and_build_linker(&'tcx self) -> Result<Linker> {
+        self.global_ctxt()?.enter(|tcx| {
+            // Don't do code generation if there were any errors
+            self.compiler.sess.compile_status()?;
 
-        let (crate_hash, prepare_outputs, dep_graph) = self.global_ctxt()?.enter(|tcx| {
-            (tcx.crate_hash(LOCAL_CRATE), tcx.output_filenames(()).clone(), tcx.dep_graph.clone())
-        });
-        let ongoing_codegen = self.ongoing_codegen()?.steal();
+            // If we have any delayed bugs, for example because we created TyKind::Error earlier,
+            // it's likely that codegen will only cause more ICEs, obscuring the original problem
+            self.compiler.sess.dcx().flush_delayed();
 
-        Ok(Linker {
-            sess,
-            codegen_backend,
+            // Hook for UI tests.
+            Self::check_for_rustc_errors_attr(tcx);
 
-            dep_graph,
-            prepare_outputs,
-            crate_hash,
-            ongoing_codegen,
+            let ongoing_codegen = passes::start_codegen(&*self.compiler.codegen_backend, tcx);
+
+            Ok(Linker {
+                dep_graph: tcx.dep_graph.clone(),
+                output_filenames: tcx.output_filenames(()).clone(),
+                crate_hash: if tcx.needs_crate_hash() {
+                    Some(tcx.crate_hash(LOCAL_CRATE))
+                } else {
+                    None
+                },
+                ongoing_codegen,
+            })
         })
     }
 }
 
 pub struct Linker {
-    // compilation inputs
-    sess: Lrc<Session>,
-    codegen_backend: Lrc<Box<dyn CodegenBackend>>,
-
-    // compilation outputs
     dep_graph: DepGraph,
-    prepare_outputs: Arc<OutputFilenames>,
-    crate_hash: Svh,
+    output_filenames: Arc<OutputFilenames>,
+    // Only present when incr. comp. is enabled.
+    crate_hash: Option<Svh>,
     ongoing_codegen: Box<dyn Any>,
 }
 
 impl Linker {
-    pub fn link(self) -> Result<()> {
-        let (codegen_results, work_products) = self.codegen_backend.join_codegen(
-            self.ongoing_codegen,
-            &self.sess,
-            &self.prepare_outputs,
-        )?;
+    pub fn link(self, sess: &Session, codegen_backend: &dyn CodegenBackend) -> Result<()> {
+        let (codegen_results, work_products) =
+            codegen_backend.join_codegen(self.ongoing_codegen, sess, &self.output_filenames)?;
 
-        self.sess.compile_status()?;
+        sess.compile_status()?;
 
-        let sess = &self.sess;
-        let dep_graph = self.dep_graph;
         sess.time("serialize_work_products", || {
-            rustc_incremental::save_work_product_index(sess, &dep_graph, work_products)
+            rustc_incremental::save_work_product_index(sess, &self.dep_graph, work_products)
         });
 
-        let prof = self.sess.prof.clone();
-        prof.generic_activity("drop_dep_graph").run(move || drop(dep_graph));
+        let prof = sess.prof.clone();
+        prof.generic_activity("drop_dep_graph").run(move || drop(self.dep_graph));
 
         // Now that we won't touch anything in the incremental compilation directory
         // any more, we can finalize it (which involves renaming it)
-        rustc_incremental::finalize_session_directory(&self.sess, self.crate_hash);
+        rustc_incremental::finalize_session_directory(sess, self.crate_hash);
 
-        if !self
-            .sess
+        if !sess
             .opts
             .output_types
             .keys()
@@ -346,15 +285,21 @@ impl Linker {
         }
 
         if sess.opts.unstable_opts.no_link {
-            let encoded = CodegenResults::serialize_rlink(&codegen_results);
-            let rlink_file = self.prepare_outputs.with_extension(config::RLINK_EXT);
-            std::fs::write(&rlink_file, encoded)
-                .map_err(|error| sess.emit_fatal(FailedWritingFile { path: &rlink_file, error }))?;
+            let rlink_file = self.output_filenames.with_extension(config::RLINK_EXT);
+            CodegenResults::serialize_rlink(
+                sess,
+                &rlink_file,
+                &codegen_results,
+                &*self.output_filenames,
+            )
+            .map_err(|error| {
+                sess.dcx().emit_fatal(FailedWritingFile { path: &rlink_file, error })
+            })?;
             return Ok(());
         }
 
         let _timer = sess.prof.verbose_generic_activity("link_crate");
-        self.codegen_backend.link(&self.sess, codegen_results, &self.prepare_outputs)
+        codegen_backend.link(sess, codegen_results, &self.output_filenames)
     }
 }
 
@@ -363,6 +308,7 @@ impl Compiler {
     where
         F: for<'tcx> FnOnce(&'tcx Queries<'tcx>) -> T,
     {
+        // Must declare `_timer` first so that it is dropped after `queries`.
         let mut _timer = None;
         let queries = Queries::new(self);
         let ret = f(&queries);
@@ -375,15 +321,19 @@ impl Compiler {
             // after this point, they'll show up as "<unknown>" in self-profiling data.
             {
                 let _prof_timer =
-                    queries.session().prof.generic_activity("self_profile_alloc_query_strings");
+                    queries.compiler.sess.prof.generic_activity("self_profile_alloc_query_strings");
                 gcx.enter(rustc_query_impl::alloc_self_profile_query_strings);
             }
 
-            self.session()
-                .time("serialize_dep_graph", || gcx.enter(rustc_incremental::save_dep_graph));
+            self.sess.time("serialize_dep_graph", || gcx.enter(rustc_incremental::save_dep_graph));
         }
 
-        _timer = Some(self.session().timer("free_global_ctxt"));
+        // The timer's lifetime spans the dropping of `queries`, which contains
+        // the global context.
+        _timer = Some(self.sess.timer("free_global_ctxt"));
+        if let Err((path, error)) = queries.finish() {
+            self.sess.dcx().emit_fatal(errors::FailedWritingFile { path: &path, error });
+        }
 
         ret
     }

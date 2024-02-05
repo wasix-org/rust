@@ -1,6 +1,7 @@
 //! Computes color for a single element.
 
-use hir::{AsAssocItem, HasVisibility, Semantics};
+use either::Either;
+use hir::{AsAssocItem, HasVisibility, MacroFileIdExt, Semantics};
 use ide_db::{
     defs::{Definition, IdentClass, NameClass, NameRefClass},
     FxHashMap, RootDatabase, SymbolKind,
@@ -26,7 +27,7 @@ pub(super) fn token(sema: &Semantics<'_, RootDatabase>, token: SyntaxToken) -> O
     }
 
     let highlight: Highlight = match token.kind() {
-        STRING | BYTE_STRING => HlTag::StringLiteral.into(),
+        STRING | BYTE_STRING | C_STRING => HlTag::StringLiteral.into(),
         INT_NUMBER if token.parent_ancestors().nth(1).map(|it| it.kind()) == Some(FIELD_EXPR) => {
             SymbolKind::Field.into()
         }
@@ -217,7 +218,12 @@ fn highlight_name_ref(
         // to anything when used.
         // We can fix this for derive attributes since derive helpers are recorded, but not for
         // general attributes.
-        None if name_ref.syntax().ancestors().any(|it| it.kind() == ATTR) => {
+        None if name_ref.syntax().ancestors().any(|it| it.kind() == ATTR)
+            && !sema
+                .hir_file_for(name_ref.syntax())
+                .macro_file()
+                .map_or(false, |it| it.is_derive_attr_pseudo_expansion(sema.db)) =>
+        {
             return HlTag::Symbol(SymbolKind::Attribute).into();
         }
         None => return HlTag::UnresolvedReference.into(),
@@ -267,7 +273,26 @@ fn highlight_name_ref(
 
             h
         }
-        NameRefClass::FieldShorthand { .. } => SymbolKind::Field.into(),
+        NameRefClass::FieldShorthand { field_ref, .. } => {
+            highlight_def(sema, krate, field_ref.into())
+        }
+        NameRefClass::ExternCrateShorthand { decl, krate: resolved_krate } => {
+            let mut h = HlTag::Symbol(SymbolKind::Module).into();
+
+            if resolved_krate != krate {
+                h |= HlMod::Library
+            }
+            let is_public = decl.visibility(db) == hir::Visibility::Public;
+            if is_public {
+                h |= HlMod::Public
+            }
+            let is_from_builtin_crate = resolved_krate.is_builtin(db);
+            if is_from_builtin_crate {
+                h |= HlMod::DefaultLibrary;
+            }
+            h |= HlMod::CrateRoot;
+            h
+        }
     };
 
     h.tag = match name_ref.token_kind() {
@@ -327,7 +352,7 @@ fn calc_binding_hash(name: &hir::Name, shadow_count: u32) -> u64 {
     hash((name, shadow_count))
 }
 
-fn highlight_def(
+pub(super) fn highlight_def(
     sema: &Semantics<'_, RootDatabase>,
     krate: hir::Crate,
     def: Definition,
@@ -335,10 +360,12 @@ fn highlight_def(
     let db = sema.db;
     let mut h = match def {
         Definition::Macro(m) => Highlight::new(HlTag::Symbol(m.kind(sema.db).into())),
-        Definition::Field(_) => Highlight::new(HlTag::Symbol(SymbolKind::Field)),
+        Definition::Field(_) | Definition::TupleField(_) => {
+            Highlight::new(HlTag::Symbol(SymbolKind::Field))
+        }
         Definition::Module(module) => {
             let mut h = Highlight::new(HlTag::Symbol(SymbolKind::Module));
-            if module.is_crate_root(db) {
+            if module.is_crate_root() {
                 h |= HlMod::CrateRoot;
             }
             h
@@ -410,6 +437,7 @@ fn highlight_def(
             h
         }
         Definition::Trait(_) => Highlight::new(HlTag::Symbol(SymbolKind::Trait)),
+        Definition::TraitAlias(_) => Highlight::new(HlTag::Symbol(SymbolKind::TraitAlias)),
         Definition::TypeAlias(type_) => {
             let mut h = Highlight::new(HlTag::Symbol(SymbolKind::TypeAlias));
 
@@ -470,6 +498,14 @@ fn highlight_def(
                 h |= HlMod::Callable;
             }
             h
+        }
+        Definition::ExternCrateDecl(extern_crate) => {
+            let mut highlight =
+                Highlight::new(HlTag::Symbol(SymbolKind::Module)) | HlMod::CrateRoot;
+            if extern_crate.alias(db).is_none() {
+                highlight |= HlMod::Library;
+            }
+            highlight
         }
         Definition::Label(_) => Highlight::new(HlTag::Symbol(SymbolKind::Label)),
         Definition::BuiltinAttr(_) => Highlight::new(HlTag::Symbol(SymbolKind::BuiltinAttr)),
@@ -587,6 +623,7 @@ fn highlight_name_by_syntax(name: ast::Name) -> Highlight {
         CONST => SymbolKind::Const,
         STATIC => SymbolKind::Static,
         IDENT_PAT => SymbolKind::Local,
+        FORMAT_ARGS_ARG => SymbolKind::Local,
         _ => return default.into(),
     };
 
@@ -613,8 +650,11 @@ fn highlight_name_ref_by_syntax(
             let h = HlTag::Symbol(SymbolKind::Field);
             let is_union = ast::FieldExpr::cast(parent)
                 .and_then(|field_expr| sema.resolve_field(&field_expr))
-                .map_or(false, |field| {
-                    matches!(field.parent_def(sema.db), hir::VariantDef::Union(_))
+                .map_or(false, |field| match field {
+                    Either::Left(field) => {
+                        matches!(field.parent_def(sema.db), hir::VariantDef::Union(_))
+                    }
+                    Either::Right(_) => false,
                 });
             if is_union {
                 h | HlMod::Unsafe
@@ -672,14 +712,12 @@ fn is_consumed_lvalue(node: &SyntaxNode, local: &hir::Local, db: &RootDatabase) 
 
 /// Returns true if the parent nodes of `node` all match the `SyntaxKind`s in `kinds` exactly.
 fn parents_match(mut node: NodeOrToken<SyntaxNode, SyntaxToken>, mut kinds: &[SyntaxKind]) -> bool {
-    while let (Some(parent), [kind, rest @ ..]) = (&node.parent(), kinds) {
+    while let (Some(parent), [kind, rest @ ..]) = (node.parent(), kinds) {
         if parent.kind() != *kind {
             return false;
         }
 
-        // FIXME: Would be nice to get parent out of the match, but binding by-move and by-value
-        // in the same pattern is unstable: rust-lang/rust#68354.
-        node = node.parent().unwrap().into();
+        node = parent.into();
         kinds = rest;
     }
 

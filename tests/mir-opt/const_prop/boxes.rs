@@ -1,14 +1,19 @@
-// unit-test: ConstProp
+// unit-test: GVN
 // compile-flags: -O
-// ignore-emscripten compiled with panic=abort by default
-// ignore-wasm32
-// ignore-wasm64
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 
-#![feature(box_syntax)]
+#![feature(rustc_attrs, stmt_expr_attributes)]
 
-// Note: this test verifies that we, in fact, do not const prop `box`
+// Note: this test verifies that we, in fact, do not const prop `#[rustc_box]`
 
-// EMIT_MIR boxes.main.ConstProp.diff
+// EMIT_MIR boxes.main.GVN.diff
 fn main() {
-    let x = *(box 42) + 0;
+    // CHECK-LABEL: fn main(
+    // CHECK: debug x => [[x:_.*]];
+    // CHECK: (*{{_.*}}) = const 42_i32;
+    // CHECK: [[tmp:_.*]] = (*{{_.*}});
+    // CHECK: [[x]] = Add(move [[tmp]], const 0_i32);
+    let x = *(#[rustc_box]
+    Box::new(42))
+        + 0;
 }

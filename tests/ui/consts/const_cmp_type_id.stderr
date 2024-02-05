@@ -1,0 +1,28 @@
+error[E0131]: `main` function is not allowed to have generic parameters
+  --> $DIR/const_cmp_type_id.rs:7:14
+   |
+LL | const fn main() {
+   |              ^ `main` cannot have generic parameters
+
+error[E0308]: mismatched types
+  --> $DIR/const_cmp_type_id.rs:8:13
+   |
+LL |     assert!(TypeId::of::<u8>() == TypeId::of::<u8>());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `host`, found `true`
+   |
+   = note: expected constant `host`
+              found constant `true`
+
+error[E0308]: mismatched types
+  --> $DIR/const_cmp_type_id.rs:9:13
+   |
+LL |     assert!(TypeId::of::<()>() != TypeId::of::<u8>());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `host`, found `true`
+   |
+   = note: expected constant `host`
+              found constant `true`
+
+error: aborting due to 3 previous errors
+
+Some errors have detailed explanations: E0131, E0308.
+For more information about an error, try `rustc --explain E0131`.

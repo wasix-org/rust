@@ -7,14 +7,27 @@ use crate::raw_vec::RawVec;
 use core::array;
 use core::fmt;
 use core::iter::{
-    FusedIterator, InPlaceIterable, SourceIter, TrustedLen, TrustedRandomAccessNoCoerce,
+    FusedIterator, InPlaceIterable, SourceIter, TrustedFused, TrustedLen,
+    TrustedRandomAccessNoCoerce,
 };
 use core::marker::PhantomData;
 use core::mem::{self, ManuallyDrop, MaybeUninit, SizedTypeProperties};
+use core::num::NonZeroUsize;
 #[cfg(not(no_global_oom_handling))]
 use core::ops::Deref;
 use core::ptr::{self, NonNull};
 use core::slice::{self};
+
+macro non_null {
+    (mut $place:expr, $t:ident) => {{
+        #![allow(unused_unsafe)] // we're sometimes used within an unsafe block
+        unsafe { &mut *(ptr::addr_of_mut!($place) as *mut NonNull<$t>) }
+    }},
+    ($place:expr, $t:ident) => {{
+        #![allow(unused_unsafe)] // we're sometimes used within an unsafe block
+        unsafe { *(ptr::addr_of!($place) as *const NonNull<$t>) }
+    }},
+}
 
 /// An iterator that moves out of a vector.
 ///
@@ -39,10 +52,12 @@ pub struct IntoIter<
     // the drop impl reconstructs a RawVec from buf, cap and alloc
     // to avoid dropping the allocator twice we need to wrap it into ManuallyDrop
     pub(super) alloc: ManuallyDrop<A>,
-    pub(super) ptr: *const T,
-    pub(super) end: *const T, // If T is a ZST, this is actually ptr+len. This encoding is picked so that
-                              // ptr == end is a quick test for the Iterator being empty, that works
-                              // for both ZST and non-ZST.
+    pub(super) ptr: NonNull<T>,
+    /// If T is a ZST, this is actually ptr+len. This encoding is picked so that
+    /// ptr == end is a quick test for the Iterator being empty, that works
+    /// for both ZST and non-ZST.
+    /// For non-ZSTs the pointer is treated as `NonNull<T>`
+    pub(super) end: *const T,
 }
 
 #[stable(feature = "vec_intoiter_debug", since = "1.13.0")]
@@ -66,7 +81,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
     /// ```
     #[stable(feature = "vec_into_iter_as_slice", since = "1.15.0")]
     pub fn as_slice(&self) -> &[T] {
-        unsafe { slice::from_raw_parts(self.ptr, self.len()) }
+        unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.len()) }
     }
 
     /// Returns the remaining items of this iterator as a mutable slice.
@@ -95,7 +110,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
     }
 
     fn as_raw_mut_slice(&mut self) -> *mut [T] {
-        ptr::slice_from_raw_parts_mut(self.ptr as *mut T, self.len())
+        ptr::slice_from_raw_parts_mut(self.ptr.as_ptr(), self.len())
     }
 
     /// Drops remaining elements and relinquishes the backing allocation.
@@ -107,7 +122,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
     /// ```
     /// # let mut into_iter = Vec::<u8>::with_capacity(10).into_iter();
     /// let mut into_iter = std::mem::replace(&mut into_iter, Vec::new().into_iter());
-    /// (&mut into_iter).for_each(core::mem::drop);
+    /// (&mut into_iter).for_each(drop);
     /// std::mem::forget(into_iter);
     /// ```
     ///
@@ -122,7 +137,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
         // this creates less assembly
         self.cap = 0;
         self.buf = unsafe { NonNull::new_unchecked(RawVec::NEW.ptr()) };
-        self.ptr = self.buf.as_ptr();
+        self.ptr = self.buf;
         self.end = self.buf.as_ptr();
 
         // Dropping the remaining elements can panic, so this needs to be
@@ -134,9 +149,9 @@ impl<T, A: Allocator> IntoIter<T, A> {
 
     /// Forgets to Drop the remaining elements while still allowing the backing allocation to be freed.
     pub(crate) fn forget_remaining_elements(&mut self) {
-        // For th ZST case, it is crucial that we mutate `end` here, not `ptr`.
+        // For the ZST case, it is crucial that we mutate `end` here, not `ptr`.
         // `ptr` must stay aligned, while `end` may be unaligned.
-        self.end = self.ptr;
+        self.end = self.ptr.as_ptr();
     }
 
     #[cfg(not(no_global_oom_handling))]
@@ -158,7 +173,7 @@ impl<T, A: Allocator> IntoIter<T, A> {
                 // say that they're all at the beginning of the "allocation".
                 0..this.len()
             } else {
-                this.ptr.sub_ptr(buf)..this.end.sub_ptr(buf)
+                this.ptr.sub_ptr(this.buf)..this.end.sub_ptr(buf)
             };
             let cap = this.cap;
             let alloc = ManuallyDrop::take(&mut this.alloc);
@@ -185,37 +200,43 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
 
     #[inline]
     fn next(&mut self) -> Option<T> {
-        if self.ptr == self.end {
-            None
-        } else if T::IS_ZST {
-            // `ptr` has to stay where it is to remain aligned, so we reduce the length by 1 by
-            // reducing the `end`.
-            self.end = self.end.wrapping_byte_sub(1);
+        if T::IS_ZST {
+            if self.ptr.as_ptr() == self.end as *mut _ {
+                None
+            } else {
+                // `ptr` has to stay where it is to remain aligned, so we reduce the length by 1 by
+                // reducing the `end`.
+                self.end = self.end.wrapping_byte_sub(1);
 
-            // Make up a value of this ZST.
-            Some(unsafe { mem::zeroed() })
+                // Make up a value of this ZST.
+                Some(unsafe { mem::zeroed() })
+            }
         } else {
-            let old = self.ptr;
-            self.ptr = unsafe { self.ptr.add(1) };
+            if self.ptr == non_null!(self.end, T) {
+                None
+            } else {
+                let old = self.ptr;
+                self.ptr = unsafe { old.add(1) };
 
-            Some(unsafe { ptr::read(old) })
+                Some(unsafe { ptr::read(old.as_ptr()) })
+            }
         }
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let exact = if T::IS_ZST {
-            self.end.addr().wrapping_sub(self.ptr.addr())
+            self.end.addr().wrapping_sub(self.ptr.as_ptr().addr())
         } else {
-            unsafe { self.end.sub_ptr(self.ptr) }
+            unsafe { non_null!(self.end, T).sub_ptr(self.ptr) }
         };
         (exact, Some(exact))
     }
 
     #[inline]
-    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+    fn advance_by(&mut self, n: usize) -> Result<(), NonZeroUsize> {
         let step_size = self.len().min(n);
-        let to_drop = ptr::slice_from_raw_parts_mut(self.ptr as *mut T, step_size);
+        let to_drop = ptr::slice_from_raw_parts_mut(self.ptr.as_ptr(), step_size);
         if T::IS_ZST {
             // See `next` for why we sub `end` here.
             self.end = self.end.wrapping_byte_sub(step_size);
@@ -227,10 +248,7 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
         unsafe {
             ptr::drop_in_place(to_drop);
         }
-        if step_size < n {
-            return Err(step_size);
-        }
-        Ok(())
+        NonZeroUsize::new(n - step_size).map_or(Ok(()), Err)
     }
 
     #[inline]
@@ -260,7 +278,7 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
             // Safety: `len` indicates that this many elements are available and we just checked that
             // it fits into the array.
             unsafe {
-                ptr::copy_nonoverlapping(self.ptr, raw_ary.as_mut_ptr() as *mut T, len);
+                ptr::copy_nonoverlapping(self.ptr.as_ptr(), raw_ary.as_mut_ptr() as *mut T, len);
                 self.forget_remaining_elements();
                 return Err(array::IntoIter::new_unchecked(raw_ary, 0..len));
             }
@@ -269,7 +287,7 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
         // Safety: `len` is larger than the array size. Copy a fixed amount here to fully initialize
         // the array.
         return unsafe {
-            ptr::copy_nonoverlapping(self.ptr, raw_ary.as_mut_ptr() as *mut T, N);
+            ptr::copy_nonoverlapping(self.ptr.as_ptr(), raw_ary.as_mut_ptr() as *mut T, N);
             self.ptr = self.ptr.add(N);
             Ok(raw_ary.transpose().assume_init())
         };
@@ -287,9 +305,7 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
         // Also note the implementation of `Self: TrustedRandomAccess` requires
         // that `T: Copy` so reading elements from the buffer doesn't invalidate
         // them for `Drop`.
-        unsafe {
-            if T::IS_ZST { mem::zeroed() } else { ptr::read(self.ptr.add(i)) }
-        }
+        unsafe { if T::IS_ZST { mem::zeroed() } else { self.ptr.add(i).read() } }
     }
 }
 
@@ -297,23 +313,30 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
 impl<T, A: Allocator> DoubleEndedIterator for IntoIter<T, A> {
     #[inline]
     fn next_back(&mut self) -> Option<T> {
-        if self.end == self.ptr {
-            None
-        } else if T::IS_ZST {
-            // See above for why 'ptr.offset' isn't used
-            self.end = self.end.wrapping_byte_sub(1);
+        if T::IS_ZST {
+            if self.end as *mut _ == self.ptr.as_ptr() {
+                None
+            } else {
+                // See above for why 'ptr.offset' isn't used
+                self.end = self.end.wrapping_byte_sub(1);
 
-            // Make up a value of this ZST.
-            Some(unsafe { mem::zeroed() })
+                // Make up a value of this ZST.
+                Some(unsafe { mem::zeroed() })
+            }
         } else {
-            self.end = unsafe { self.end.sub(1) };
+            if non_null!(self.end, T) == self.ptr {
+                None
+            } else {
+                let new_end = unsafe { non_null!(self.end, T).sub(1) };
+                *non_null!(mut self.end, T) = new_end;
 
-            Some(unsafe { ptr::read(self.end) })
+                Some(unsafe { ptr::read(new_end.as_ptr()) })
+            }
         }
     }
 
     #[inline]
-    fn advance_back_by(&mut self, n: usize) -> Result<(), usize> {
+    fn advance_back_by(&mut self, n: usize) -> Result<(), NonZeroUsize> {
         let step_size = self.len().min(n);
         if T::IS_ZST {
             // SAFETY: same as for advance_by()
@@ -327,25 +350,48 @@ impl<T, A: Allocator> DoubleEndedIterator for IntoIter<T, A> {
         unsafe {
             ptr::drop_in_place(to_drop);
         }
-        if step_size < n {
-            return Err(step_size);
-        }
-        Ok(())
+        NonZeroUsize::new(n - step_size).map_or(Ok(()), Err)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T, A: Allocator> ExactSizeIterator for IntoIter<T, A> {
     fn is_empty(&self) -> bool {
-        self.ptr == self.end
+        if T::IS_ZST {
+            self.ptr.as_ptr() == self.end as *mut _
+        } else {
+            self.ptr == non_null!(self.end, T)
+        }
     }
 }
 
 #[stable(feature = "fused", since = "1.26.0")]
 impl<T, A: Allocator> FusedIterator for IntoIter<T, A> {}
 
+#[doc(hidden)]
+#[unstable(issue = "none", feature = "trusted_fused")]
+unsafe impl<T, A: Allocator> TrustedFused for IntoIter<T, A> {}
+
 #[unstable(feature = "trusted_len", issue = "37572")]
 unsafe impl<T, A: Allocator> TrustedLen for IntoIter<T, A> {}
+
+#[stable(feature = "default_iters", since = "1.70.0")]
+impl<T, A> Default for IntoIter<T, A>
+where
+    A: Allocator + Default,
+{
+    /// Creates an empty `vec::IntoIter`.
+    ///
+    /// ```
+    /// # use std::vec;
+    /// let iter: vec::IntoIter<u8> = Default::default();
+    /// assert_eq!(iter.len(), 0);
+    /// assert_eq!(iter.as_slice(), &[]);
+    /// ```
+    fn default() -> Self {
+        super::Vec::new_in(Default::default()).into_iter()
+    }
+}
 
 #[doc(hidden)]
 #[unstable(issue = "none", feature = "std_internals")]
@@ -410,7 +456,10 @@ unsafe impl<#[may_dangle] T, A: Allocator> Drop for IntoIter<T, A> {
 // also refer to the vec::in_place_collect module documentation to get an overview
 #[unstable(issue = "none", feature = "inplace_iteration")]
 #[doc(hidden)]
-unsafe impl<T, A: Allocator> InPlaceIterable for IntoIter<T, A> {}
+unsafe impl<T, A: Allocator> InPlaceIterable for IntoIter<T, A> {
+    const EXPAND_BY: Option<NonZeroUsize> = NonZeroUsize::new(1);
+    const MERGE_BY: Option<NonZeroUsize> = NonZeroUsize::new(1);
+}
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
 #[doc(hidden)]

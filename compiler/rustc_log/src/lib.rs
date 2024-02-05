@@ -14,7 +14,7 @@
 //!
 //! ```
 //! fn main() {
-//!     rustc_log::init_env_logger("LOG").unwrap();
+//!     rustc_log::init_logger(rustc_log::LoggerConfig::from_env("LOG")).unwrap();
 //!
 //!     let edition = rustc_span::edition::Edition::Edition2021;
 //!     rustc_span::create_session_globals_then(edition, || {
@@ -23,10 +23,10 @@
 //! }
 //! ```
 //!
-//! Now `LOG=debug cargo run` will run your minimal main.rs and show
+//! Now `LOG=debug cargo +nightly run` will run your minimal main.rs and show
 //! rustc's debug logging. In a workflow like this, one might also add
 //! `std::env::set_var("LOG", "debug")` to the top of main so that `cargo
-//! run` by itself is sufficient to get logs.
+//! +nightly run` by itself is sufficient to get logs.
 //!
 //! The reason rustc_log is a tiny separate crate, as opposed to exposing the
 //! same things in rustc_driver only, is to enable the above workflow. If you
@@ -40,7 +40,6 @@
 
 #![deny(rustc::untranslatable_diagnostic)]
 #![deny(rustc::diagnostic_outside_of_impl)]
-#![feature(is_terminal)]
 
 use std::env::{self, VarError};
 use std::fmt::{self, Display};
@@ -53,13 +52,36 @@ use tracing_subscriber::fmt::{
 };
 use tracing_subscriber::layer::SubscriberExt;
 
-pub fn init_env_logger(env: &str) -> Result<(), Error> {
-    let filter = match env::var(env) {
+/// The values of all the environment variables that matter for configuring a logger.
+/// Errors are explicitly preserved so that we can share error handling.
+pub struct LoggerConfig {
+    pub filter: Result<String, VarError>,
+    pub color_logs: Result<String, VarError>,
+    pub verbose_entry_exit: Result<String, VarError>,
+    pub verbose_thread_ids: Result<String, VarError>,
+    pub backtrace: Result<String, VarError>,
+}
+
+impl LoggerConfig {
+    pub fn from_env(env: &str) -> Self {
+        LoggerConfig {
+            filter: env::var(env),
+            color_logs: env::var(format!("{env}_COLOR")),
+            verbose_entry_exit: env::var(format!("{env}_ENTRY_EXIT")),
+            verbose_thread_ids: env::var(format!("{env}_THREAD_IDS")),
+            backtrace: env::var(format!("{env}_BACKTRACE")),
+        }
+    }
+}
+
+/// Initialize the logger with the given values for the filter, coloring, and other options env variables.
+pub fn init_logger(cfg: LoggerConfig) -> Result<(), Error> {
+    let filter = match cfg.filter {
         Ok(env) => EnvFilter::new(env),
         _ => EnvFilter::default().add_directive(Directive::from(LevelFilter::WARN)),
     };
 
-    let color_logs = match env::var(String::from(env) + "_COLOR") {
+    let color_logs = match cfg.color_logs {
         Ok(value) => match value.as_ref() {
             "always" => true,
             "never" => false,
@@ -70,9 +92,14 @@ pub fn init_env_logger(env: &str) -> Result<(), Error> {
         Err(VarError::NotUnicode(_value)) => return Err(Error::NonUnicodeColorValue),
     };
 
-    let verbose_entry_exit = match env::var_os(String::from(env) + "_ENTRY_EXIT") {
-        None => false,
-        Some(v) => &v != "0",
+    let verbose_entry_exit = match cfg.verbose_entry_exit {
+        Ok(v) => &v != "0",
+        Err(_) => false,
+    };
+
+    let verbose_thread_ids = match cfg.verbose_thread_ids {
+        Ok(v) => &v == "1",
+        Err(_) => false,
     };
 
     let layer = tracing_tree::HierarchicalLayer::default()
@@ -82,12 +109,12 @@ pub fn init_env_logger(env: &str) -> Result<(), Error> {
         .with_targets(true)
         .with_verbose_exit(verbose_entry_exit)
         .with_verbose_entry(verbose_entry_exit)
-        .with_indent_amount(2);
-    #[cfg(parallel_compiler)]
-    let layer = layer.with_thread_ids(true).with_thread_names(true);
+        .with_indent_amount(2)
+        .with_thread_ids(verbose_thread_ids)
+        .with_thread_names(verbose_thread_ids);
 
     let subscriber = tracing_subscriber::Registry::default().with(filter).with(layer);
-    match env::var(format!("{env}_BACKTRACE")) {
+    match cfg.backtrace {
         Ok(str) => {
             let fmt_layer = tracing_subscriber::fmt::layer()
                 .with_writer(io::stderr)
@@ -124,7 +151,7 @@ where
             return Ok(());
         }
         let backtrace = std::backtrace::Backtrace::capture();
-        writeln!(writer, "stack backtrace: \n{:?}", backtrace)
+        writeln!(writer, "stack backtrace: \n{backtrace:?}")
     }
 }
 

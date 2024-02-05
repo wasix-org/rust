@@ -2,7 +2,7 @@
 // targets, with the exception of nvptx64-nvidia-cuda
 //
 // revisions: r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23
-// revisions: r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r44
+// revisions: r24 r25 r26 r27 r28 r29 r30 r31 r32 r33     r35 r36 r37 r38 r39 r40 r41 r42 r43 r44
 // revisions: r45 r46 r47 r48 r49 r50 r51 r52 r53 r54 r55 r56 r57 r58 r59 r60 r61 r62 r63 r64 r65
 // revisions: r66 r67 r68 r69 r70 r71 r72 r73 r74 r75 r76 r77 r78 r79 r80 r81 r82 r83 r84
 // assembly-output: emit-asm
@@ -72,8 +72,7 @@
 // [r32] needs-llvm-components: arm
 // [r33] compile-flags: --target armv7-unknown-linux-musleabihf
 // [r33] needs-llvm-components: arm
-// [r34] compile-flags: --target asmjs-unknown-emscripten
-// [r34] needs-llvm-components: webassembly
+
 // [r35] compile-flags: --target i586-pc-windows-msvc
 // [r35] needs-llvm-components: x86
 // [r36] compile-flags: --target i586-unknown-linux-gnu
@@ -152,28 +151,30 @@
 // [r72] needs-llvm-components: webassembly
 // [r73] compile-flags:--target wasm32-wasi
 // [r73] needs-llvm-components: webassembly
-// [r74] compile-flags:--target x86_64-apple-ios
-// [r74] needs-llvm-components: x86
-// [r75] compile-flags:--target x86_64-fortanix-unknown-sgx
+// [r74] compile-flags:--target wasm32-wasi-preview1-threads
+// [r74] needs-llvm-components: webassembly
+// [r75] compile-flags:--target x86_64-apple-ios
 // [r75] needs-llvm-components: x86
-// [r76] compile-flags:--target x86_64-unknown-fuchsia
+// [r76] compile-flags:--target x86_64-fortanix-unknown-sgx
 // [r76] needs-llvm-components: x86
-// [r77] compile-flags:--target x86_64-linux-android
+// [r77] compile-flags:--target x86_64-unknown-fuchsia
 // [r77] needs-llvm-components: x86
-// [r78] compile-flags:--target x86_64-sun-solaris
+// [r78] compile-flags:--target x86_64-linux-android
 // [r78] needs-llvm-components: x86
-// [r79] compile-flags:--target x86_64-unknown-freebsd
+// [r79] compile-flags:--target x86_64-pc-solaris
 // [r79] needs-llvm-components: x86
-// [r80] compile-flags:--target x86_64-unknown-illumos
+// [r80] compile-flags:--target x86_64-unknown-freebsd
 // [r80] needs-llvm-components: x86
-// [r81] compile-flags:--target x86_64-unknown-linux-gnux32
+// [r81] compile-flags:--target x86_64-unknown-illumos
 // [r81] needs-llvm-components: x86
-// [r82] compile-flags:--target x86_64-unknown-linux-musl
+// [r82] compile-flags:--target x86_64-unknown-linux-gnux32
 // [r82] needs-llvm-components: x86
-// [r83] compile-flags:--target x86_64-unknown-netbsd
+// [r83] compile-flags:--target x86_64-unknown-linux-musl
 // [r83] needs-llvm-components: x86
-// [r84] compile-flags: --target x86_64-unknown-redox
+// [r84] compile-flags:--target x86_64-unknown-netbsd
 // [r84] needs-llvm-components: x86
+// [r85] compile-flags: --target x86_64-unknown-redox
+// [r85] needs-llvm-components: x86
 // compile-flags: -Z stack-protector=all
 // compile-flags: -C opt-level=2
 

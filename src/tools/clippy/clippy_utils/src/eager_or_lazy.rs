@@ -1,7 +1,7 @@
 //! Utilities for evaluating whether eagerly evaluated expressions can be made lazy and vice versa.
 //!
 //! Things to consider:
-//!  - has the expression side-effects?
+//!  - does the expression have side-effects?
 //!  - is the expression computationally expensive?
 //!
 //! See lints:
@@ -9,16 +9,18 @@
 //!  - or-fun-call
 //!  - option-if-let-else
 
+use crate::consts::{constant, FullInt};
 use crate::ty::{all_predicates_of, is_copy};
 use crate::visitors::is_const_evaluatable;
 use rustc_hir::def::{DefKind, Res};
+use rustc_hir::def_id::DefId;
 use rustc_hir::intravisit::{walk_expr, Visitor};
-use rustc_hir::{def_id::DefId, Block, Expr, ExprKind, QPath, UnOp};
+use rustc_hir::{BinOpKind, Block, Expr, ExprKind, QPath, UnOp};
 use rustc_lint::LateContext;
-use rustc_middle::ty::{self, PredicateKind};
+use rustc_middle::ty;
+use rustc_middle::ty::adjustment::Adjust;
 use rustc_span::{sym, Symbol};
-use std::cmp;
-use std::ops;
+use std::{cmp, ops};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum EagernessSuggestion {
@@ -50,7 +52,7 @@ fn fn_eagerness(cx: &LateContext<'_>, fn_id: DefId, name: Symbol, have_one_arg: 
     let name = name.as_str();
 
     let ty = match cx.tcx.impl_of_method(fn_id) {
-        Some(id) => cx.tcx.type_of(id).subst_identity(),
+        Some(id) => cx.tcx.type_of(id).instantiate_identity(),
         None => return Lazy,
     };
 
@@ -67,19 +69,24 @@ fn fn_eagerness(cx: &LateContext<'_>, fn_id: DefId, name: Symbol, have_one_arg: 
         // Types where the only fields are generic types (or references to) with no trait bounds other
         // than marker traits.
         // Due to the limited operations on these types functions should be fairly cheap.
-        if def
-            .variants()
-            .iter()
-            .flat_map(|v| v.fields.iter())
-            .any(|x| matches!(cx.tcx.type_of(x.did).subst_identity().peel_refs().kind(), ty::Param(_)))
-            && all_predicates_of(cx.tcx, fn_id).all(|(pred, _)| match pred.kind().skip_binder() {
-                PredicateKind::Clause(ty::Clause::Trait(pred)) => cx.tcx.trait_def(pred.trait_ref.def_id).is_marker,
-                _ => true,
-            })
-            && subs.types().all(|x| matches!(x.peel_refs().kind(), ty::Param(_)))
+        if def.variants().iter().flat_map(|v| v.fields.iter()).any(|x| {
+            matches!(
+                cx.tcx.type_of(x.did).instantiate_identity().peel_refs().kind(),
+                ty::Param(_)
+            )
+        }) && all_predicates_of(cx.tcx, fn_id).all(|(pred, _)| match pred.kind().skip_binder() {
+            ty::ClauseKind::Trait(pred) => cx.tcx.trait_def(pred.trait_ref.def_id).is_marker,
+            _ => true,
+        }) && subs.types().all(|x| matches!(x.peel_refs().kind(), ty::Param(_)))
         {
             // Limit the function to either `(self) -> bool` or `(&self) -> bool`
-            match &**cx.tcx.fn_sig(fn_id).subst_identity().skip_binder().inputs_and_output {
+            match &**cx
+                .tcx
+                .fn_sig(fn_id)
+                .instantiate_identity()
+                .skip_binder()
+                .inputs_and_output
+            {
                 [arg, res] if !arg.is_mutable_ptr() && arg.peel_refs() == ty && res.is_bool() => NoChange,
                 _ => Lazy,
             }
@@ -114,6 +121,20 @@ fn expr_eagerness<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> EagernessS
             if self.eagerness == ForceNoChange {
                 return;
             }
+
+            // Autoderef through a user-defined `Deref` impl can have side-effects,
+            // so don't suggest changing it.
+            if self
+                .cx
+                .typeck_results()
+                .expr_adjustments(e)
+                .iter()
+                .any(|adj| matches!(adj.kind, Adjust::Deref(Some(_))))
+            {
+                self.eagerness |= NoChange;
+                return;
+            }
+
             match e.kind {
                 ExprKind::Call(
                     &Expr {
@@ -165,7 +186,7 @@ fn expr_eagerness<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> EagernessS
                         .type_dependent_def_id(e.hir_id)
                         .map_or(Lazy, |id| fn_eagerness(self.cx, id, name.ident.name, true));
                 },
-                ExprKind::Index(_, e) => {
+                ExprKind::Index(_, e, _) => {
                     let ty = self.cx.typeck_results().expr_ty_adjusted(e);
                     if is_copy(self.cx, ty) && !ty.is_ref() {
                         self.eagerness |= NoChange;
@@ -174,15 +195,68 @@ fn expr_eagerness<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> EagernessS
                     }
                 },
 
+                // `-i32::MIN` panics with overflow checks
+                ExprKind::Unary(UnOp::Neg, right) if constant(self.cx, self.cx.typeck_results(), right).is_none() => {
+                    self.eagerness |= NoChange;
+                },
+
+                // Custom `Deref` impl might have side effects
+                ExprKind::Unary(UnOp::Deref, e)
+                    if self.cx.typeck_results().expr_ty(e).builtin_deref(true).is_none() =>
+                {
+                    self.eagerness |= NoChange;
+                },
                 // Dereferences should be cheap, but dereferencing a raw pointer earlier may not be safe.
                 ExprKind::Unary(UnOp::Deref, e) if !self.cx.typeck_results().expr_ty(e).is_unsafe_ptr() => (),
                 ExprKind::Unary(UnOp::Deref, _) => self.eagerness |= NoChange,
-
                 ExprKind::Unary(_, e)
                     if matches!(
                         self.cx.typeck_results().expr_ty(e).kind(),
                         ty::Bool | ty::Int(_) | ty::Uint(_),
                     ) => {},
+
+                // `>>` and `<<` panic when the right-hand side is greater than or equal to the number of bits in the
+                // type of the left-hand side, or is negative.
+                // We intentionally only check if the right-hand isn't a constant, because even if the suggestion would
+                // overflow with constants, the compiler emits an error for it and the programmer will have to fix it.
+                // Thus, we would realistically only delay the lint.
+                ExprKind::Binary(op, _, right)
+                    if matches!(op.node, BinOpKind::Shl | BinOpKind::Shr)
+                        && constant(self.cx, self.cx.typeck_results(), right).is_none() =>
+                {
+                    self.eagerness |= NoChange;
+                },
+
+                ExprKind::Binary(op, left, right)
+                    if matches!(op.node, BinOpKind::Div | BinOpKind::Rem)
+                        && let right_ty = self.cx.typeck_results().expr_ty(right)
+                        && let left = constant(self.cx, self.cx.typeck_results(), left)
+                        && let right = constant(self.cx, self.cx.typeck_results(), right)
+                            .and_then(|c| c.int_value(self.cx, right_ty))
+                        && matches!(
+                            (left, right),
+                            // `1 / x`: x might be zero
+                            (_, None)
+                            // `x / -1`: x might be T::MIN
+                            | (None, Some(FullInt::S(-1)))
+                        ) =>
+                {
+                    self.eagerness |= NoChange;
+                },
+
+                // Similar to `>>` and `<<`, we only want to avoid linting entirely if either side is unknown and the
+                // compiler can't emit an error for an overflowing expression.
+                // Suggesting eagerness for `true.then(|| i32::MAX + 1)` is okay because the compiler will emit an
+                // error and it's good to have the eagerness warning up front when the user fixes the logic error.
+                ExprKind::Binary(op, left, right)
+                    if matches!(op.node, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul)
+                        && !self.cx.typeck_results().expr_ty(e).is_floating_point()
+                        && (constant(self.cx, self.cx.typeck_results(), left).is_none()
+                            || constant(self.cx, self.cx.typeck_results(), right).is_none()) =>
+                {
+                    self.eagerness |= NoChange;
+                },
+
                 ExprKind::Binary(_, lhs, rhs)
                     if self.cx.typeck_results().expr_ty(lhs).is_primitive()
                         && self.cx.typeck_results().expr_ty(rhs).is_primitive() => {},
@@ -191,6 +265,7 @@ fn expr_eagerness<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> EagernessS
                 ExprKind::Break(..)
                 | ExprKind::Continue(_)
                 | ExprKind::Ret(_)
+                | ExprKind::Become(_)
                 | ExprKind::InlineAsm(_)
                 | ExprKind::Yield(..)
                 | ExprKind::Err(_) => {
@@ -199,11 +274,9 @@ fn expr_eagerness<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> EagernessS
                 },
 
                 // Memory allocation, custom operator, loop, or call to an unknown function
-                ExprKind::Box(_)
-                | ExprKind::Unary(..)
-                | ExprKind::Binary(..)
-                | ExprKind::Loop(..)
-                | ExprKind::Call(..) => self.eagerness = Lazy,
+                ExprKind::Unary(..) | ExprKind::Binary(..) | ExprKind::Loop(..) | ExprKind::Call(..) => {
+                    self.eagerness = Lazy;
+                },
 
                 ExprKind::ConstBlock(_)
                 | ExprKind::Array(_)
@@ -220,7 +293,8 @@ fn expr_eagerness<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> EagernessS
                 | ExprKind::AddrOf(..)
                 | ExprKind::Struct(..)
                 | ExprKind::Repeat(..)
-                | ExprKind::Block(Block { stmts: [], .. }, _) => (),
+                | ExprKind::Block(Block { stmts: [], .. }, _)
+                | ExprKind::OffsetOf(..) => (),
 
                 // Assignment might be to a local defined earlier, so don't eagerly evaluate.
                 // Blocks with multiple statements might be expensive, so don't eagerly evaluate.

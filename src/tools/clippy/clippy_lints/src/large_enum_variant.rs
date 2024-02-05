@@ -1,17 +1,15 @@
 //! lint when there is a large size difference between variants on an enum
 
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::source::snippet_with_applicability;
-use clippy_utils::{
-    diagnostics::span_lint_and_then,
-    ty::{approx_ty_size, is_copy, AdtVariantInfo},
-};
+use clippy_utils::ty::{approx_ty_size, is_copy, AdtVariantInfo};
 use rustc_errors::Applicability;
 use rustc_hir::{Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::{Adt, Ty};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::source_map::Span;
+use rustc_session::impl_lint_pass;
+use rustc_span::Span;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -40,7 +38,7 @@ declare_clippy_lint! {
     /// this may lead to a false positive.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// enum Test {
     ///     A(i32),
     ///     B([i32; 8000]),
@@ -48,7 +46,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// // Possibly better
     /// enum Test2 {
     ///     A(i32),
@@ -83,7 +81,7 @@ impl<'tcx> LateLintPass<'tcx> for LargeEnumVariant {
             return;
         }
         if let ItemKind::Enum(ref def, _) = item.kind {
-            let ty = cx.tcx.type_of(item.owner_id).subst_identity();
+            let ty = cx.tcx.type_of(item.owner_id).instantiate_identity();
             let Adt(adt, subst) = ty.kind() else {
                 panic!("already checked whether this is an enum")
             };
@@ -169,8 +167,8 @@ impl<'tcx> LateLintPass<'tcx> for LargeEnumVariant {
 }
 
 fn maybe_copy<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
-    if let Adt(_def, substs) = ty.kind()
-        && substs.types().next().is_some()
+    if let Adt(_def, args) = ty.kind()
+        && args.types().next().is_some()
         && let Some(copy_trait) = cx.tcx.lang_items().copy_trait()
     {
         return cx.tcx.non_blanket_impls_for_ty(copy_trait, ty).next().is_some();

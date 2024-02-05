@@ -1,4 +1,5 @@
-// ignore-wasm32-bare compiled with panic=abort by default
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 
 // Ensure that there are no drop terminators in `unwrap<T>` (except the one along the cleanup
 // path).

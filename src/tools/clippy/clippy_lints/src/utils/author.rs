@@ -7,15 +7,16 @@ use rustc_ast::LitIntType;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir as hir;
 use rustc_hir::{
-    ArrayLen, BindingAnnotation, Closure, ExprKind, FnRetTy, HirId, Lit, PatKind, QPath, StmtKind, TyKind,
+    ArrayLen, BindingAnnotation, CaptureBy, Closure, ClosureKind, CoroutineKind, ExprKind, FnRetTy, HirId, Lit,
+    PatKind, QPath, StmtKind, TyKind,
 };
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::symbol::{Ident, Symbol};
 use std::cell::Cell;
 use std::fmt::{Display, Formatter, Write as _};
 
-declare_clippy_lint! {
+declare_lint_pass!(
     /// ### What it does
     /// Generates clippy code that detects the offending pattern
     ///
@@ -47,12 +48,8 @@ declare_clippy_lint! {
     ///     // report your lint here
     /// }
     /// ```
-    pub LINT_AUTHOR,
-    internal_warn,
-    "helper for writing lints"
-}
-
-declare_lint_pass!(Author => [LINT_AUTHOR]);
+    Author => []
+);
 
 /// Writes a line of output with indentation added
 macro_rules! out {
@@ -268,8 +265,8 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
     fn qpath(&self, qpath: &Binding<&QPath<'_>>) {
         if let QPath::LangItem(lang_item, ..) = *qpath.value {
             chain!(self, "matches!({qpath}, QPath::LangItem(LangItem::{lang_item:?}, _))");
-        } else {
-            chain!(self, "match_qpath({qpath}, &[{}])", path_to_string(qpath.value));
+        } else if let Ok(path) = path_to_string(qpath.value) {
+            chain!(self, "match_qpath({qpath}, &[{}])", path);
         }
     }
 
@@ -304,6 +301,11 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 kind!("ByteStr(ref {vec})");
                 chain!(self, "let [{:?}] = **{vec}", vec.value);
             },
+            LitKind::CStr(ref vec, _) => {
+                bind!(self, vec);
+                kind!("CStr(ref {vec})");
+                chain!(self, "let [{:?}] = **{vec}", vec.value);
+            },
             LitKind::Str(s, _) => {
                 bind!(self, s);
                 kind!("Str({s}, _)");
@@ -316,16 +318,10 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
         self.pat(field!(arm.pat));
         match arm.value.guard {
             None => chain!(self, "{arm}.guard.is_none()"),
-            Some(hir::Guard::If(expr)) => {
+            Some(expr) => {
                 bind!(self, expr);
-                chain!(self, "let Some(Guard::If({expr})) = {arm}.guard");
+                chain!(self, "let Some({expr}) = {arm}.guard");
                 self.expr(expr);
-            },
-            Some(hir::Guard::IfLet(let_expr)) => {
-                bind!(self, let_expr);
-                chain!(self, "let Some(Guard::IfLet({let_expr}) = {arm}.guard");
-                self.pat(field!(let_expr.pat));
-                self.expr(field!(let_expr.init));
             },
         }
         self.expr(field!(arm.body));
@@ -333,7 +329,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
 
     #[allow(clippy::too_many_lines)]
     fn expr(&self, expr: &Binding<&hir::Expr<'_>>) {
-        if let Some(higher::While { condition, body }) = higher::While::hir(expr.value) {
+        if let Some(higher::While { condition, body, .. }) = higher::While::hir(expr.value) {
             bind!(self, condition, body);
             chain!(
                 self,
@@ -349,6 +345,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
             let_pat,
             let_expr,
             if_then,
+            ..
         }) = higher::WhileLet::hir(expr.value)
         {
             bind!(self, let_pat, let_expr, if_then);
@@ -395,11 +392,6 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 }
                 self.expr(field!(let_expr.init));
             },
-            ExprKind::Box(inner) => {
-                bind!(self, inner);
-                kind!("Box({inner})");
-                self.expr(inner);
-            },
             ExprKind::Array(elements) => {
                 bind!(self, elements);
                 kind!("Array({elements})");
@@ -435,7 +427,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 kind!("Unary(UnOp::{op:?}, {inner})");
                 self.expr(inner);
             },
-            ExprKind::Lit(ref lit) => {
+            ExprKind::Lit(lit) => {
                 bind!(self, lit);
                 kind!("Lit(ref {lit})");
                 self.lit(lit);
@@ -480,10 +472,25 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 capture_clause,
                 fn_decl,
                 body: body_id,
-                movability,
+                kind,
                 ..
             }) => {
-                let movability = OptionPat::new(movability.map(|m| format!("Movability::{m:?}")));
+                let capture_clause = match capture_clause {
+                    CaptureBy::Value { .. } => "Value { .. }",
+                    CaptureBy::Ref => "Ref",
+                };
+
+                let closure_kind = match kind {
+                    ClosureKind::Closure => "ClosureKind::Closure".to_string(),
+                    ClosureKind::Coroutine(coroutine_kind) => match coroutine_kind {
+                        CoroutineKind::Desugared(desugaring, source) => format!(
+                            "ClosureKind::Coroutine(CoroutineKind::Desugared(CoroutineDesugaring::{desugaring:?}, CoroutineSource::{source:?}))"
+                        ),
+                        CoroutineKind::Coroutine(movability) => {
+                            format!("ClosureKind::Coroutine(CoroutineKind::Coroutine(Movability::{movability:?})")
+                        },
+                    },
+                };
 
                 let ret_ty = match fn_decl.output {
                     FnRetTy::DefaultReturn(_) => "FnRetTy::DefaultReturn(_)",
@@ -491,7 +498,9 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 };
 
                 bind!(self, fn_decl, body_id);
-                kind!("Closure(CaptureBy::{capture_clause:?}, {fn_decl}, {body_id}, _, {movability})");
+                kind!(
+                    "Closure {{ capture_clause: CaptureBy::{capture_clause}, fn_decl: {fn_decl}, body: {body_id}, closure_kind: {closure_kind}, .. }}"
+                );
                 chain!(self, "let {ret_ty} = {fn_decl}.output");
                 self.body(body_id);
             },
@@ -526,7 +535,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 self.ident(field_name);
                 self.expr(object);
             },
-            ExprKind::Index(object, index) => {
+            ExprKind::Index(object, index, _) => {
                 bind!(self, object, index);
                 kind!("Index({object}, {index})");
                 self.expr(object);
@@ -559,9 +568,18 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 kind!("Ret({value})");
                 value.if_some(|e| self.expr(e));
             },
+            ExprKind::Become(value) => {
+                bind!(self, value);
+                kind!("Become({value})");
+                self.expr(value);
+            },
             ExprKind::InlineAsm(_) => {
                 kind!("InlineAsm(_)");
                 out!("// unimplemented: `ExprKind::InlineAsm` is not further destructured at the moment");
+            },
+            ExprKind::OffsetOf(container, ref fields) => {
+                bind!(self, container, fields);
+                kind!("OffsetOf({container}, {fields})");
             },
             ExprKind::Struct(qpath, fields, base) => {
                 bind!(self, qpath, fields);
@@ -588,7 +606,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                     },
                 }
             },
-            ExprKind::Err(_) => kind!("Err"),
+            ExprKind::Err(_) => kind!("Err(_)"),
             ExprKind::DropTemps(expr) => {
                 bind!(self, expr);
                 kind!("DropTemps({expr})");
@@ -619,6 +637,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
 
         match pat.value.kind {
             PatKind::Wild => kind!("Wild"),
+            PatKind::Never => kind!("Never"),
             PatKind::Binding(ann, _, name, sub) => {
                 bind!(self, name);
                 opt_bind!(self, sub);
@@ -729,8 +748,8 @@ fn has_attr(cx: &LateContext<'_>, hir_id: hir::HirId) -> bool {
     get_attr(cx.sess(), attrs, "author").count() > 0
 }
 
-fn path_to_string(path: &QPath<'_>) -> String {
-    fn inner(s: &mut String, path: &QPath<'_>) {
+fn path_to_string(path: &QPath<'_>) -> Result<String, ()> {
+    fn inner(s: &mut String, path: &QPath<'_>) -> Result<(), ()> {
         match *path {
             QPath::Resolved(_, path) => {
                 for (i, segment) in path.segments.iter().enumerate() {
@@ -742,16 +761,18 @@ fn path_to_string(path: &QPath<'_>) -> String {
             },
             QPath::TypeRelative(ty, segment) => match &ty.kind {
                 hir::TyKind::Path(inner_path) => {
-                    inner(s, inner_path);
+                    inner(s, inner_path)?;
                     *s += ", ";
                     write!(s, "{:?}", segment.ident.as_str()).unwrap();
                 },
                 other => write!(s, "/* unimplemented: {other:?}*/").unwrap(),
             },
-            QPath::LangItem(..) => panic!("path_to_string: called for lang item qpath"),
+            QPath::LangItem(..) => return Err(()),
         }
+
+        Ok(())
     }
     let mut s = String::new();
-    inner(&mut s, path);
-    s
+    inner(&mut s, path)?;
+    Ok(s)
 }

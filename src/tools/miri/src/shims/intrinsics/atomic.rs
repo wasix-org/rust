@@ -77,40 +77,40 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 this.atomic_compare_exchange_weak(args, dest, rw_ord(ord1)?, read_ord(ord2)?)?,
 
             ["or", ord] =>
-                this.atomic_op(args, dest, AtomicOp::MirOp(BinOp::BitOr, false), rw_ord(ord)?)?,
+                this.atomic_rmw_op(args, dest, AtomicOp::MirOp(BinOp::BitOr, false), rw_ord(ord)?)?,
             ["xor", ord] =>
-                this.atomic_op(args, dest, AtomicOp::MirOp(BinOp::BitXor, false), rw_ord(ord)?)?,
+                this.atomic_rmw_op(args, dest, AtomicOp::MirOp(BinOp::BitXor, false), rw_ord(ord)?)?,
             ["and", ord] =>
-                this.atomic_op(args, dest, AtomicOp::MirOp(BinOp::BitAnd, false), rw_ord(ord)?)?,
+                this.atomic_rmw_op(args, dest, AtomicOp::MirOp(BinOp::BitAnd, false), rw_ord(ord)?)?,
             ["nand", ord] =>
-                this.atomic_op(args, dest, AtomicOp::MirOp(BinOp::BitAnd, true), rw_ord(ord)?)?,
+                this.atomic_rmw_op(args, dest, AtomicOp::MirOp(BinOp::BitAnd, true), rw_ord(ord)?)?,
             ["xadd", ord] =>
-                this.atomic_op(args, dest, AtomicOp::MirOp(BinOp::Add, false), rw_ord(ord)?)?,
+                this.atomic_rmw_op(args, dest, AtomicOp::MirOp(BinOp::Add, false), rw_ord(ord)?)?,
             ["xsub", ord] =>
-                this.atomic_op(args, dest, AtomicOp::MirOp(BinOp::Sub, false), rw_ord(ord)?)?,
+                this.atomic_rmw_op(args, dest, AtomicOp::MirOp(BinOp::Sub, false), rw_ord(ord)?)?,
             ["min", ord] => {
                 // Later we will use the type to indicate signed vs unsigned,
                 // so make sure it matches the intrinsic name.
                 assert!(matches!(args[1].layout.ty.kind(), ty::Int(_)));
-                this.atomic_op(args, dest, AtomicOp::Min, rw_ord(ord)?)?;
+                this.atomic_rmw_op(args, dest, AtomicOp::Min, rw_ord(ord)?)?;
             }
             ["umin", ord] => {
                 // Later we will use the type to indicate signed vs unsigned,
                 // so make sure it matches the intrinsic name.
                 assert!(matches!(args[1].layout.ty.kind(), ty::Uint(_)));
-                this.atomic_op(args, dest, AtomicOp::Min, rw_ord(ord)?)?;
+                this.atomic_rmw_op(args, dest, AtomicOp::Min, rw_ord(ord)?)?;
             }
             ["max", ord] => {
                 // Later we will use the type to indicate signed vs unsigned,
                 // so make sure it matches the intrinsic name.
                 assert!(matches!(args[1].layout.ty.kind(), ty::Int(_)));
-                this.atomic_op(args, dest, AtomicOp::Max, rw_ord(ord)?)?;
+                this.atomic_rmw_op(args, dest, AtomicOp::Max, rw_ord(ord)?)?;
             }
             ["umax", ord] => {
                 // Later we will use the type to indicate signed vs unsigned,
                 // so make sure it matches the intrinsic name.
                 assert!(matches!(args[1].layout.ty.kind(), ty::Uint(_)));
-                this.atomic_op(args, dest, AtomicOp::Max, rw_ord(ord)?)?;
+                this.atomic_rmw_op(args, dest, AtomicOp::Max, rw_ord(ord)?)?;
             }
 
             _ => throw_unsup_format!("unimplemented intrinsic: `atomic_{intrinsic_name}`"),
@@ -130,7 +130,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         let this = self.eval_context_mut();
 
         let [place] = check_arg_count(args)?;
-        let place = this.deref_operand(place)?;
+        let place = this.deref_pointer(place)?;
 
         // Perform atomic load.
         let val = this.read_scalar_atomic(&place, atomic)?;
@@ -147,7 +147,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         let this = self.eval_context_mut();
 
         let [place, val] = check_arg_count(args)?;
-        let place = this.deref_operand(place)?;
+        let place = this.deref_pointer(place)?;
 
         // Perform regular load.
         let val = this.read_scalar(val)?;
@@ -178,7 +178,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         Ok(())
     }
 
-    fn atomic_op(
+    fn atomic_rmw_op(
         &mut self,
         args: &[OpTy<'tcx, Provenance>],
         dest: &PlaceTy<'tcx, Provenance>,
@@ -188,7 +188,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         let this = self.eval_context_mut();
 
         let [place, rhs] = check_arg_count(args)?;
-        let place = this.deref_operand(place)?;
+        let place = this.deref_pointer(place)?;
         let rhs = this.read_immediate(rhs)?;
 
         if !place.layout.ty.is_integral() && !place.layout.ty.is_unsafe_ptr() {
@@ -213,7 +213,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
                 Ok(())
             }
             AtomicOp::MirOp(op, neg) => {
-                let old = this.atomic_op_immediate(&place, &rhs, op, neg, atomic)?;
+                let old = this.atomic_rmw_op_immediate(&place, &rhs, op, neg, atomic)?;
                 this.write_immediate(*old, dest)?; // old value is returned
                 Ok(())
             }
@@ -229,7 +229,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         let this = self.eval_context_mut();
 
         let [place, new] = check_arg_count(args)?;
-        let place = this.deref_operand(place)?;
+        let place = this.deref_pointer(place)?;
         let new = this.read_scalar(new)?;
 
         let old = this.atomic_exchange_scalar(&place, new, atomic)?;
@@ -248,7 +248,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         let this = self.eval_context_mut();
 
         let [place, expect_old, new] = check_arg_count(args)?;
-        let place = this.deref_operand(place)?;
+        let place = this.deref_pointer(place)?;
         let expect_old = this.read_immediate(expect_old)?; // read as immediate for the sake of `binary_op()`
         let new = this.read_scalar(new)?;
 

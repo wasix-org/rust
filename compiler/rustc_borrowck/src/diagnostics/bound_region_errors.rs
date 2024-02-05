@@ -1,7 +1,7 @@
 #![deny(rustc::untranslatable_diagnostic)]
 #![deny(rustc::diagnostic_outside_of_impl)]
 
-use rustc_errors::{DiagnosticBuilder, ErrorGuaranteed};
+use rustc_errors::DiagnosticBuilder;
 use rustc_infer::infer::canonical::Canonical;
 use rustc_infer::infer::error_reporting::nice_region_error::NiceRegionError;
 use rustc_infer::infer::region_constraints::Constraint;
@@ -10,6 +10,8 @@ use rustc_infer::infer::RegionVariableOrigin;
 use rustc_infer::infer::{InferCtxt, RegionResolutionError, SubregionOrigin, TyCtxtInferExt as _};
 use rustc_infer::traits::ObligationCause;
 use rustc_middle::ty::error::TypeError;
+use rustc_middle::ty::RePlaceholder;
+use rustc_middle::ty::Region;
 use rustc_middle::ty::RegionVid;
 use rustc_middle::ty::UniverseIndex;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable};
@@ -75,7 +77,7 @@ impl<'tcx> UniverseInfo<'tcx> {
                 // up in the existing UI tests. Consider investigating this
                 // some more.
                 mbcx.buffer_error(
-                    mbcx.infcx.tcx.sess.create_err(HigherRankedSubtypeError { span: cause.span }),
+                    mbcx.dcx().create_err(HigherRankedSubtypeError { span: cause.span }),
                 );
             }
         }
@@ -128,7 +130,7 @@ impl<'tcx> ToUniverseInfo<'tcx>
     }
 }
 
-impl<'tcx, F, G> ToUniverseInfo<'tcx> for Canonical<'tcx, type_op::custom::CustomTypeOp<F, G>> {
+impl<'tcx, F> ToUniverseInfo<'tcx> for Canonical<'tcx, type_op::custom::CustomTypeOp<F>> {
     fn to_universe_info(self, _base_universe: ty::UniverseIndex) -> UniverseInfo<'tcx> {
         // We can't rerun custom type ops.
         UniverseInfo::other()
@@ -145,11 +147,7 @@ impl<'tcx> ToUniverseInfo<'tcx> for ! {
 trait TypeOpInfo<'tcx> {
     /// Returns an error to be reported if rerunning the type op fails to
     /// recover the error's cause.
-    fn fallback_error(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        span: Span,
-    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed>;
+    fn fallback_error(&self, tcx: TyCtxt<'tcx>, span: Span) -> DiagnosticBuilder<'tcx>;
 
     fn base_universe(&self) -> ty::UniverseIndex;
 
@@ -159,7 +157,7 @@ trait TypeOpInfo<'tcx> {
         cause: ObligationCause<'tcx>,
         placeholder_region: ty::Region<'tcx>,
         error_region: Option<ty::Region<'tcx>>,
-    ) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>>;
+    ) -> Option<DiagnosticBuilder<'tcx>>;
 
     #[instrument(level = "debug", skip(self, mbcx))]
     fn report_error(
@@ -180,29 +178,32 @@ trait TypeOpInfo<'tcx> {
             return;
         };
 
-        let placeholder_region = tcx.mk_re_placeholder(ty::Placeholder {
-            name: placeholder.name,
-            universe: adjusted_universe.into(),
-        });
+        let placeholder_region = ty::Region::new_placeholder(
+            tcx,
+            ty::Placeholder { universe: adjusted_universe.into(), bound: placeholder.bound },
+        );
 
-        let error_region =
-            if let RegionElement::PlaceholderRegion(error_placeholder) = error_element {
-                let adjusted_universe =
-                    error_placeholder.universe.as_u32().checked_sub(base_universe.as_u32());
-                adjusted_universe.map(|adjusted| {
-                    tcx.mk_re_placeholder(ty::Placeholder {
-                        name: error_placeholder.name,
-                        universe: adjusted.into(),
-                    })
-                })
-            } else {
-                None
-            };
+        let error_region = if let RegionElement::PlaceholderRegion(error_placeholder) =
+            error_element
+        {
+            let adjusted_universe =
+                error_placeholder.universe.as_u32().checked_sub(base_universe.as_u32());
+            adjusted_universe.map(|adjusted| {
+                ty::Region::new_placeholder(
+                    tcx,
+                    ty::Placeholder { universe: adjusted.into(), bound: error_placeholder.bound },
+                )
+            })
+        } else {
+            None
+        };
 
         debug!(?placeholder_region);
 
         let span = cause.span;
         let nice_error = self.nice_error(mbcx, cause, placeholder_region, error_region);
+
+        debug!(?nice_error);
 
         if let Some(nice_error) = nice_error {
             mbcx.buffer_error(nice_error);
@@ -219,12 +220,8 @@ struct PredicateQuery<'tcx> {
 }
 
 impl<'tcx> TypeOpInfo<'tcx> for PredicateQuery<'tcx> {
-    fn fallback_error(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        span: Span,
-    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
-        tcx.sess.create_err(HigherRankedLifetimeError {
+    fn fallback_error(&self, tcx: TyCtxt<'tcx>, span: Span) -> DiagnosticBuilder<'tcx> {
+        tcx.dcx().create_err(HigherRankedLifetimeError {
             cause: Some(HigherRankedErrorCause::CouldNotProve {
                 predicate: self.canonical_query.value.value.predicate.to_string(),
             }),
@@ -242,7 +239,7 @@ impl<'tcx> TypeOpInfo<'tcx> for PredicateQuery<'tcx> {
         cause: ObligationCause<'tcx>,
         placeholder_region: ty::Region<'tcx>,
         error_region: Option<ty::Region<'tcx>>,
-    ) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
+    ) -> Option<DiagnosticBuilder<'tcx>> {
         let (infcx, key, _) =
             mbcx.infcx.tcx.infer_ctxt().build_with_canonical(cause.span, &self.canonical_query);
         let ocx = ObligationCtxt::new(&infcx);
@@ -260,12 +257,8 @@ impl<'tcx, T> TypeOpInfo<'tcx> for NormalizeQuery<'tcx, T>
 where
     T: Copy + fmt::Display + TypeFoldable<TyCtxt<'tcx>> + 'tcx,
 {
-    fn fallback_error(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        span: Span,
-    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
-        tcx.sess.create_err(HigherRankedLifetimeError {
+    fn fallback_error(&self, tcx: TyCtxt<'tcx>, span: Span) -> DiagnosticBuilder<'tcx> {
+        tcx.dcx().create_err(HigherRankedLifetimeError {
             cause: Some(HigherRankedErrorCause::CouldNotNormalize {
                 value: self.canonical_query.value.value.value.to_string(),
             }),
@@ -283,7 +276,7 @@ where
         cause: ObligationCause<'tcx>,
         placeholder_region: ty::Region<'tcx>,
         error_region: Option<ty::Region<'tcx>>,
-    ) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
+    ) -> Option<DiagnosticBuilder<'tcx>> {
         let (infcx, key, _) =
             mbcx.infcx.tcx.infer_ctxt().build_with_canonical(cause.span, &self.canonical_query);
         let ocx = ObligationCtxt::new(&infcx);
@@ -307,14 +300,10 @@ struct AscribeUserTypeQuery<'tcx> {
 }
 
 impl<'tcx> TypeOpInfo<'tcx> for AscribeUserTypeQuery<'tcx> {
-    fn fallback_error(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        span: Span,
-    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
+    fn fallback_error(&self, tcx: TyCtxt<'tcx>, span: Span) -> DiagnosticBuilder<'tcx> {
         // FIXME: This error message isn't great, but it doesn't show up in the existing UI tests,
         // and is only the fallback when the nice error fails. Consider improving this some more.
-        tcx.sess.create_err(HigherRankedLifetimeError { cause: None, span })
+        tcx.dcx().create_err(HigherRankedLifetimeError { cause: None, span })
     }
 
     fn base_universe(&self) -> ty::UniverseIndex {
@@ -327,7 +316,7 @@ impl<'tcx> TypeOpInfo<'tcx> for AscribeUserTypeQuery<'tcx> {
         cause: ObligationCause<'tcx>,
         placeholder_region: ty::Region<'tcx>,
         error_region: Option<ty::Region<'tcx>>,
-    ) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
+    ) -> Option<DiagnosticBuilder<'tcx>> {
         let (infcx, key, _) =
             mbcx.infcx.tcx.infer_ctxt().build_with_canonical(cause.span, &self.canonical_query);
         let ocx = ObligationCtxt::new(&infcx);
@@ -337,14 +326,10 @@ impl<'tcx> TypeOpInfo<'tcx> for AscribeUserTypeQuery<'tcx> {
 }
 
 impl<'tcx> TypeOpInfo<'tcx> for crate::type_check::InstantiateOpaqueType<'tcx> {
-    fn fallback_error(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        span: Span,
-    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
+    fn fallback_error(&self, tcx: TyCtxt<'tcx>, span: Span) -> DiagnosticBuilder<'tcx> {
         // FIXME: This error message isn't great, but it doesn't show up in the existing UI tests,
         // and is only the fallback when the nice error fails. Consider improving this some more.
-        tcx.sess.create_err(HigherRankedLifetimeError { cause: None, span })
+        tcx.dcx().create_err(HigherRankedLifetimeError { cause: None, span })
     }
 
     fn base_universe(&self) -> ty::UniverseIndex {
@@ -357,7 +342,7 @@ impl<'tcx> TypeOpInfo<'tcx> for crate::type_check::InstantiateOpaqueType<'tcx> {
         _cause: ObligationCause<'tcx>,
         placeholder_region: ty::Region<'tcx>,
         error_region: Option<ty::Region<'tcx>>,
-    ) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
+    ) -> Option<DiagnosticBuilder<'tcx>> {
         try_extract_error_from_region_constraints(
             mbcx.infcx,
             placeholder_region,
@@ -378,9 +363,9 @@ fn try_extract_error_from_fulfill_cx<'tcx>(
     ocx: &ObligationCtxt<'_, 'tcx>,
     placeholder_region: ty::Region<'tcx>,
     error_region: Option<ty::Region<'tcx>>,
-) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
+) -> Option<DiagnosticBuilder<'tcx>> {
     // We generally shouldn't have errors here because the query was
-    // already run, but there's no point using `delay_span_bug`
+    // already run, but there's no point using `span_delayed_bug`
     // when we're going to emit an error here anyway.
     let _errors = ocx.select_all_or_error();
     let region_constraints = ocx.infcx.with_region_constraints(|r| r.clone());
@@ -390,7 +375,7 @@ fn try_extract_error_from_fulfill_cx<'tcx>(
         error_region,
         &region_constraints,
         |vid| ocx.infcx.region_var_origin(vid),
-        |vid| ocx.infcx.universe_of_region(ocx.infcx.tcx.mk_re_var(vid)),
+        |vid| ocx.infcx.universe_of_region(ty::Region::new_var(ocx.infcx.tcx, vid)),
     )
 }
 
@@ -402,20 +387,47 @@ fn try_extract_error_from_region_constraints<'tcx>(
     region_constraints: &RegionConstraintData<'tcx>,
     mut region_var_origin: impl FnMut(RegionVid) -> RegionVariableOrigin,
     mut universe_of_region: impl FnMut(RegionVid) -> UniverseIndex,
-) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
-    let (sub_region, cause) =
-        region_constraints.constraints.iter().find_map(|(constraint, cause)| {
-            match *constraint {
-                Constraint::RegSubReg(sub, sup) if sup == placeholder_region && sup != sub => {
-                    Some((sub, cause.clone()))
-                }
-                // FIXME: Should this check the universe of the var?
-                Constraint::VarSubReg(vid, sup) if sup == placeholder_region => {
-                    Some((infcx.tcx.mk_re_var(vid), cause.clone()))
-                }
-                _ => None,
+) -> Option<DiagnosticBuilder<'tcx>> {
+    let placeholder_universe = match placeholder_region.kind() {
+        ty::RePlaceholder(p) => p.universe,
+        ty::ReVar(vid) => universe_of_region(vid),
+        _ => ty::UniverseIndex::ROOT,
+    };
+    let matches =
+        |a_region: Region<'tcx>, b_region: Region<'tcx>| match (a_region.kind(), b_region.kind()) {
+            (RePlaceholder(a_p), RePlaceholder(b_p)) => a_p.bound == b_p.bound,
+            _ => a_region == b_region,
+        };
+    let mut check =
+        |constraint: &Constraint<'tcx>, cause: &SubregionOrigin<'tcx>, exact| match *constraint {
+            Constraint::RegSubReg(sub, sup)
+                if ((exact && sup == placeholder_region)
+                    || (!exact && matches(sup, placeholder_region)))
+                    && sup != sub =>
+            {
+                Some((sub, cause.clone()))
             }
-        })?;
+            Constraint::VarSubReg(vid, sup)
+                if (exact
+                    && sup == placeholder_region
+                    && !universe_of_region(vid).can_name(placeholder_universe))
+                    || (!exact && matches(sup, placeholder_region)) =>
+            {
+                Some((ty::Region::new_var(infcx.tcx, vid), cause.clone()))
+            }
+            _ => None,
+        };
+    let mut info = region_constraints
+        .constraints
+        .iter()
+        .find_map(|(constraint, cause)| check(constraint, cause, true));
+    if info.is_none() {
+        info = region_constraints
+            .constraints
+            .iter()
+            .find_map(|(constraint, cause)| check(constraint, cause, false));
+    }
+    let (sub_region, cause) = info?;
 
     debug!(?sub_region, "cause = {:#?}", cause);
     let error = match (error_region, *sub_region) {

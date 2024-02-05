@@ -1,4 +1,4 @@
-use syntax::{ast, AstNode};
+use syntax::{ast, AstNode, SyntaxKind, T};
 
 use crate::{AssistContext, AssistId, AssistKind, Assists};
 
@@ -39,7 +39,19 @@ pub(crate) fn remove_parentheses(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
         AssistId("remove_parentheses", AssistKind::Refactor),
         "Remove redundant parentheses",
         target,
-        |builder| builder.replace_ast(parens.into(), expr),
+        |builder| {
+            let prev_token = parens.syntax().first_token().and_then(|it| it.prev_token());
+            let need_to_add_ws = match prev_token {
+                Some(it) => {
+                    let tokens = [T![&], T![!], T!['('], T!['['], T!['{']];
+                    it.kind() != SyntaxKind::WHITESPACE && !tokens.contains(&it.kind())
+                }
+                None => false,
+            };
+            let expr = if need_to_add_ws { format!(" {}", expr) } else { expr.to_string() };
+
+            builder.replace(parens.syntax().text_range(), expr)
+        },
     )
 }
 
@@ -48,6 +60,15 @@ mod tests {
     use crate::tests::{check_assist, check_assist_not_applicable};
 
     use super::*;
+
+    #[test]
+    fn remove_parens_space() {
+        check_assist(
+            remove_parentheses,
+            r#"fn f() { match$0(true) {} }"#,
+            r#"fn f() { match true {} }"#,
+        );
+    }
 
     #[test]
     fn remove_parens_simple() {
@@ -94,8 +115,8 @@ mod tests {
         check_assist(remove_parentheses, r#"fn f() { f(($02 + 2)); }"#, r#"fn f() { f(2 + 2); }"#);
         check_assist(
             remove_parentheses,
-            r#"fn f() { (1<2)&&$0(3>4); }"#,
-            r#"fn f() { (1<2)&&3>4; }"#,
+            r#"fn f() { (1<2) &&$0(3>4); }"#,
+            r#"fn f() { (1<2) && 3>4; }"#,
         );
     }
 
@@ -124,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_parens_doesnt_apply_weird_syntax_and_adge_cases() {
+    fn remove_parens_doesnt_apply_weird_syntax_and_edge_cases() {
         // removing `()` would break code because {} would be counted as the loop/if body
         check_assist_not_applicable(remove_parentheses, r#"fn f() { for _ in $0(0..{3}) {} }"#);
         check_assist_not_applicable(remove_parentheses, r#"fn f() { for _ in $0(S {}) {} }"#);
@@ -164,8 +185,8 @@ mod tests {
     fn remove_parens_weird_places() {
         check_assist(
             remove_parentheses,
-            r#"fn f() { match () { _=>$0(()) } }"#,
-            r#"fn f() { match () { _=>() } }"#,
+            r#"fn f() { match () { _ =>$0(()) } }"#,
+            r#"fn f() { match () { _ => () } }"#,
         );
 
         check_assist(

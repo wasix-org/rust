@@ -1,4 +1,4 @@
-//! Checks for uses of mutex where an atomic value could be used
+//! Checks for usage of mutex where an atomic value could be used
 //!
 //! This lint is **allow** by default
 
@@ -7,12 +7,12 @@ use clippy_utils::ty::is_type_diagnostic_item;
 use rustc_hir::Expr;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{self, Ty};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for usages of `Mutex<X>` where an atomic will do.
+    /// Checks for usage of `Mutex<X>` where an atomic will do.
     ///
     /// ### Why is this bad?
     /// Using a mutex just to make access to a plain bool or
@@ -29,14 +29,14 @@ declare_clippy_lint! {
     /// for waiting before a critical section.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let y = true;
     /// # use std::sync::Mutex;
     /// let x = Mutex::new(&y);
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let y = true;
     /// # use std::sync::atomic::AtomicBool;
     /// let x = AtomicBool::new(y);
@@ -49,7 +49,7 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for usages of `Mutex<X>` where `X` is an integral
+    /// Checks for usage of `Mutex<X>` where `X` is an integral
     /// type.
     ///
     /// ### Why is this bad?
@@ -62,13 +62,13 @@ declare_clippy_lint! {
     /// for waiting before a critical section.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::sync::Mutex;
     /// let x = Mutex::new(0usize);
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # use std::sync::atomic::AtomicUsize;
     /// let x = AtomicUsize::new(0usize);
     /// ```

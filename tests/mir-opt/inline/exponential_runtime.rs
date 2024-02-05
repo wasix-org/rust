@@ -1,3 +1,4 @@
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // Checks that code with exponential runtime does not have exponential behavior in inlining.
 
 trait A {
@@ -83,5 +84,14 @@ impl A for () {
 
 // EMIT_MIR exponential_runtime.main.Inline.diff
 fn main() {
+    // CHECK-LABEL: fn main(
+    // CHECK-NOT: inlined
+    // CHECK: (inlined <() as G>::call)
+    // CHECK: (inlined <() as F>::call)
+    // CHECK: (inlined <() as E>::call)
+    // CHECK: (inlined <() as D>::call)
+    // CHECK: (inlined <() as C>::call)
+    // CHECK: (inlined <() as B>::call)
+    // CHECK-NOT: inlined
     <() as G>::call();
 }

@@ -1,10 +1,8 @@
-// run-rustfix
-
-#![warn(clippy::unwrap_or_else_default)]
+#![warn(clippy::unwrap_or_default)]
 #![allow(dead_code)]
-#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::unnecessary_wraps, clippy::unnecessary_literal_unwrap)]
 
-/// Checks implementation of the `UNWRAP_OR_ELSE_DEFAULT` lint.
+/// Checks implementation of the `UNWRAP_OR_DEFAULT` lint.
 fn unwrap_or_else_default() {
     struct Foo;
 
@@ -72,6 +70,94 @@ fn unwrap_or_else_default() {
 
     let empty_string = None::<String>;
     empty_string.unwrap_or_else(|| "".to_string());
+}
+
+fn type_certainty(option: Option<Vec<u64>>) {
+    option.unwrap_or_else(Vec::new).push(1);
+
+    let option: std::option::Option<std::vec::Vec<u64>> = None;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    let option: Option<Vec<u64>> = None;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    let option = std::option::Option::<std::vec::Vec<u64>>::None;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    let option = Option::<Vec<u64>>::None;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    let option = std::option::Option::None::<std::vec::Vec<u64>>;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    let option = Option::None::<Vec<u64>>;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    let option = None::<Vec<u64>>;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    // should not be changed: type annotation with infer, unconcretized initializer
+    let option: Option<Vec<_>> = None;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    // should not be changed: no type annotation, unconcretized initializer
+    let option = Option::None;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    // should not be changed: no type annotation, unconcretized initializer
+    let option = None;
+    option.unwrap_or_else(Vec::new).push(1);
+
+    type Alias = Option<Vec<u32>>;
+    let option: Alias = Option::<Vec<u32>>::Some(Vec::new());
+    option.unwrap_or_else(Vec::new).push(1);
+}
+
+fn method_call_with_deref() {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    let cell = RefCell::new(HashMap::<u64, HashMap<u64, String>>::new());
+
+    let mut outer_map = cell.borrow_mut();
+
+    #[allow(unused_assignments)]
+    let mut option = None;
+    option = Some(0);
+
+    let inner_map = outer_map.get_mut(&option.unwrap()).unwrap();
+
+    let _ = inner_map.entry(0).or_insert_with(Default::default);
+}
+
+fn missing_suggested_method() {
+    #[derive(Copy, Clone)]
+    struct S<T>(T);
+
+    impl<T> S<T> {
+        fn or_insert_with(&mut self, default: impl FnOnce() -> T) -> &mut T {
+            &mut self.0
+        }
+
+        fn or_insert(&mut self, default: T) -> &mut T {
+            &mut self.0
+        }
+
+        fn unwrap_or_else(self, default: impl FnOnce() -> T) -> T {
+            self.0
+        }
+
+        fn unwrap_or(self, default: T) -> T {
+            self.0
+        }
+    }
+
+    // Don't lint when or_default/unwrap_or_default do not exist on the type
+    let mut s = S(1);
+    s.or_insert_with(Default::default);
+    s.or_insert(Default::default());
+    s.unwrap_or_else(Default::default);
+    s.unwrap_or(Default::default());
 }
 
 fn main() {}

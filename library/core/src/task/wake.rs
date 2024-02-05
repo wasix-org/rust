@@ -1,7 +1,8 @@
 #![stable(feature = "futures_api", since = "1.36.0")]
 
 use crate::fmt;
-use crate::marker::{PhantomData, Unpin};
+use crate::marker::PhantomData;
+use crate::ptr;
 
 /// A `RawWaker` allows the implementor of a task executor to create a [`Waker`]
 /// which provides customized wakeup behavior.
@@ -47,7 +48,7 @@ impl RawWaker {
     /// Get the `data` pointer used to create this `RawWaker`.
     #[inline]
     #[must_use]
-    #[unstable(feature = "waker_getters", issue = "87021")]
+    #[unstable(feature = "waker_getters", issue = "96992")]
     pub fn data(&self) -> *const () {
         self.data
     }
@@ -55,7 +56,7 @@ impl RawWaker {
     /// Get the `vtable` pointer used to create this `RawWaker`.
     #[inline]
     #[must_use]
-    #[unstable(feature = "waker_getters", issue = "87021")]
+    #[unstable(feature = "waker_getters", issue = "96992")]
     pub fn vtable(&self) -> &'static RawWakerVTable {
         self.vtable
     }
@@ -230,9 +231,13 @@ impl fmt::Debug for Context<'_> {
 /// this might be done to wake a future when a blocking function call completes on another
 /// thread.
 ///
+/// Note that it is preferable to use `waker.clone_from(&new_waker)` instead
+/// of `*waker = new_waker.clone()`, as the former will avoid cloning the waker
+/// unnecessarily if the two wakers [wake the same task](Self::will_wake).
+///
 /// [`Future::poll()`]: core::future::Future::poll
 /// [`Poll::Pending`]: core::task::Poll::Pending
-#[repr(transparent)]
+#[cfg_attr(not(doc), repr(transparent))] // work around https://github.com/rust-lang/rust/issues/66401
 #[stable(feature = "futures_api", since = "1.36.0")]
 pub struct Waker {
     waker: RawWaker,
@@ -301,7 +306,9 @@ impl Waker {
     /// when the `Waker`s would awaken the same task. However, if this function
     /// returns `true`, it is guaranteed that the `Waker`s will awaken the same task.
     ///
-    /// This function is primarily used for optimization purposes.
+    /// This function is primarily used for optimization purposes — for example,
+    /// this type's [`clone_from`](Self::clone_from) implementation uses it to
+    /// avoid cloning the waker when they would wake the same task anyway.
     #[inline]
     #[must_use]
     #[stable(feature = "futures_api", since = "1.36.0")]
@@ -322,10 +329,49 @@ impl Waker {
         Waker { waker }
     }
 
+    /// Creates a new `Waker` that does nothing when `wake` is called.
+    ///
+    /// This is mostly useful for writing tests that need a [`Context`] to poll
+    /// some futures, but are not expecting those futures to wake the waker or
+    /// do not need to do anything specific if it happens.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(noop_waker)]
+    ///
+    /// use std::future::Future;
+    /// use std::task;
+    ///
+    /// let waker = task::Waker::noop();
+    /// let mut cx = task::Context::from_waker(&waker);
+    ///
+    /// let mut future = Box::pin(async { 10 });
+    /// assert_eq!(future.as_mut().poll(&mut cx), task::Poll::Ready(10));
+    /// ```
+    #[inline]
+    #[must_use]
+    #[unstable(feature = "noop_waker", issue = "98286")]
+    pub const fn noop() -> Waker {
+        const VTABLE: RawWakerVTable = RawWakerVTable::new(
+            // Cloning just returns a new no-op raw waker
+            |_| RAW,
+            // `wake` does nothing
+            |_| {},
+            // `wake_by_ref` does nothing
+            |_| {},
+            // Dropping does nothing as we don't allocate anything
+            |_| {},
+        );
+        const RAW: RawWaker = RawWaker::new(ptr::null(), &VTABLE);
+
+        Waker { waker: RAW }
+    }
+
     /// Get a reference to the underlying [`RawWaker`].
     #[inline]
     #[must_use]
-    #[unstable(feature = "waker_getters", issue = "87021")]
+    #[unstable(feature = "waker_getters", issue = "96992")]
     pub fn as_raw(&self) -> &RawWaker {
         &self.waker
     }
@@ -340,6 +386,13 @@ impl Clone for Waker {
             // to initialize `clone` and `data` requiring the user to acknowledge
             // that the contract of [`RawWaker`] is upheld.
             waker: unsafe { (self.waker.vtable.clone)(self.waker.data) },
+        }
+    }
+
+    #[inline]
+    fn clone_from(&mut self, source: &Self) {
+        if !self.will_wake(source) {
+            *self = source.clone();
         }
     }
 }

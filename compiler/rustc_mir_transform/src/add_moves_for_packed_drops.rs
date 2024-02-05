@@ -2,7 +2,6 @@ use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
 
 use crate::util;
-use crate::MirPass;
 use rustc_middle::mir::patch::MirPatch;
 
 /// This pass moves values being dropped that are within a packed
@@ -10,7 +9,7 @@ use rustc_middle::mir::patch::MirPatch;
 /// they are dropped from an aligned address.
 ///
 /// For example, if we have something like
-/// ```ignore (ilustrative)
+/// ```ignore (illustrative)
 /// #[repr(packed)]
 /// struct Foo {
 ///     dealign: u8,
@@ -25,7 +24,7 @@ use rustc_middle::mir::patch::MirPatch;
 /// its address is not aligned.
 ///
 /// Instead, we move `foo.data` to a local and drop that:
-/// ```ignore (ilustrative)
+/// ```ignore (illustrative)
 ///     storage.live(drop_temp)
 ///     drop_temp = foo.data;
 ///     drop(drop_temp) -> next
@@ -64,9 +63,6 @@ fn add_moves_for_packed_drops_patch<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) 
             {
                 add_move_for_packed_drop(tcx, body, &mut patch, terminator, loc, data.is_cleanup);
             }
-            TerminatorKind::DropAndReplace { .. } => {
-                span_bug!(terminator.source_info.span, "replace in AddMovesForPackedDrops");
-            }
             _ => {}
         }
     }
@@ -83,7 +79,7 @@ fn add_move_for_packed_drop<'tcx>(
     is_cleanup: bool,
 ) {
     debug!("add_move_for_packed_drop({:?} @ {:?})", terminator, loc);
-    let TerminatorKind::Drop { ref place, target, unwind } = terminator.kind else {
+    let TerminatorKind::Drop { ref place, target, unwind, replace } = terminator.kind else {
         unreachable!();
     };
 
@@ -101,6 +97,11 @@ fn add_move_for_packed_drop<'tcx>(
     patch.add_assign(loc, Place::from(temp), Rvalue::Use(Operand::Move(*place)));
     patch.patch_terminator(
         loc.block,
-        TerminatorKind::Drop { place: Place::from(temp), target: storage_dead_block, unwind },
+        TerminatorKind::Drop {
+            place: Place::from(temp),
+            target: storage_dead_block,
+            unwind,
+            replace,
+        },
     );
 }

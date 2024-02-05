@@ -5,7 +5,6 @@
 #![feature(generic_const_exprs)]
 #![allow(incomplete_features)]
 
-
 struct PrivTy;
 trait PrivTr {}
 pub struct PubTy;
@@ -17,37 +16,33 @@ impl PubTrWithAssocTy for PrivTy { type AssocTy = PrivTy; }
 
 
 pub struct S
-//~^ WARNING private type `PrivTy` in public interface
-//~| WARNING hard error
+//~^ WARNING type `PrivTy` is more private than the item `S`
 where
     PrivTy:
 {}
 
 
 pub enum E
-//~^ WARNING private type `PrivTy` in public interface
-//~| WARNING hard error
+//~^ WARNING type `PrivTy` is more private than the item `E`
 where
     PrivTy:
 {}
 
 
 pub fn f()
-//~^ WARNING private type `PrivTy` in public interface
-//~| WARNING hard error
+//~^ WARNING type `PrivTy` is more private than the item `f`
 where
     PrivTy:
 {}
 
 
 impl S
-//~^ ERROR private type `PrivTy` in public interface
+//~^ WARNING type `PrivTy` is more private than the item `S`
 where
     PrivTy:
 {
     pub fn f()
-    //~^ WARNING private type `PrivTy` in public interface
-    //~| WARNING hard error
+    //~^ WARNING type `PrivTy` is more private than the item `S::f`
     where
         PrivTy:
     {}

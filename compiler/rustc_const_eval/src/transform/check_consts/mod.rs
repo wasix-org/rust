@@ -5,6 +5,7 @@
 //! it finds operations that are invalid in a certain context.
 
 use rustc_attr as attr;
+use rustc_errors::DiagCtxt;
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_middle::mir;
@@ -44,6 +45,10 @@ impl<'mir, 'tcx> ConstCx<'mir, 'tcx> {
         ConstCx { body, tcx, param_env, const_kind }
     }
 
+    pub(crate) fn dcx(&self) -> &'tcx DiagCtxt {
+        self.tcx.dcx()
+    }
+
     pub fn def_id(&self) -> LocalDefId {
         self.body.source.def_id().expect_local()
     }
@@ -67,12 +72,12 @@ impl<'mir, 'tcx> ConstCx<'mir, 'tcx> {
 
     pub fn fn_sig(&self) -> PolyFnSig<'tcx> {
         let did = self.def_id().to_def_id();
-        if self.tcx.is_closure(did) {
-            let ty = self.tcx.type_of(did).subst_identity();
-            let ty::Closure(_, substs) = ty.kind() else { bug!("type_of closure not ty::Closure") };
-            substs.as_closure().sig()
+        if self.tcx.is_closure_or_coroutine(did) {
+            let ty = self.tcx.type_of(did).instantiate_identity();
+            let ty::Closure(_, args) = ty.kind() else { bug!("type_of closure not ty::Closure") };
+            args.as_closure().sig()
         } else {
-            self.tcx.fn_sig(did).subst_identity()
+            self.tcx.fn_sig(did).instantiate_identity()
         }
     }
 }
@@ -82,8 +87,8 @@ pub fn rustc_allow_const_fn_unstable(
     def_id: LocalDefId,
     feature_gate: Symbol,
 ) -> bool {
-    let attrs = tcx.hir().attrs(tcx.hir().local_def_id_to_hir_id(def_id));
-    attr::rustc_allow_const_fn_unstable(&tcx.sess, attrs).any(|name| name == feature_gate)
+    let attrs = tcx.hir().attrs(tcx.local_def_id_to_hir_id(def_id));
+    attr::rustc_allow_const_fn_unstable(tcx.sess, attrs).any(|name| name == feature_gate)
 }
 
 /// Returns `true` if the given `const fn` is "const-stable".
@@ -112,7 +117,7 @@ pub fn is_const_stable_const_fn(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
         None if is_parent_const_stable_trait(tcx, def_id) => {
             // Remove this when `#![feature(const_trait_impl)]` is stabilized,
             // returning `true` unconditionally.
-            tcx.sess.delay_span_bug(
+            tcx.dcx().span_delayed_bug(
                 tcx.def_span(def_id),
                 "trait implementations cannot be const stable yet",
             );
@@ -127,17 +132,10 @@ fn is_parent_const_stable_trait(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     let hir_id = tcx.local_def_id_to_hir_id(local_def_id);
 
     let Some(parent) = tcx.hir().opt_parent_id(hir_id) else { return false };
-    let parent_def = tcx.hir().get(parent);
 
-    if !matches!(
-        parent_def,
-        hir::Node::Item(hir::Item {
-            kind: hir::ItemKind::Impl(hir::Impl { constness: hir::Constness::Const, .. }),
-            ..
-        })
-    ) {
+    if !tcx.is_const_trait_impl_raw(parent.owner.def_id.to_def_id()) {
         return false;
     }
 
-    tcx.lookup_const_stability(parent.owner).map_or(false, |stab| stab.is_const_stable())
+    tcx.lookup_const_stability(parent.owner).is_some_and(|stab| stab.is_const_stable())
 }

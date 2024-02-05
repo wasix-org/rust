@@ -1,15 +1,17 @@
-// This test makes sure that the generator field capturing the awaitee in a `.await` expression
+// This test makes sure that the coroutine field capturing the awaitee in a `.await` expression
 // is called "__awaitee" in debuginfo. This name must not be changed since debuggers and debugger
 // extensions rely on the field having this name.
 
 // ignore-tidy-linelength
-// compile-flags: -C debuginfo=2 --edition=2018
+// compile-flags: -C debuginfo=2 --edition=2018 -Copt-level=0
 
-async fn foo() {}
+#![crate_type = "lib"]
 
-async fn async_fn_test() {
+pub async fn async_fn_test() {
     foo().await;
 }
+
+pub async fn foo() {}
 
 // NONMSVC: [[GEN:!.*]] = !DICompositeType(tag: DW_TAG_structure_type, name: "{async_fn_env#0}", scope: [[GEN_SCOPE:![0-9]*]],
 // MSVC: [[GEN:!.*]] = !DICompositeType(tag: DW_TAG_union_type, name: "enum2$<async_fn_debug_awaitee_field::async_fn_test::async_fn_env$0>",
@@ -19,7 +21,3 @@ async fn async_fn_test() {
 // NONMSVC: [[AWAITEE_TYPE]] = !DICompositeType(tag: DW_TAG_structure_type, name: "{async_fn_env#0}", scope: [[AWAITEE_SCOPE:![0-9]*]],
 // MSVC: [[AWAITEE_TYPE]] = !DICompositeType(tag: DW_TAG_union_type, name: "enum2$<async_fn_debug_awaitee_field::foo::async_fn_env$0>",
 // NONMSVC: [[AWAITEE_SCOPE]] = !DINamespace(name: "foo",
-
-fn main() {
-    let _fn = async_fn_test();
-}

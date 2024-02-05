@@ -188,7 +188,7 @@ fn ptr_bitops() {
 #[cfg(any(not(target_arch = "arm"), target_os = "linux"))] // Missing intrinsic in compiler-builtins
 fn ptr_bitops_tagging() {
     #[repr(align(16))]
-    struct Tagme(u128);
+    struct Tagme(#[allow(dead_code)] u128);
 
     let tagme = Tagme(1000);
     let ptr = &tagme as *const Tagme as *mut Tagme;
@@ -306,9 +306,11 @@ fn atomic_compare_exchange() {
     ATOMIC.compare_exchange_weak(0, 1, SeqCst, SeqCst).ok();
 }
 
+/* FIXME(#110395)
 #[test]
 fn atomic_const_from() {
     const _ATOMIC_U8: AtomicU8 = AtomicU8::from(1);
     const _ATOMIC_BOOL: AtomicBool = AtomicBool::from(true);
     const _ATOMIC_PTR: AtomicPtr<u32> = AtomicPtr::from(core::ptr::null_mut());
 }
+*/

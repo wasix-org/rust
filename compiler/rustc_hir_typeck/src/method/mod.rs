@@ -12,15 +12,15 @@ pub use self::MethodError::*;
 
 use crate::errors::OpMethodGenericParams;
 use crate::FnCtxt;
-use rustc_data_structures::sync::Lrc;
-use rustc_errors::{Applicability, Diagnostic};
+use rustc_errors::{Applicability, Diagnostic, SubdiagnosticMessage};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Namespace};
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::{self, InferOk};
+use rustc_middle::query::Providers;
 use rustc_middle::traits::ObligationCause;
-use rustc_middle::ty::subst::{InternalSubsts, SubstsRef};
 use rustc_middle::ty::{self, GenericParamDefKind, Ty, TypeVisitableExt};
+use rustc_middle::ty::{GenericArgs, GenericArgsRef};
 use rustc_span::symbol::Ident;
 use rustc_span::Span;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
@@ -28,7 +28,7 @@ use rustc_trait_selection::traits::{self, NormalizeExt};
 
 use self::probe::{IsSuggestion, ProbeScope};
 
-pub fn provide(providers: &mut ty::query::Providers) {
+pub fn provide(providers: &mut Providers) {
     probe::provide(providers);
 }
 
@@ -36,7 +36,7 @@ pub fn provide(providers: &mut ty::query::Providers) {
 pub struct MethodCallee<'tcx> {
     /// Impl method ID, for inherent methods, or trait method ID, otherwise.
     pub def_id: DefId,
-    pub substs: SubstsRef<'tcx>,
+    pub args: GenericArgsRef<'tcx>,
 
     /// Instantiated method signature, i.e., it has been
     /// substituted, normalized, and has had late-bound
@@ -89,14 +89,13 @@ pub enum CandidateSource {
 }
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
-    /// Determines whether the type `self_ty` supports a method name `method_name` or not.
+    /// Determines whether the type `self_ty` supports a visible method named `method_name` or not.
     #[instrument(level = "debug", skip(self))]
     pub fn method_exists(
         &self,
         method_name: Ident,
         self_ty: Ty<'tcx>,
         call_expr_id: hir::HirId,
-        allow_private: bool,
         return_type: Option<Ty<'tcx>>,
     ) -> bool {
         match self.probe_for_name(
@@ -118,7 +117,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
             Err(NoMatch(..)) => false,
             Err(Ambiguity(..)) => true,
-            Err(PrivateMatch(..)) => allow_private,
+            Err(PrivateMatch(..)) => false,
             Err(IllegalSizedBound { .. }) => true,
             Err(BadReturnType) => false,
         }
@@ -129,7 +128,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub(crate) fn suggest_method_call(
         &self,
         err: &mut Diagnostic,
-        msg: &str,
+        msg: impl Into<SubdiagnosticMessage> + std::fmt::Debug,
         method_name: Ident,
         self_ty: Ty<'tcx>,
         call_expr: &hir::Expr<'tcx>,
@@ -189,11 +188,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         self.lint_dot_call_from_2018(self_ty, segment, span, call_expr, self_expr, &pick, args);
 
-        for import_id in &pick.import_ids {
+        for &import_id in &pick.import_ids {
             debug!("used_trait_import: {:?}", import_id);
-            Lrc::get_mut(&mut self.typeck_results.borrow_mut().used_trait_imports)
-                .unwrap()
-                .insert(*import_id);
+            self.typeck_results.borrow_mut().used_trait_imports.insert(import_id);
         }
 
         self.tcx.check_stability(pick.item.def_id, Some(call_expr.hir_id), span, None);
@@ -204,9 +201,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let Some(span) = result.illegal_sized_bound {
             let mut needs_mut = false;
             if let ty::Ref(region, t_type, mutability) = self_ty.kind() {
-                let trait_type = self
-                    .tcx
-                    .mk_ref(*region, ty::TypeAndMut { ty: *t_type, mutbl: mutability.invert() });
+                let trait_type = Ty::new_ref(
+                    self.tcx,
+                    *region,
+                    ty::TypeAndMut { ty: *t_type, mutbl: mutability.invert() },
+                );
                 // We probe again to see if there might be a borrow mutability discrepancy.
                 match self.lookup_probe(
                     segment.ident,
@@ -251,6 +250,27 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         Ok(result.callee)
+    }
+
+    pub fn lookup_method_for_diagnostic(
+        &self,
+        self_ty: Ty<'tcx>,
+        segment: &hir::PathSegment<'_>,
+        span: Span,
+        call_expr: &'tcx hir::Expr<'tcx>,
+        self_expr: &'tcx hir::Expr<'tcx>,
+    ) -> Result<MethodCallee<'tcx>, MethodError<'tcx>> {
+        let pick = self.lookup_probe_for_diagnostic(
+            segment.ident,
+            self_ty,
+            call_expr,
+            ProbeScope::TraitsInScope,
+            None,
+        )?;
+
+        Ok(self
+            .confirm_method_for_diagnostic(span, self_expr, call_expr, self_ty, &pick, segment)
+            .callee)
     }
 
     #[instrument(level = "debug", skip(self, call_expr))]
@@ -300,10 +320,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         trait_def_id: DefId,
         self_ty: Ty<'tcx>,
         opt_input_types: Option<&[Ty<'tcx>]>,
-    ) -> (traits::Obligation<'tcx, ty::Predicate<'tcx>>, &'tcx ty::List<ty::subst::GenericArg<'tcx>>)
-    {
+    ) -> (traits::PredicateObligation<'tcx>, &'tcx ty::List<ty::GenericArg<'tcx>>) {
         // Construct a trait-reference `self_ty : Trait<input_tys>`
-        let substs = InternalSubsts::for_item(self.tcx, trait_def_id, |param, _| {
+        let args = GenericArgs::for_item(self.tcx, trait_def_id, |param, _| {
             match param.kind {
                 GenericParamDefKind::Lifetime | GenericParamDefKind::Const { .. } => {}
                 GenericParamDefKind::Type { .. } => {
@@ -317,19 +336,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.var_for_def(cause.span, param)
         });
 
-        let trait_ref = self.tcx.mk_trait_ref(trait_def_id, substs);
+        let trait_ref = ty::TraitRef::new(self.tcx, trait_def_id, args);
 
         // Construct an obligation
         let poly_trait_ref = ty::Binder::dummy(trait_ref);
-        (
-            traits::Obligation::new(
-                self.tcx,
-                cause,
-                self.param_env,
-                poly_trait_ref.without_const(),
-            ),
-            substs,
-        )
+        (traits::Obligation::new(self.tcx, cause, self.param_env, poly_trait_ref), args)
     }
 
     /// `lookup_method_in_trait` is used for overloaded operators.
@@ -346,9 +357,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         self_ty: Ty<'tcx>,
         opt_input_types: Option<&[Ty<'tcx>]>,
     ) -> Option<InferOk<'tcx, MethodCallee<'tcx>>> {
-        let (obligation, substs) =
+        let (obligation, args) =
             self.obligation_for_method(cause, trait_def_id, self_ty, opt_input_types);
-        self.construct_obligation_for_trait(m_name, trait_def_id, obligation, substs)
+        self.construct_obligation_for_trait(m_name, trait_def_id, obligation, args)
     }
 
     // FIXME(#18741): it seems likely that we can consolidate some of this
@@ -359,7 +370,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         m_name: Ident,
         trait_def_id: DefId,
         obligation: traits::PredicateObligation<'tcx>,
-        substs: &'tcx ty::List<ty::subst::GenericArg<'tcx>>,
+        args: &'tcx ty::List<ty::GenericArg<'tcx>>,
     ) -> Option<InferOk<'tcx, MethodCallee<'tcx>>> {
         debug!(?obligation);
 
@@ -374,7 +385,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // type parameters or early-bound regions.
         let tcx = self.tcx;
         let Some(method_item) = self.associated_value(trait_def_id, m_name) else {
-            tcx.sess.delay_span_bug(
+            tcx.dcx().span_delayed_bug(
                 obligation.cause.span,
                 "operator trait does not have corresponding operator method",
             );
@@ -382,7 +393,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
 
         if method_item.kind != ty::AssocKind::Fn {
-            self.tcx.sess.delay_span_bug(tcx.def_span(method_item.def_id), "not a method");
+            self.dcx().span_delayed_bug(tcx.def_span(method_item.def_id), "not a method");
             return None;
         }
 
@@ -390,7 +401,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let generics = tcx.generics_of(def_id);
 
         if generics.params.len() != 0 {
-            tcx.sess.emit_fatal(OpMethodGenericParams {
+            tcx.dcx().emit_fatal(OpMethodGenericParams {
                 span: tcx.def_span(method_item.def_id),
                 method_name: m_name.to_string(),
             });
@@ -405,7 +416,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // N.B., instantiate late-bound regions before normalizing the
         // function signature so that normalization does not need to deal
         // with bound regions.
-        let fn_sig = tcx.fn_sig(def_id).subst(self.tcx, substs);
+        let fn_sig = tcx.fn_sig(def_id).instantiate(self.tcx, args);
         let fn_sig =
             self.instantiate_binder_with_fresh_vars(obligation.cause.span, infer::FnCall, fn_sig);
 
@@ -424,7 +435,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         //
         // Note that as the method comes from a trait, it should not have
         // any late-bound regions appearing in its bounds.
-        let bounds = self.tcx.predicates_of(def_id).instantiate(self.tcx, substs);
+        let bounds = self.tcx.predicates_of(def_id).instantiate(self.tcx, args);
 
         let InferOk { value, obligations: o } =
             self.at(&obligation.cause, self.param_env).normalize(bounds);
@@ -443,7 +454,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         ));
 
         // Also add an obligation for the method type being well-formed.
-        let method_ty = tcx.mk_fn_ptr(ty::Binder::dummy(fn_sig));
+        let method_ty = Ty::new_fn_ptr(tcx, ty::Binder::dummy(fn_sig));
         debug!(
             "lookup_in_trait_adjusted: matched method method_ty={:?} obligation={:?}",
             method_ty, obligation
@@ -452,10 +463,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             tcx,
             obligation.cause,
             self.param_env,
-            ty::Binder::dummy(ty::PredicateKind::WellFormed(method_ty.into())),
+            ty::Binder::dummy(ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(
+                method_ty.into(),
+            ))),
         ));
 
-        let callee = MethodCallee { def_id, substs, sig: fn_sig };
+        let callee = MethodCallee { def_id, args, sig: fn_sig };
 
         debug!("callee = {:?}", callee);
 
@@ -542,10 +555,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         debug!(?pick);
         {
             let mut typeck_results = self.typeck_results.borrow_mut();
-            let used_trait_imports = Lrc::get_mut(&mut typeck_results.used_trait_imports).unwrap();
             for import_id in pick.import_ids {
                 debug!(used_trait_import=?import_id);
-                used_trait_imports.insert(import_id);
+                typeck_results.used_trait_imports.insert(import_id);
             }
         }
 

@@ -4,9 +4,18 @@
     clippy::unused_unit,
     clippy::let_unit_value,
     clippy::match_single_binding,
-    clippy::never_loop
+    clippy::never_loop,
+    clippy::needless_if,
+    clippy::diverging_sub_expression,
+    clippy::single_match
 )]
 #![warn(clippy::manual_let_else)]
+//@no-rustfix
+enum Variant {
+    A(usize, usize),
+    B(usize),
+    C,
+}
 
 fn g() -> Option<()> {
     None
@@ -16,17 +25,19 @@ fn main() {}
 
 fn fire() {
     let v = if let Some(v_some) = g() { v_some } else { return };
+    //~^ ERROR: this could be rewritten as `let...else`
+
     let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else {
         return;
     };
 
     let v = if let Some(v) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         // Blocks around the identity should have no impact
-        {
-            { v }
-        }
+        { { v } }
     } else {
         // Some computation should still make it fire
         g();
@@ -36,14 +47,18 @@ fn fire() {
     // continue and break diverge
     loop {
         let v = if let Some(v_some) = g() { v_some } else { continue };
+        //~^ ERROR: this could be rewritten as `let...else`
         let v = if let Some(v_some) = g() { v_some } else { break };
+        //~^ ERROR: this could be rewritten as `let...else`
     }
 
     // panic also diverges
     let v = if let Some(v_some) = g() { v_some } else { panic!() };
+    //~^ ERROR: this could be rewritten as `let...else`
 
     // abort also diverges
     let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else {
         std::process::abort()
@@ -51,6 +66,7 @@ fn fire() {
 
     // If whose two branches diverge also diverges
     let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else {
         if true { return } else { panic!() }
@@ -58,38 +74,97 @@ fn fire() {
 
     // Diverging after an if still makes the block diverge:
     let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else {
         if true {}
         panic!();
     };
 
-    // A match diverges if all branches diverge:
-    // Note: the corresponding let-else requires a ; at the end of the match
-    // as otherwise the type checker does not turn it into a ! type.
+    // The final expression will need to be turned into a statement.
     let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else {
-        match () {
-            _ if panic!() => {},
-            _ => panic!(),
+        panic!();
+        ()
+    };
+
+    // Even if the result is buried multiple expressions deep.
+    let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
+        v_some
+    } else {
+        panic!();
+        if true {
+            match 0 {
+                0 => (),
+                _ => (),
+            }
+        } else {
+            panic!()
         }
     };
 
+    // Or if a break gives the value.
+    let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
+        v_some
+    } else {
+        loop {
+            panic!();
+            break ();
+        }
+    };
+
+    // Even if the break is in a weird position.
+    let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
+        v_some
+    } else {
+        'a: loop {
+            panic!();
+            loop {
+                match 0 {
+                    0 if (return break 'a ()) => {},
+                    _ => {},
+                }
+            }
+        }
+    };
+
+    // A match diverges if all branches diverge:
+    let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
+        v_some
+    } else {
+        match 0 {
+            0 if true => panic!(),
+            _ => panic!(),
+        };
+    };
+
     // An if's expression can cause divergence:
-    let v = if let Some(v_some) = g() { v_some } else { if panic!() {} };
+    let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
+        v_some
+    } else {
+        if panic!() {};
+    };
 
     // An expression of a match can cause divergence:
     let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else {
         match panic!() {
             _ => {},
-        }
+        };
     };
 
     // Top level else if
     let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else if true {
         return;
@@ -99,6 +174,7 @@ fn fire() {
 
     // All match arms diverge
     let v = if let Some(v_some) = g() {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else {
         match (g(), g()) {
@@ -116,13 +192,15 @@ fn fire() {
 
     // Tuples supported for the declared variables
     let (v, w) = if let Some(v_some) = g().map(|v| (v, 42)) {
+        //~^ ERROR: this could be rewritten as `let...else`
         v_some
     } else {
         return;
     };
 
-    // Tuples supported for the identity block and pattern
-    let v = if let (Some(v_some), w_some) = (g(), 0) {
+    // Tuples supported with multiple bindings
+    let (w, S { v }) = if let (Some(v_some), w_some) = (g().map(|_| S { v: 0 }), 0) {
+        //~^ ERROR: this could be rewritten as `let...else`
         (w_some, v_some)
     } else {
         return;
@@ -135,6 +213,57 @@ fn fire() {
         };
     }
     create_binding_if_some!(w, g());
+
+    fn e() -> Variant {
+        Variant::A(0, 0)
+    }
+
+    let v = if let Variant::A(a, 0) = e() { a } else { return };
+    //~^ ERROR: this could be rewritten as `let...else`
+
+    // `mut v` is inserted into the pattern
+    let mut v = if let Variant::B(b) = e() { b } else { return };
+    //~^ ERROR: this could be rewritten as `let...else`
+
+    // Nesting works
+    let nested = Ok(Some(e()));
+    let v = if let Ok(Some(Variant::B(b))) | Err(Some(Variant::A(b, _))) = nested {
+        //~^ ERROR: this could be rewritten as `let...else`
+        b
+    } else {
+        return;
+    };
+    // dot dot works
+    let v = if let Variant::A(.., a) = e() { a } else { return };
+    //~^ ERROR: this could be rewritten as `let...else`
+
+    // () is preserved: a bit of an edge case but make sure it stays around
+    let w = if let (Some(v), ()) = (g(), ()) { v } else { return };
+    //~^ ERROR: this could be rewritten as `let...else`
+
+    // Tuple structs work
+    let w = if let Some(S { v: x }) = Some(S { v: 0 }) {
+        //~^ ERROR: this could be rewritten as `let...else`
+        x
+    } else {
+        return;
+    };
+
+    // Field init shorthand is suggested
+    let v = if let Some(S { v: x }) = Some(S { v: 0 }) {
+        //~^ ERROR: this could be rewritten as `let...else`
+        x
+    } else {
+        return;
+    };
+
+    // Multi-field structs also work
+    let (x, S { v }, w) = if let Some(U { v, w, x }) = None::<U<S<()>>> {
+        //~^ ERROR: this could be rewritten as `let...else`
+        (x, v, w)
+    } else {
+        return;
+    };
 }
 
 fn not_fire() {
@@ -229,7 +358,9 @@ fn not_fire() {
     create_binding_if_some_nf!(v, g());
 
     // Already a let-else
-    let Some(a) = (if let Some(b) = Some(Some(())) { b } else { return }) else { panic!() };
+    let Some(a) = (if let Some(b) = Some(Some(())) { b } else { return }) else {
+        panic!()
+    };
 
     // If a type annotation is present, don't lint as
     // expressing the type might be too hard
@@ -245,6 +376,7 @@ fn not_fire() {
 
     let ff = Some(1);
     let _ = match ff {
+        //~^ ERROR: this could be rewritten as `let...else`
         Some(value) => value,
         _ => macro_call!(),
     };
@@ -254,9 +386,63 @@ fn not_fire() {
     let _x = if let Some(x) = Some(1) {
         x
     } else {
-        let Some(_z) = Some(3) else {
-            return
-        };
+        let Some(_z) = Some(3) else { return };
         1
     };
+
+    // This would require creation of a suggestion of the form
+    // let v @ (Some(_), _) = (...) else { return };
+    // Which is too advanced for our code, so we just bail.
+    let v = if let (Some(v_some), w_some) = (g(), 0) {
+        (w_some, v_some)
+    } else {
+        return;
+    };
+
+    // A break that skips the divergent statement will cause the expression to be non-divergent.
+    let _x = if let Some(x) = Some(0) {
+        x
+    } else {
+        'foo: loop {
+            break 'foo 0;
+            panic!();
+        }
+    };
+
+    // Even in inner loops.
+    let _x = if let Some(x) = Some(0) {
+        x
+    } else {
+        'foo: {
+            loop {
+                break 'foo 0;
+            }
+            panic!();
+        }
+    };
+
+    // But a break that can't ever be reached still affects divergence checking.
+    let _x = if let Some(x) = g() {
+        x
+    } else {
+        'foo: {
+            'bar: loop {
+                loop {
+                    break 'bar ();
+                }
+                break 'foo ();
+            }
+            panic!();
+        };
+    };
+}
+
+struct S<T> {
+    v: T,
+}
+
+struct U<T> {
+    v: T,
+    w: T,
+    x: T,
 }

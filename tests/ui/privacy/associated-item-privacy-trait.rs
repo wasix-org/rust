@@ -1,5 +1,5 @@
 #![feature(decl_macro, associated_type_defaults)]
-#![allow(unused, private_in_public)]
+#![allow(private_interfaces, private_bounds)]
 
 mod priv_trait {
     trait PrivTr {
@@ -23,7 +23,7 @@ mod priv_trait {
         let _: <Pub as PrivTr>::AssocTy;
         //~^ ERROR associated type `PrivTr::AssocTy` is private
         pub type InSignatureTy = <Pub as PrivTr>::AssocTy;
-        //~^ ERROR trait `PrivTr` is private
+        //~^ ERROR associated type `PrivTr::AssocTy` is private
         pub trait InSignatureTr: PrivTr {}
         //~^ ERROR trait `PrivTr` is private
         impl PrivTr for u8 {}

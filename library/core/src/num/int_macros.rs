@@ -471,7 +471,7 @@ macro_rules! int_impl {
         )]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
-        #[rustc_const_unstable(feature = "const_inherent_unchecked_arith", issue = "85122")]
+        #[rustc_const_unstable(feature = "unchecked_math", issue = "85122")]
         #[inline(always)]
         #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
         pub const unsafe fn unchecked_add(self, rhs: Self) -> Self {
@@ -539,7 +539,7 @@ macro_rules! int_impl {
         )]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
-        #[rustc_const_unstable(feature = "const_inherent_unchecked_arith", issue = "85122")]
+        #[rustc_const_unstable(feature = "unchecked_math", issue = "85122")]
         #[inline(always)]
         #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
         pub const unsafe fn unchecked_sub(self, rhs: Self) -> Self {
@@ -607,7 +607,7 @@ macro_rules! int_impl {
         )]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
-        #[rustc_const_unstable(feature = "const_inherent_unchecked_arith", issue = "85122")]
+        #[rustc_const_unstable(feature = "unchecked_math", issue = "85122")]
         #[inline(always)]
         #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
         pub const unsafe fn unchecked_mul(self, rhs: Self) -> Self {
@@ -740,6 +740,31 @@ macro_rules! int_impl {
             if unlikely!(b) {None} else {Some(a)}
         }
 
+        /// Unchecked negation. Computes `-self`, assuming overflow cannot occur.
+        ///
+        /// # Safety
+        ///
+        /// This results in undefined behavior when
+        #[doc = concat!("`self == ", stringify!($SelfT), "::MIN`,")]
+        /// i.e. when [`checked_neg`] would return `None`.
+        ///
+        #[doc = concat!("[`checked_neg`]: ", stringify!($SelfT), "::checked_neg")]
+        #[unstable(
+            feature = "unchecked_neg",
+            reason = "niche optimization path",
+            issue = "85122",
+        )]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[rustc_const_unstable(feature = "unchecked_neg", issue = "85122")]
+        #[inline(always)]
+        #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+        pub const unsafe fn unchecked_neg(self) -> Self {
+            // SAFETY: the caller must uphold the safety contract for
+            // `unchecked_neg`.
+            unsafe { intrinsics::unchecked_sub(0, self) }
+        }
+
         /// Checked shift left. Computes `self << rhs`, returning `None` if `rhs` is larger
         /// than or equal to the number of bits in `self`.
         ///
@@ -772,20 +797,20 @@ macro_rules! int_impl {
         ///
         #[doc = concat!("[`checked_shl`]: ", stringify!($SelfT), "::checked_shl")]
         #[unstable(
-            feature = "unchecked_math",
+            feature = "unchecked_shifts",
             reason = "niche optimization path",
             issue = "85122",
         )]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
-        #[rustc_const_unstable(feature = "const_inherent_unchecked_arith", issue = "85122")]
+        #[rustc_const_unstable(feature = "unchecked_shifts", issue = "85122")]
         #[inline(always)]
         #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
         pub const unsafe fn unchecked_shl(self, rhs: u32) -> Self {
             // SAFETY: the caller must uphold the safety contract for
             // `unchecked_shl`.
             // Any legal shift amount is losslessly representable in the self type.
-            unsafe { intrinsics::unchecked_shl(self, rhs.try_into().ok().unwrap_unchecked()) }
+            unsafe { intrinsics::unchecked_shl(self, conv_rhs_for_unchecked_shift!($SelfT, rhs)) }
         }
 
         /// Checked shift right. Computes `self >> rhs`, returning `None` if `rhs` is
@@ -820,20 +845,20 @@ macro_rules! int_impl {
         ///
         #[doc = concat!("[`checked_shr`]: ", stringify!($SelfT), "::checked_shr")]
         #[unstable(
-            feature = "unchecked_math",
+            feature = "unchecked_shifts",
             reason = "niche optimization path",
             issue = "85122",
         )]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
-        #[rustc_const_unstable(feature = "const_inherent_unchecked_arith", issue = "85122")]
+        #[rustc_const_unstable(feature = "unchecked_shifts", issue = "85122")]
         #[inline(always)]
         #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
         pub const unsafe fn unchecked_shr(self, rhs: u32) -> Self {
             // SAFETY: the caller must uphold the safety contract for
             // `unchecked_shr`.
             // Any legal shift amount is losslessly representable in the self type.
-            unsafe { intrinsics::unchecked_shr(self, rhs.try_into().ok().unwrap_unchecked()) }
+            unsafe { intrinsics::unchecked_shr(self, conv_rhs_for_unchecked_shift!($SelfT, rhs)) }
         }
 
         /// Checked absolute value. Computes `self.abs()`, returning `None` if
@@ -896,6 +921,30 @@ macro_rules! int_impl {
             // squaring the base afterwards is not necessary and may cause a
             // needless overflow.
             acc.checked_mul(base)
+        }
+
+        /// Returns the square root of the number, rounded down.
+        ///
+        /// Returns `None` if `self` is negative.
+        ///
+        /// # Examples
+        ///
+        /// Basic usage:
+        /// ```
+        /// #![feature(isqrt)]
+        #[doc = concat!("assert_eq!(10", stringify!($SelfT), ".checked_isqrt(), Some(3));")]
+        /// ```
+        #[unstable(feature = "isqrt", issue = "116226")]
+        #[rustc_const_unstable(feature = "isqrt", issue = "116226")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline]
+        pub const fn checked_isqrt(self) -> Option<Self> {
+            if self < 0 {
+                None
+            } else {
+                Some((self as $UnsignedT).isqrt() as Self)
+            }
         }
 
         /// Saturating integer addition. Computes `self + rhs`, saturating at the numeric
@@ -1380,7 +1429,7 @@ macro_rules! int_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline(always)]
-        #[rustc_allow_const_fn_unstable(const_inherent_unchecked_arith)]
+        #[rustc_allow_const_fn_unstable(unchecked_shifts)]
         pub const fn wrapping_shl(self, rhs: u32) -> Self {
             // SAFETY: the masking by the bitsize of the type ensures that we do not shift
             // out of bounds
@@ -1410,7 +1459,7 @@ macro_rules! int_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline(always)]
-        #[rustc_allow_const_fn_unstable(const_inherent_unchecked_arith)]
+        #[rustc_allow_const_fn_unstable(unchecked_shifts)]
         pub const fn wrapping_shr(self, rhs: u32) -> Self {
             // SAFETY: the masking by the bitsize of the type ensures that we do not shift
             // out of bounds
@@ -2061,6 +2110,36 @@ macro_rules! int_impl {
             acc * base
         }
 
+        /// Returns the square root of the number, rounded down.
+        ///
+        /// # Panics
+        ///
+        /// This function will panic if `self` is negative.
+        ///
+        /// # Examples
+        ///
+        /// Basic usage:
+        /// ```
+        /// #![feature(isqrt)]
+        #[doc = concat!("assert_eq!(10", stringify!($SelfT), ".isqrt(), 3);")]
+        /// ```
+        #[unstable(feature = "isqrt", issue = "116226")]
+        #[rustc_const_unstable(feature = "isqrt", issue = "116226")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline]
+        pub const fn isqrt(self) -> Self {
+            // I would like to implement it as
+            // ```
+            // self.checked_isqrt().expect("argument of integer square root must be non-negative")
+            // ```
+            // but `expect` is not yet stable as a `const fn`.
+            match self.checked_isqrt() {
+                Some(sqrt) => sqrt,
+                None => panic!("argument of integer square root must be non-negative"),
+            }
+        }
+
         /// Calculates the quotient of Euclidean division of `self` by `rhs`.
         ///
         /// This computes the integer `q` such that `self = q * rhs + r`, with
@@ -2126,6 +2205,7 @@ macro_rules! int_impl {
         /// assert_eq!(a.rem_euclid(-b), 3);
         /// assert_eq!((-a).rem_euclid(-b), 1);
         /// ```
+        #[doc(alias = "modulo", alias = "mod")]
         #[stable(feature = "euclidean_division", since = "1.38.0")]
         #[rustc_const_stable(feature = "const_euclidean_int_methods", since = "1.52.0")]
         #[must_use = "this returns the result of the operation, \
@@ -2330,6 +2410,44 @@ macro_rules! int_impl {
                 // rhs - m cannot overflow because m has the same sign as rhs
                 self.checked_add(rhs - m)
             }
+        }
+
+        /// Calculates the middle point of `self` and `rhs`.
+        ///
+        /// `midpoint(a, b)` is `(a + b) >> 1` as if it were performed in a
+        /// sufficiently-large signed integral type. This implies that the result is
+        /// always rounded towards negative infinity and that no overflow will ever occur.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// #![feature(num_midpoint)]
+        #[doc = concat!("assert_eq!(0", stringify!($SelfT), ".midpoint(4), 2);")]
+        #[doc = concat!("assert_eq!(0", stringify!($SelfT), ".midpoint(-1), -1);")]
+        #[doc = concat!("assert_eq!((-1", stringify!($SelfT), ").midpoint(0), -1);")]
+        /// ```
+        #[unstable(feature = "num_midpoint", issue = "110840")]
+        #[rustc_const_unstable(feature = "const_num_midpoint", issue = "110840")]
+        #[rustc_allow_const_fn_unstable(const_num_midpoint)]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline]
+        pub const fn midpoint(self, rhs: Self) -> Self {
+            const U: $UnsignedT = <$SelfT>::MIN.unsigned_abs();
+
+            // Map an $SelfT to an $UnsignedT
+            // ex: i8 [-128; 127] to [0; 255]
+            const fn map(a: $SelfT) -> $UnsignedT {
+                (a as $UnsignedT) ^ U
+            }
+
+            // Map an $UnsignedT to an $SelfT
+            // ex: u8 [0; 255] to [-128; 127]
+            const fn demap(a: $UnsignedT) -> $SelfT {
+                (a ^ U) as $SelfT
+            }
+
+            demap(<$UnsignedT>::midpoint(map(self), map(rhs)))
         }
 
         /// Returns the logarithm of the number with respect to an arbitrary base,
@@ -2603,13 +2721,16 @@ macro_rules! int_impl {
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline(always)]
-        #[rustc_allow_const_fn_unstable(const_cmp)]
         pub const fn signum(self) -> Self {
             // Picking the right way to phrase this is complicated
             // (<https://graphics.stanford.edu/~seander/bithacks.html#CopyIntegerSign>)
             // so delegate it to `Ord` which is already producing -1/0/+1
             // exactly like we need and can be the place to deal with the complexity.
-            self.cmp(&0) as _
+
+            // FIXME(const-hack): replace with cmp
+            if self < 0 { -1 }
+            else if self == 0 { 0 }
+            else { 1 }
         }
 
         /// Returns `true` if `self` is positive and `false` if the number is zero or

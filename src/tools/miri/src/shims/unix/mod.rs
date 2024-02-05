@@ -1,11 +1,10 @@
-pub mod dlsym;
 pub mod foreign_items;
 
 mod fs;
+mod mem;
 mod sync;
 mod thread;
 
-mod android;
 mod freebsd;
 mod linux;
 mod macos;

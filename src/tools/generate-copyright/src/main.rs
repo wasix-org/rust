@@ -1,4 +1,5 @@
 use anyhow::Error;
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -20,27 +21,35 @@ fn render_recursive(node: &Node, buffer: &mut Vec<u8>, depth: usize) -> Result<(
     let prefix = std::iter::repeat("> ").take(depth + 1).collect::<String>();
 
     match node {
-        Node::Root { childs } => {
-            for child in childs {
+        Node::Root { children } => {
+            for child in children {
                 render_recursive(child, buffer, depth)?;
             }
         }
-        Node::Directory { name, childs, license } => {
-            render_license(&prefix, std::iter::once(name), license, buffer)?;
-            if !childs.is_empty() {
+        Node::Directory { name, children, license } => {
+            render_license(&prefix, std::iter::once(name), license.iter(), buffer)?;
+            if !children.is_empty() {
                 writeln!(buffer, "{prefix}")?;
                 writeln!(buffer, "{prefix}*Exceptions:*")?;
-                for child in childs {
+                for child in children {
                     writeln!(buffer, "{prefix}")?;
                     render_recursive(child, buffer, depth + 1)?;
                 }
             }
         }
-        Node::FileGroup { names, license } => {
-            render_license(&prefix, names.iter(), license, buffer)?;
+        Node::CondensedDirectory { name, licenses } => {
+            render_license(&prefix, std::iter::once(name), licenses.iter(), buffer)?;
+        }
+        Node::Group { files, directories, license } => {
+            render_license(
+                &prefix,
+                directories.iter().chain(files.iter()),
+                std::iter::once(license),
+                buffer,
+            )?;
         }
         Node::File { name, license } => {
-            render_license(&prefix, std::iter::once(name), license, buffer)?;
+            render_license(&prefix, std::iter::once(name), std::iter::once(license), buffer)?;
         }
     }
 
@@ -50,15 +59,26 @@ fn render_recursive(node: &Node, buffer: &mut Vec<u8>, depth: usize) -> Result<(
 fn render_license<'a>(
     prefix: &str,
     names: impl Iterator<Item = &'a String>,
-    license: &License,
+    licenses: impl Iterator<Item = &'a License>,
     buffer: &mut Vec<u8>,
 ) -> Result<(), Error> {
+    let mut spdxs = BTreeSet::new();
+    let mut copyrights = BTreeSet::new();
+    for license in licenses {
+        spdxs.insert(&license.spdx);
+        for copyright in &license.copyright {
+            copyrights.insert(copyright);
+        }
+    }
+
     for name in names {
         writeln!(buffer, "{prefix}**`{name}`**  ")?;
     }
-    writeln!(buffer, "{prefix}License: `{}`  ", license.spdx)?;
-    for (i, copyright) in license.copyright.iter().enumerate() {
-        let suffix = if i == license.copyright.len() - 1 { "" } else { "  " };
+    for spdx in spdxs.iter() {
+        writeln!(buffer, "{prefix}License: `{spdx}`  ")?;
+    }
+    for (i, copyright) in copyrights.iter().enumerate() {
+        let suffix = if i == copyrights.len() - 1 { "" } else { "  " };
         writeln!(buffer, "{prefix}Copyright: {copyright}{suffix}")?;
     }
 
@@ -73,10 +93,11 @@ struct Metadata {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 pub(crate) enum Node {
-    Root { childs: Vec<Node> },
-    Directory { name: String, childs: Vec<Node>, license: License },
+    Root { children: Vec<Node> },
+    Directory { name: String, children: Vec<Node>, license: Option<License> },
+    CondensedDirectory { name: String, licenses: Vec<License> },
     File { name: String, license: License },
-    FileGroup { names: Vec<String>, license: License },
+    Group { files: Vec<String>, directories: Vec<String>, license: License },
 }
 
 #[derive(serde::Deserialize)]

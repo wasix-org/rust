@@ -1,10 +1,9 @@
-// run-rustfix
-
 #![warn(clippy::all)]
 #![warn(clippy::redundant_pattern_matching)]
 #![allow(
     unused_must_use,
     clippy::needless_bool,
+    clippy::needless_if,
     clippy::match_like_matches_macro,
     clippy::equatable_if_let,
     clippy::if_same_then_else
@@ -22,6 +21,12 @@ fn main() {
     } else {
         bar();
     }
+
+    // Issue 6459
+    if matches!(Ready(42), Ready(_)) {}
+
+    // Issue 6459
+    if matches!(Pending::<()>, Pending) {}
 
     while let Ready(_) = Ready(42) {}
 

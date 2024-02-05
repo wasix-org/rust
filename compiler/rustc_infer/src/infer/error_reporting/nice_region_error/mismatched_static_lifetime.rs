@@ -38,8 +38,9 @@ impl<'a, 'tcx> NiceRegionError<'a, 'tcx> {
         let ObligationCauseCode::MatchImpl(parent, impl_def_id) = code else {
             return None;
         };
-        let (ObligationCauseCode::BindingObligation(_, binding_span) | ObligationCauseCode::ExprBindingObligation(_, binding_span, ..))
-            = *parent.code() else {
+        let (ObligationCauseCode::BindingObligation(_, binding_span)
+        | ObligationCauseCode::ExprBindingObligation(_, binding_span, ..)) = *parent.code()
+        else {
             return None;
         };
 
@@ -67,19 +68,20 @@ impl<'a, 'tcx> NiceRegionError<'a, 'tcx> {
             let hir::Node::Item(hir::Item {
                 kind: hir::ItemKind::Impl(hir::Impl { self_ty: impl_self_ty, .. }),
                 ..
-            }) = impl_node else {
+            }) = impl_node
+            else {
                 bug!("Node not an impl.");
             };
 
             // Next, let's figure out the set of trait objects with implicit static bounds
-            let ty = self.tcx().type_of(*impl_def_id).subst_identity();
+            let ty = self.tcx().type_of(*impl_def_id).instantiate_identity();
             let mut v = super::static_impl_trait::TraitObjectVisitor(FxIndexSet::default());
             v.visit_ty(ty);
             let mut traits = vec![];
             for matching_def_id in v.0 {
                 let mut hir_v =
                     super::static_impl_trait::HirTraitObjectVisitor(&mut traits, matching_def_id);
-                hir_v.visit_ty(&impl_self_ty);
+                hir_v.visit_ty(impl_self_ty);
             }
 
             if traits.is_empty() {
@@ -114,7 +116,7 @@ impl<'a, 'tcx> NiceRegionError<'a, 'tcx> {
                 .unwrap_or(DoesNotOutliveStaticFromImpl::Unspanned),
             implicit_static_lifetimes,
         };
-        let reported = self.tcx().sess.emit_err(err);
+        let reported = self.tcx().dcx().emit_err(err);
         Some(reported)
     }
 }

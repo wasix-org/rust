@@ -13,5 +13,8 @@ fn foo<T: Copy>(_t: T, q: &i32) -> i32 {
         let variable = &*r;
         *variable
     };
+
+    // CHECK-LABEL: fn foo(
+    // CHECK: (inlined foo::<T>::{closure#0})
     x(q, q)
 }

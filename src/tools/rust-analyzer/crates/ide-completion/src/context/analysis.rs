@@ -1,11 +1,11 @@
 //! Module responsible for analyzing the code surrounding the cursor for completion.
 use std::iter;
 
-use hir::{Semantics, Type, TypeInfo};
+use hir::{Semantics, Type, TypeInfo, Variant};
 use ide_db::{active_parameter::ActiveParameter, RootDatabase};
 use syntax::{
     algo::{find_node_at_offset, non_trivia_sibling},
-    ast::{self, AttrKind, HasArgList, HasLoopBody, HasName, NameOrNameRef},
+    ast::{self, AttrKind, HasArgList, HasGenericParams, HasLoopBody, HasName, NameOrNameRef},
     match_ast, AstNode, AstToken, Direction, NodeOrToken, SyntaxElement, SyntaxKind, SyntaxNode,
     SyntaxToken, TextRange, TextSize, T,
 };
@@ -243,10 +243,7 @@ fn analyze(
 
     let Some(name_like) = find_node_at_offset(&speculative_file, offset) else {
         let analysis = if let Some(original) = ast::String::cast(original_token.clone()) {
-            CompletionAnalysis::String {
-                original,
-                expanded: ast::String::cast(self_token.clone()),
-            }
+            CompletionAnalysis::String { original, expanded: ast::String::cast(self_token.clone()) }
         } else {
             // Fix up trailing whitespace problem
             // #[attr(foo = $0
@@ -257,11 +254,13 @@ fn analyze(
             {
                 let colon_prefix = previous_non_trivia_token(self_token.clone())
                     .map_or(false, |it| T![:] == it.kind());
+
                 CompletionAnalysis::UnexpandedAttrTT {
                     fake_attribute_under_caret: fake_ident_token
                         .parent_ancestors()
                         .find_map(ast::Attr::cast),
                     colon_prefix,
+                    extern_crate: p.ancestors().find_map(ast::ExternCrate::cast),
                 }
             } else {
                 return None;
@@ -353,7 +352,7 @@ fn expected_type_and_name(
         _ => ty,
     };
 
-    loop {
+    let (ty, name) = loop {
         break match_ast! {
             match node {
                 ast::LetStmt(it) => {
@@ -362,7 +361,12 @@ fn expected_type_and_name(
                     let ty = it.pat()
                         .and_then(|pat| sema.type_of_pat(&pat))
                         .or_else(|| it.initializer().and_then(|it| sema.type_of_expr(&it)))
-                        .map(TypeInfo::original);
+                        .map(TypeInfo::original)
+                        .filter(|ty| {
+                            // don't infer the let type if the expr is a function,
+                            // preventing parenthesis from vanishing
+                            it.ty().is_some() || !ty.is_fn()
+                        });
                     let name = match it.pat() {
                         Some(ast::Pat::IdentPat(ident)) => ident.name().map(NameOrNameRef::Name),
                         Some(_) | None => None,
@@ -385,9 +389,7 @@ fn expected_type_and_name(
                        token.clone(),
                     ).map(|ap| {
                         let name = ap.ident().map(NameOrNameRef::Name);
-
-                        let ty = strip_refs(ap.ty);
-                        (Some(ty), name)
+                        (Some(ap.ty), name)
                     })
                     .unwrap_or((None, None))
                 },
@@ -418,20 +420,16 @@ fn expected_type_and_name(
                     })().unwrap_or((None, None))
                 },
                 ast::RecordExprField(it) => {
+                    let field_ty = sema.resolve_record_field(&it).map(|(_, _, ty)| ty);
+                    let field_name = it.field_name().map(NameOrNameRef::NameRef);
                     if let Some(expr) = it.expr() {
                         cov_mark::hit!(expected_type_struct_field_with_leading_char);
-                        (
-                            sema.type_of_expr(&expr).map(TypeInfo::original),
-                            it.field_name().map(NameOrNameRef::NameRef),
-                        )
+                        let ty = field_ty
+                            .or_else(|| sema.type_of_expr(&expr).map(TypeInfo::original));
+                        (ty, field_name)
                     } else {
                         cov_mark::hit!(expected_type_struct_field_followed_by_comma);
-                        let ty = sema.resolve_record_field(&it)
-                            .map(|(_, _, ty)| ty);
-                        (
-                            ty,
-                            it.field_name().map(NameOrNameRef::NameRef),
-                        )
+                        (field_ty, field_name)
                     }
                 },
                 // match foo { $0 }
@@ -489,7 +487,8 @@ fn expected_type_and_name(
                 },
             }
         };
-    }
+    };
+    (ty.map(strip_refs), name)
 }
 
 fn classify_lifetime(
@@ -610,14 +609,14 @@ fn classify_name_ref(
                     _ => false,
                 };
 
-                let reciever_is_part_of_indivisible_expression = match &receiver {
+                let receiver_is_part_of_indivisible_expression = match &receiver {
                     Some(ast::Expr::IfExpr(_)) => {
                         let next_token_kind = next_non_trivia_token(name_ref.syntax().clone()).map(|t| t.kind());
                         next_token_kind == Some(SyntaxKind::ELSE_KW)
                     },
                     _ => false
                 };
-                if reciever_is_part_of_indivisible_expression {
+                if receiver_is_part_of_indivisible_expression {
                     return None;
                 }
 
@@ -626,6 +625,10 @@ fn classify_name_ref(
                     kind: DotAccessKind::Field { receiver_is_ambiguous_float_literal },
                     receiver
                 });
+                return Some(make_res(kind));
+            },
+            ast::ExternCrate(_) => {
+                let kind = NameRefKind::ExternCrate;
                 return Some(make_res(kind));
             },
             ast::MethodCallExpr(method) => {
@@ -723,6 +726,136 @@ fn classify_name_ref(
         None
     };
 
+    let generic_arg_location = |arg: ast::GenericArg| {
+        let mut override_location = None;
+        let location = find_opt_node_in_file_compensated(
+            sema,
+            original_file,
+            arg.syntax().parent().and_then(ast::GenericArgList::cast),
+        )
+        .map(|args| {
+            let mut in_trait = None;
+            let param = (|| {
+                let parent = args.syntax().parent()?;
+                let params = match_ast! {
+                    match parent {
+                        ast::PathSegment(segment) => {
+                            match sema.resolve_path(&segment.parent_path().top_path())? {
+                                hir::PathResolution::Def(def) => match def {
+                                    hir::ModuleDef::Function(func) => {
+                                         sema.source(func)?.value.generic_param_list()
+                                    }
+                                    hir::ModuleDef::Adt(adt) => {
+                                        sema.source(adt)?.value.generic_param_list()
+                                    }
+                                    hir::ModuleDef::Variant(variant) => {
+                                        sema.source(variant.parent_enum(sema.db))?.value.generic_param_list()
+                                    }
+                                    hir::ModuleDef::Trait(trait_) => {
+                                        if let ast::GenericArg::AssocTypeArg(arg) = &arg {
+                                            let arg_name = arg.name_ref()?;
+                                            let arg_name = arg_name.text();
+                                            for item in trait_.items_with_supertraits(sema.db) {
+                                                match item {
+                                                    hir::AssocItem::TypeAlias(assoc_ty) => {
+                                                        if assoc_ty.name(sema.db).as_str()? == arg_name {
+                                                            override_location = Some(TypeLocation::AssocTypeEq);
+                                                            return None;
+                                                        }
+                                                    },
+                                                    hir::AssocItem::Const(const_) => {
+                                                        if const_.name(sema.db)?.as_str()? == arg_name {
+                                                            override_location =  Some(TypeLocation::AssocConstEq);
+                                                            return None;
+                                                        }
+                                                    },
+                                                    _ => (),
+                                                }
+                                            }
+                                            return None;
+                                        } else {
+                                            in_trait = Some(trait_);
+                                            sema.source(trait_)?.value.generic_param_list()
+                                        }
+                                    }
+                                    hir::ModuleDef::TraitAlias(trait_) => {
+                                        sema.source(trait_)?.value.generic_param_list()
+                                    }
+                                    hir::ModuleDef::TypeAlias(ty_) => {
+                                        sema.source(ty_)?.value.generic_param_list()
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        },
+                        ast::MethodCallExpr(call) => {
+                            let func = sema.resolve_method_call(&call)?;
+                            sema.source(func)?.value.generic_param_list()
+                        },
+                        ast::AssocTypeArg(arg) => {
+                            let trait_ = ast::PathSegment::cast(arg.syntax().parent()?.parent()?)?;
+                            match sema.resolve_path(&trait_.parent_path().top_path())? {
+                                hir::PathResolution::Def(def) => match def {
+                                    hir::ModuleDef::Trait(trait_) => {
+                                        let arg_name = arg.name_ref()?;
+                                        let arg_name = arg_name.text();
+                                        let trait_items = trait_.items_with_supertraits(sema.db);
+                                        let assoc_ty = trait_items.iter().find_map(|item| match item {
+                                            hir::AssocItem::TypeAlias(assoc_ty) => {
+                                                (assoc_ty.name(sema.db).as_str()? == arg_name)
+                                                    .then_some(assoc_ty)
+                                            },
+                                            _ => None,
+                                        })?;
+                                        sema.source(*assoc_ty)?.value.generic_param_list()
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        },
+                        _ => None,
+                    }
+                }?;
+                // Determine the index of the argument in the `GenericArgList` and match it with
+                // the corresponding parameter in the `GenericParamList`. Since lifetime parameters
+                // are often omitted, ignore them for the purposes of matching the argument with
+                // its parameter unless a lifetime argument is provided explicitly. That is, for
+                // `struct S<'a, 'b, T>`, match `S::<$0>` to `T` and `S::<'a, $0, _>` to `'b`.
+                // FIXME: This operates on the syntax tree and will produce incorrect results when
+                // generic parameters are disabled by `#[cfg]` directives. It should operate on the
+                // HIR, but the functionality necessary to do so is not exposed at the moment.
+                let mut explicit_lifetime_arg = false;
+                let arg_idx = arg
+                    .syntax()
+                    .siblings(Direction::Prev)
+                    // Skip the node itself
+                    .skip(1)
+                    .map(|arg| if ast::LifetimeArg::can_cast(arg.kind()) { explicit_lifetime_arg = true })
+                    .count();
+                let param_idx = if explicit_lifetime_arg {
+                    arg_idx
+                } else {
+                    // Lifetimes parameters always precede type and generic parameters,
+                    // so offset the argument index by the total number of lifetime params
+                    arg_idx + params.lifetime_params().count()
+                };
+                params.generic_params().nth(param_idx)
+            })();
+            (args, in_trait, param)
+        });
+        let (arg_list, of_trait, corresponding_param) = match location {
+            Some((arg_list, of_trait, param)) => (Some(arg_list), of_trait, param),
+            _ => (None, None, None),
+        };
+        override_location.unwrap_or(TypeLocation::GenericArg {
+            args: arg_list,
+            of_trait,
+            corresponding_param,
+        })
+    };
+
     let type_location = |node: &SyntaxNode| {
         let parent = node.parent()?;
         let res = match_ast! {
@@ -737,7 +870,7 @@ fn classify_name_ref(
                         return None;
                     }
                     let parent = match ast::Fn::cast(parent.parent()?) {
-                        Some(x) => x.param_list(),
+                        Some(it) => it.param_list(),
                         None => ast::ClosureExpr::cast(parent.parent()?)?.param_list(),
                     };
 
@@ -778,9 +911,12 @@ fn classify_name_ref(
                 ast::TypeBound(_) => TypeLocation::TypeBound,
                 // is this case needed?
                 ast::TypeBoundList(_) => TypeLocation::TypeBound,
-                ast::GenericArg(it) => TypeLocation::GenericArgList(find_opt_node_in_file_compensated(sema, original_file, it.syntax().parent().and_then(ast::GenericArgList::cast))),
+                ast::GenericArg(it) => generic_arg_location(it),
                 // is this case needed?
-                ast::GenericArgList(it) => TypeLocation::GenericArgList(find_opt_node_in_file_compensated(sema, original_file, Some(it))),
+                ast::GenericArgList(it) => {
+                    let args = find_opt_node_in_file_compensated(sema, original_file, Some(it));
+                    TypeLocation::GenericArg { args, of_trait: None, corresponding_param: None }
+                },
                 ast::TupleField(_) => TypeLocation::TupleField,
                 _ => return None,
             }
@@ -1133,6 +1269,9 @@ fn pattern_context_for(
     pat: ast::Pat,
 ) -> PatternContext {
     let mut param_ctx = None;
+
+    let mut missing_variants = vec![];
+
     let (refutability, has_type_ascription) =
     pat
         .syntax()
@@ -1162,7 +1301,52 @@ fn pattern_context_for(
                         })();
                         return (PatternRefutability::Irrefutable, has_type_ascription)
                     },
-                    ast::MatchArm(_) => PatternRefutability::Refutable,
+                    ast::MatchArm(match_arm) => {
+                       let missing_variants_opt = match_arm
+                            .syntax()
+                            .parent()
+                            .and_then(ast::MatchArmList::cast)
+                            .and_then(|match_arm_list| {
+                                match_arm_list
+                                .syntax()
+                                .parent()
+                                .and_then(ast::MatchExpr::cast)
+                                .and_then(|match_expr| {
+                                    let expr_opt = find_opt_node_in_file(&original_file, match_expr.expr());
+
+                                    expr_opt.and_then(|expr| {
+                                        sema.type_of_expr(&expr)?
+                                        .adjusted()
+                                        .autoderef(sema.db)
+                                        .find_map(|ty| match ty.as_adt() {
+                                            Some(hir::Adt::Enum(e)) => Some(e),
+                                            _ => None,
+                                        }).and_then(|enum_| {
+                                            Some(enum_.variants(sema.db))
+                                        })
+                                    })
+                                }).and_then(|variants| {
+                                   Some(variants.iter().filter_map(|variant| {
+                                        let variant_name = variant.name(sema.db).display(sema.db).to_string();
+
+                                        let variant_already_present = match_arm_list.arms().any(|arm| {
+                                            arm.pat().and_then(|pat| {
+                                                let pat_already_present = pat.syntax().to_string().contains(&variant_name);
+                                                pat_already_present.then(|| pat_already_present)
+                                            }).is_some()
+                                        });
+
+                                        (!variant_already_present).then_some(variant.clone())
+                                    }).collect::<Vec<Variant>>())
+                                })
+                        });
+
+                        if let Some(missing_variants_) = missing_variants_opt {
+                            missing_variants = missing_variants_;
+                        };
+
+                        PatternRefutability::Refutable
+                    },
                     ast::LetExpr(_) => PatternRefutability::Refutable,
                     ast::ForExpr(_) => PatternRefutability::Irrefutable,
                     _ => PatternRefutability::Irrefutable,
@@ -1184,6 +1368,7 @@ fn pattern_context_for(
         ref_token,
         record_pat: None,
         impl_: fetch_immediate_impl(sema, original_file, pat.syntax()),
+        missing_variants,
     }
 }
 

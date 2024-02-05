@@ -1,8 +1,17 @@
+error: assigning to `&T` is undefined behavior, consider using an `UnsafeCell`
+  --> $DIR/issue-100313.rs:10:13
+   |
+LL |             *(B as *const bool as *mut bool) = false;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: for more information, visit <https://doc.rust-lang.org/book/ch15-05-interior-mutability.html>
+   = note: `#[deny(invalid_reference_casting)]` on by default
+
 error[E0080]: evaluation of constant value failed
   --> $DIR/issue-100313.rs:10:13
    |
 LL |             *(B as *const bool as *mut bool) = false;
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ writing to alloc7 which is read-only
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ writing to ALLOC0 which is read-only
    |
 note: inside `T::<&true>::set_false`
   --> $DIR/issue-100313.rs:10:13
@@ -10,11 +19,11 @@ note: inside `T::<&true>::set_false`
 LL |             *(B as *const bool as *mut bool) = false;
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: inside `_`
-  --> $DIR/issue-100313.rs:18:5
+  --> $DIR/issue-100313.rs:19:5
    |
 LL |     x.set_false();
    |     ^^^^^^^^^^^^^
 
-error: aborting due to previous error
+error: aborting due to 2 previous errors
 
 For more information about this error, try `rustc --explain E0080`.

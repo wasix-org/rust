@@ -47,6 +47,66 @@ fn foo(s: Struct) {
 }
 
 #[test]
+fn record_pattern_field_enum() {
+    check(
+        r#"
+//- minicore:result
+enum Baz { Foo, Bar }
+
+fn foo(baz: Baz) {
+    match baz {
+        Baz::Foo => (),
+        $0
+    }
+}
+"#,
+        expect![[r#"
+            en Baz
+            en Result
+            md core
+            ev Err
+            ev Ok
+            bn Baz::Bar Baz::Bar$0
+            bn Baz::Foo Baz::Foo$0
+            bn Err(…)   Err($1)$0
+            bn Ok(…)    Ok($1)$0
+            kw mut
+            kw ref
+        "#]],
+    );
+
+    check(
+        r#"
+//- minicore:result
+enum Baz { Foo, Bar }
+
+fn foo(baz: Baz) {
+    use Baz::*;
+    match baz {
+        Foo => (),
+        $0
+    }
+}
+ "#,
+        expect![[r#"
+         en Baz
+         en Result
+         md core
+         ev Bar
+         ev Err
+         ev Foo
+         ev Ok
+         bn Bar    Bar$0
+         bn Err(…) Err($1)$0
+         bn Foo    Foo$0
+         bn Ok(…)  Ok($1)$0
+         kw mut
+         kw ref
+         "#]],
+    );
+}
+
+#[test]
 fn pattern_enum_variant() {
     check(
         r#"
@@ -126,10 +186,10 @@ fn main() {
             lc foo                  Foo
             lc thing                i32
             md core
-            st Foo
+            st Foo                  Foo
             st Foo {…}              Foo { foo1: u32, foo2: u32 }
             tt Default
-            bt u32
+            bt u32                  u32
             kw crate::
             kw self::
         "#]],

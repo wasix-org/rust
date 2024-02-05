@@ -1,4 +1,5 @@
 // ignore-wasm32-bare compiled with panic=abort by default
+// needs-unwind - this test verifies the amount of drop calls when unwinding is used
 // compile-flags: -C no-prepopulate-passes
 
 #![crate_type = "lib"]
@@ -6,10 +7,12 @@
 struct SomeUniqueName;
 
 impl Drop for SomeUniqueName {
+    #[inline(never)]
     fn drop(&mut self) {
     }
 }
 
+#[inline(never)]
 pub fn possibly_unwinding() {
 }
 

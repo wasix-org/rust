@@ -1,4 +1,4 @@
-use hir::{db::AstDatabase, InFile};
+use hir::{db::ExpandDatabase, CaseType, InFile};
 use ide_db::{assists::Assist, defs::NameClass};
 use syntax::AstNode;
 
@@ -6,28 +6,34 @@ use crate::{
     // references::rename::rename_with_semantics,
     unresolved_fix,
     Diagnostic,
+    DiagnosticCode,
     DiagnosticsContext,
-    Severity,
 };
 
 // Diagnostic: incorrect-ident-case
 //
 // This diagnostic is triggered if an item name doesn't follow https://doc.rust-lang.org/1.0.0/style/style/naming/README.html[Rust naming convention].
 pub(crate) fn incorrect_case(ctx: &DiagnosticsContext<'_>, d: &hir::IncorrectCase) -> Diagnostic {
-    Diagnostic::new(
-        "incorrect-ident-case",
+    let code = match d.expected_case {
+        CaseType::LowerSnakeCase => DiagnosticCode::RustcLint("non_snake_case"),
+        CaseType::UpperSnakeCase => DiagnosticCode::RustcLint("non_upper_case_globals"),
+        // The name is lying. It also covers variants, traits, ...
+        CaseType::UpperCamelCase => DiagnosticCode::RustcLint("non_camel_case_types"),
+    };
+    Diagnostic::new_with_syntax_node_ptr(
+        ctx,
+        code,
         format!(
             "{} `{}` should have {} name, e.g. `{}`",
             d.ident_type, d.ident_text, d.expected_case, d.suggested_text
         ),
-        ctx.sema.diagnostics_display_range(InFile::new(d.file, d.ident.clone().into())).range,
+        InFile::new(d.file, d.ident.clone().into()),
     )
-    .severity(Severity::WeakWarning)
     .with_fixes(fixes(ctx, d))
 }
 
 fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::IncorrectCase) -> Option<Vec<Assist>> {
-    let root = ctx.sema.db.parse_or_expand(d.file)?;
+    let root = ctx.sema.db.parse_or_expand(d.file);
     let name_node = d.ident.to_node(&root);
     let def = NameClass::classify(&ctx.sema, &name_node)?.defined()?;
 
@@ -107,6 +113,31 @@ fn some_fn() {
 }
 "#,
         );
+
+        check_fix(
+            r#"
+static S: i32 = M::A;
+
+mod $0M {
+    pub const A: i32 = 10;
+}
+
+mod other {
+    use crate::M::A;
+}
+"#,
+            r#"
+static S: i32 = m::A;
+
+mod m {
+    pub const A: i32 = 10;
+}
+
+mod other {
+    use crate::m::A;
+}
+"#,
+        );
     }
 
     #[test]
@@ -149,7 +180,7 @@ impl TestStruct {
         check_diagnostics(
             r#"
 fn FOO() {}
-// ^^^ 💡 weak: Function `FOO` should have snake_case name, e.g. `foo`
+// ^^^ 💡 warn: Function `FOO` should have snake_case name, e.g. `foo`
 "#,
         );
         check_fix(r#"fn FOO$0() {}"#, r#"fn foo() {}"#);
@@ -160,7 +191,7 @@ fn FOO() {}
         check_diagnostics(
             r#"
 fn NonSnakeCaseName() {}
-// ^^^^^^^^^^^^^^^^ 💡 weak: Function `NonSnakeCaseName` should have snake_case name, e.g. `non_snake_case_name`
+// ^^^^^^^^^^^^^^^^ 💡 warn: Function `NonSnakeCaseName` should have snake_case name, e.g. `non_snake_case_name`
 "#,
         );
     }
@@ -169,11 +200,11 @@ fn NonSnakeCaseName() {}
     fn incorrect_function_params() {
         check_diagnostics(
             r#"
-fn foo(SomeParam: u8) {}
-    // ^^^^^^^^^ 💡 weak: Parameter `SomeParam` should have snake_case name, e.g. `some_param`
+fn foo(SomeParam: u8) { _ = SomeParam; }
+    // ^^^^^^^^^ 💡 warn: Parameter `SomeParam` should have snake_case name, e.g. `some_param`
 
-fn foo2(ok_param: &str, CAPS_PARAM: u8) {}
-                     // ^^^^^^^^^^ 💡 weak: Parameter `CAPS_PARAM` should have snake_case name, e.g. `caps_param`
+fn foo2(ok_param: &str, CAPS_PARAM: u8) { _ = (ok_param, CAPS_PARAM); }
+                     // ^^^^^^^^^^ 💡 warn: Parameter `CAPS_PARAM` should have snake_case name, e.g. `caps_param`
 "#,
         );
     }
@@ -182,11 +213,12 @@ fn foo2(ok_param: &str, CAPS_PARAM: u8) {}
     fn incorrect_variable_names() {
         check_diagnostics(
             r#"
+#[allow(unused)]
 fn foo() {
     let SOME_VALUE = 10;
-     // ^^^^^^^^^^ 💡 weak: Variable `SOME_VALUE` should have snake_case name, e.g. `some_value`
+     // ^^^^^^^^^^ 💡 warn: Variable `SOME_VALUE` should have snake_case name, e.g. `some_value`
     let AnotherValue = 20;
-     // ^^^^^^^^^^^^ 💡 weak: Variable `AnotherValue` should have snake_case name, e.g. `another_value`
+     // ^^^^^^^^^^^^ 💡 warn: Variable `AnotherValue` should have snake_case name, e.g. `another_value`
 }
 "#,
         );
@@ -197,10 +229,10 @@ fn foo() {
         check_diagnostics(
             r#"
 struct non_camel_case_name {}
-    // ^^^^^^^^^^^^^^^^^^^ 💡 weak: Structure `non_camel_case_name` should have CamelCase name, e.g. `NonCamelCaseName`
+    // ^^^^^^^^^^^^^^^^^^^ 💡 warn: Structure `non_camel_case_name` should have CamelCase name, e.g. `NonCamelCaseName`
 
 struct SCREAMING_CASE {}
-    // ^^^^^^^^^^^^^^ 💡 weak: Structure `SCREAMING_CASE` should have CamelCase name, e.g. `ScreamingCase`
+    // ^^^^^^^^^^^^^^ 💡 warn: Structure `SCREAMING_CASE` should have CamelCase name, e.g. `ScreamingCase`
 "#,
         );
     }
@@ -219,7 +251,7 @@ struct AABB {}
         check_diagnostics(
             r#"
 struct SomeStruct { SomeField: u8 }
-                 // ^^^^^^^^^ 💡 weak: Field `SomeField` should have snake_case name, e.g. `some_field`
+                 // ^^^^^^^^^ 💡 warn: Field `SomeField` should have snake_case name, e.g. `some_field`
 "#,
         );
     }
@@ -229,10 +261,10 @@ struct SomeStruct { SomeField: u8 }
         check_diagnostics(
             r#"
 enum some_enum { Val(u8) }
-  // ^^^^^^^^^ 💡 weak: Enum `some_enum` should have CamelCase name, e.g. `SomeEnum`
+  // ^^^^^^^^^ 💡 warn: Enum `some_enum` should have CamelCase name, e.g. `SomeEnum`
 
 enum SOME_ENUM {}
-  // ^^^^^^^^^ 💡 weak: Enum `SOME_ENUM` should have CamelCase name, e.g. `SomeEnum`
+  // ^^^^^^^^^ 💡 warn: Enum `SOME_ENUM` should have CamelCase name, e.g. `SomeEnum`
 "#,
         );
     }
@@ -251,7 +283,7 @@ enum AABB {}
         check_diagnostics(
             r#"
 enum SomeEnum { SOME_VARIANT(u8) }
-             // ^^^^^^^^^^^^ 💡 weak: Variant `SOME_VARIANT` should have CamelCase name, e.g. `SomeVariant`
+             // ^^^^^^^^^^^^ 💡 warn: Variant `SOME_VARIANT` should have CamelCase name, e.g. `SomeVariant`
 "#,
         );
     }
@@ -261,7 +293,7 @@ enum SomeEnum { SOME_VARIANT(u8) }
         check_diagnostics(
             r#"
 const some_weird_const: u8 = 10;
-   // ^^^^^^^^^^^^^^^^ 💡 weak: Constant `some_weird_const` should have UPPER_SNAKE_CASE name, e.g. `SOME_WEIRD_CONST`
+   // ^^^^^^^^^^^^^^^^ 💡 warn: Constant `some_weird_const` should have UPPER_SNAKE_CASE name, e.g. `SOME_WEIRD_CONST`
 "#,
         );
     }
@@ -271,7 +303,7 @@ const some_weird_const: u8 = 10;
         check_diagnostics(
             r#"
 static some_weird_const: u8 = 10;
-    // ^^^^^^^^^^^^^^^^ 💡 weak: Static variable `some_weird_const` should have UPPER_SNAKE_CASE name, e.g. `SOME_WEIRD_CONST`
+    // ^^^^^^^^^^^^^^^^ 💡 warn: Static variable `some_weird_const` should have UPPER_SNAKE_CASE name, e.g. `SOME_WEIRD_CONST`
 "#,
         );
     }
@@ -281,13 +313,14 @@ static some_weird_const: u8 = 10;
         check_diagnostics(
             r#"
 struct someStruct;
-    // ^^^^^^^^^^ 💡 weak: Structure `someStruct` should have CamelCase name, e.g. `SomeStruct`
+    // ^^^^^^^^^^ 💡 warn: Structure `someStruct` should have CamelCase name, e.g. `SomeStruct`
 
 impl someStruct {
     fn SomeFunc(&self) {
-    // ^^^^^^^^ 💡 weak: Function `SomeFunc` should have snake_case name, e.g. `some_func`
+    // ^^^^^^^^ 💡 warn: Function `SomeFunc` should have snake_case name, e.g. `some_func`
         let WHY_VAR_IS_CAPS = 10;
-         // ^^^^^^^^^^^^^^^ 💡 weak: Variable `WHY_VAR_IS_CAPS` should have snake_case name, e.g. `why_var_is_caps`
+         // ^^^^^^^^^^^^^^^ 💡 warn: Variable `WHY_VAR_IS_CAPS` should have snake_case name, e.g. `why_var_is_caps`
+        _ = WHY_VAR_IS_CAPS;
     }
 }
 "#,
@@ -295,11 +328,12 @@ impl someStruct {
     }
 
     #[test]
-    fn no_diagnostic_for_enum_varinats() {
+    fn no_diagnostic_for_enum_variants() {
         check_diagnostics(
             r#"
 enum Option { Some, None }
 
+#[allow(unused)]
 fn main() {
     match Option::None {
         None => (),
@@ -316,10 +350,11 @@ fn main() {
             r#"
 enum Option { Some, None }
 
+#[allow(unused)]
 fn main() {
     match Option::None {
         SOME_VAR @ None => (),
-     // ^^^^^^^^ 💡 weak: Variable `SOME_VAR` should have snake_case name, e.g. `some_var`
+     // ^^^^^^^^ 💡 warn: Variable `SOME_VAR` should have snake_case name, e.g. `some_var`
         Some => (),
     }
 }
@@ -343,7 +378,9 @@ enum E {
 }
 
 mod F {
-    fn CheckItWorksWithCrateAttr(BAD_NAME_HI: u8) {}
+    fn CheckItWorksWithCrateAttr(BAD_NAME_HI: u8) {
+        _ = BAD_NAME_HI;
+    }
 }
     "#,
         );
@@ -389,7 +426,7 @@ fn qualify() {
 
     #[test] // Issue #8809.
     fn parenthesized_parameter() {
-        check_diagnostics(r#"fn f((O): _) {}"#)
+        check_diagnostics(r#"fn f((O): _) { _ = O; }"#)
     }
 
     #[test]
@@ -461,12 +498,14 @@ mod CheckNonstandardStyle {
 
 #[allow(bad_style)]
 mod CheckBadStyle {
-    fn HiImABadFnName() {}
+    struct fooo;
 }
 
 mod F {
     #![allow(non_snake_case)]
-    fn CheckItWorksWithModAttr(BAD_NAME_HI: u8) {}
+    fn CheckItWorksWithModAttr(BAD_NAME_HI: u8) {
+        _ = BAD_NAME_HI;
+    }
 }
 
 #[allow(non_snake_case, non_camel_case_types)]
@@ -482,5 +521,186 @@ pub const some_const: u8 = 10;
 pub static SomeStatic: u8 = 10;
     "#,
         );
+    }
+
+    #[test]
+    fn deny_attributes() {
+        check_diagnostics(
+            r#"
+#[deny(non_snake_case)]
+fn NonSnakeCaseName(some_var: u8) -> u8 {
+ //^^^^^^^^^^^^^^^^ 💡 error: Function `NonSnakeCaseName` should have snake_case name, e.g. `non_snake_case_name`
+    // cov_flags generated output from elsewhere in this file
+    extern "C" {
+        #[no_mangle]
+        static lower_case: u8;
+    }
+
+    let OtherVar = some_var + 1;
+      //^^^^^^^^ 💡 error: Variable `OtherVar` should have snake_case name, e.g. `other_var`
+    OtherVar
+}
+
+#[deny(nonstandard_style)]
+mod CheckNonstandardStyle {
+  //^^^^^^^^^^^^^^^^^^^^^ 💡 error: Module `CheckNonstandardStyle` should have snake_case name, e.g. `check_nonstandard_style`
+    fn HiImABadFnName() {}
+     //^^^^^^^^^^^^^^ 💡 error: Function `HiImABadFnName` should have snake_case name, e.g. `hi_im_abad_fn_name`
+}
+
+#[deny(warnings)]
+mod CheckBadStyle {
+  //^^^^^^^^^^^^^ 💡 error: Module `CheckBadStyle` should have snake_case name, e.g. `check_bad_style`
+    struct fooo;
+         //^^^^ 💡 error: Structure `fooo` should have CamelCase name, e.g. `Fooo`
+}
+
+mod F {
+  //^ 💡 warn: Module `F` should have snake_case name, e.g. `f`
+    #![deny(non_snake_case)]
+    fn CheckItWorksWithModAttr() {}
+     //^^^^^^^^^^^^^^^^^^^^^^^ 💡 error: Function `CheckItWorksWithModAttr` should have snake_case name, e.g. `check_it_works_with_mod_attr`
+}
+
+#[deny(non_snake_case, non_camel_case_types)]
+pub struct some_type {
+         //^^^^^^^^^ 💡 error: Structure `some_type` should have CamelCase name, e.g. `SomeType`
+    SOME_FIELD: u8,
+  //^^^^^^^^^^ 💡 error: Field `SOME_FIELD` should have snake_case name, e.g. `some_field`
+    SomeField: u16,
+  //^^^^^^^^^  💡 error: Field `SomeField` should have snake_case name, e.g. `some_field`
+}
+
+#[deny(non_upper_case_globals)]
+pub const some_const: u8 = 10;
+        //^^^^^^^^^^ 💡 error: Constant `some_const` should have UPPER_SNAKE_CASE name, e.g. `SOME_CONST`
+
+#[deny(non_upper_case_globals)]
+pub static SomeStatic: u8 = 10;
+         //^^^^^^^^^^ 💡 error: Static variable `SomeStatic` should have UPPER_SNAKE_CASE name, e.g. `SOME_STATIC`
+    "#,
+        );
+    }
+
+    #[test]
+    fn fn_inner_items() {
+        check_diagnostics(
+            r#"
+fn main() {
+    const foo: bool = true;
+        //^^^ 💡 warn: Constant `foo` should have UPPER_SNAKE_CASE name, e.g. `FOO`
+    static bar: bool = true;
+         //^^^ 💡 warn: Static variable `bar` should have UPPER_SNAKE_CASE name, e.g. `BAR`
+    fn BAZ() {
+     //^^^ 💡 warn: Function `BAZ` should have snake_case name, e.g. `baz`
+        const foo: bool = true;
+            //^^^ 💡 warn: Constant `foo` should have UPPER_SNAKE_CASE name, e.g. `FOO`
+        static bar: bool = true;
+             //^^^ 💡 warn: Static variable `bar` should have UPPER_SNAKE_CASE name, e.g. `BAR`
+        fn BAZ() {
+         //^^^ 💡 warn: Function `BAZ` should have snake_case name, e.g. `baz`
+            let _INNER_INNER = 42;
+              //^^^^^^^^^^^^ 💡 warn: Variable `_INNER_INNER` should have snake_case name, e.g. `_inner_inner`
+        }
+
+        let _INNER_LOCAL = 42;
+          //^^^^^^^^^^^^ 💡 warn: Variable `_INNER_LOCAL` should have snake_case name, e.g. `_inner_local`
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn const_body_inner_items() {
+        check_diagnostics(
+            r#"
+const _: () = {
+    static bar: bool = true;
+         //^^^ 💡 warn: Static variable `bar` should have UPPER_SNAKE_CASE name, e.g. `BAR`
+    fn BAZ() {}
+     //^^^ 💡 warn: Function `BAZ` should have snake_case name, e.g. `baz`
+
+    const foo: () = {
+        //^^^ 💡 warn: Constant `foo` should have UPPER_SNAKE_CASE name, e.g. `FOO`
+        const foo: bool = true;
+            //^^^ 💡 warn: Constant `foo` should have UPPER_SNAKE_CASE name, e.g. `FOO`
+        static bar: bool = true;
+             //^^^ 💡 warn: Static variable `bar` should have UPPER_SNAKE_CASE name, e.g. `BAR`
+        fn BAZ() {}
+         //^^^ 💡 warn: Function `BAZ` should have snake_case name, e.g. `baz`
+    };
+};
+"#,
+        );
+    }
+
+    #[test]
+    fn static_body_inner_items() {
+        check_diagnostics(
+            r#"
+static FOO: () = {
+    const foo: bool = true;
+        //^^^ 💡 warn: Constant `foo` should have UPPER_SNAKE_CASE name, e.g. `FOO`
+    fn BAZ() {}
+     //^^^ 💡 warn: Function `BAZ` should have snake_case name, e.g. `baz`
+
+    static bar: () = {
+         //^^^ 💡 warn: Static variable `bar` should have UPPER_SNAKE_CASE name, e.g. `BAR`
+        const foo: bool = true;
+            //^^^ 💡 warn: Constant `foo` should have UPPER_SNAKE_CASE name, e.g. `FOO`
+        static bar: bool = true;
+             //^^^ 💡 warn: Static variable `bar` should have UPPER_SNAKE_CASE name, e.g. `BAR`
+        fn BAZ() {}
+         //^^^ 💡 warn: Function `BAZ` should have snake_case name, e.g. `baz`
+    };
+};
+"#,
+        );
+    }
+
+    #[test]
+    fn enum_variant_body_inner_item() {
+        check_diagnostics(
+            r#"
+enum E {
+    A = {
+        const foo: bool = true;
+            //^^^ 💡 warn: Constant `foo` should have UPPER_SNAKE_CASE name, e.g. `FOO`
+        static bar: bool = true;
+             //^^^ 💡 warn: Static variable `bar` should have UPPER_SNAKE_CASE name, e.g. `BAR`
+        fn BAZ() {}
+         //^^^ 💡 warn: Function `BAZ` should have snake_case name, e.g. `baz`
+        42
+    },
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn module_name_inline() {
+        check_diagnostics(
+            r#"
+mod M {
+  //^ 💡 warn: Module `M` should have snake_case name, e.g. `m`
+    mod IncorrectCase {}
+      //^^^^^^^^^^^^^ 💡 warn: Module `IncorrectCase` should have snake_case name, e.g. `incorrect_case`
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn module_name_decl() {
+        check_diagnostics(
+            r#"
+//- /Foo.rs
+
+//- /main.rs
+mod Foo;
+  //^^^ 💡 warn: Module `Foo` should have snake_case name, e.g. `foo`
+"#,
+        )
     }
 }

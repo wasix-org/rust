@@ -1,5 +1,5 @@
 use crate::errors::{
-    MultipleWhereClauses, UnexpectedDefaultValueForLifetimeInGenericParameters,
+    self, MultipleWhereClauses, UnexpectedDefaultValueForLifetimeInGenericParameters,
     UnexpectedSelfInGenericParameters, WhereClauseBeforeTupleStructBody,
     WhereClauseBeforeTupleStructBodySugg,
 };
@@ -43,6 +43,15 @@ impl<'a> Parser<'a> {
     fn parse_ty_param(&mut self, preceding_attrs: AttrVec) -> PResult<'a, GenericParam> {
         let ident = self.parse_ident()?;
 
+        // We might have a typo'd `Const` that was parsed as a type parameter.
+        if self.may_recover()
+            && ident.name.as_str().to_ascii_lowercase() == kw::Const.as_str()
+            && self.check_ident()
+        // `Const` followed by IDENT
+        {
+            return self.recover_const_param_with_mistyped_const(preceding_attrs, ident);
+        }
+
         // Parse optional colon and param bounds.
         let mut colon_span = None;
         let bounds = if self.eat(&token::Colon) {
@@ -53,9 +62,9 @@ impl<'a> Parser<'a> {
                 let snapshot = self.create_snapshot_for_diagnostic();
                 match self.parse_ty() {
                     Ok(p) => {
-                        if let TyKind::ImplTrait(_, bounds) = &(*p).kind {
+                        if let TyKind::ImplTrait(_, bounds) = &p.kind {
                             let span = impl_span.to(self.token.span.shrink_to_lo());
-                            let mut err = self.struct_span_err(
+                            let mut err = self.dcx().struct_span_err(
                                 span,
                                 "expected trait bound, found `impl Trait` type",
                             );
@@ -68,7 +77,6 @@ impl<'a> Parser<'a> {
                                     Applicability::MachineApplicable,
                                 );
                             }
-                            err.emit();
                             return Err(err);
                         }
                     }
@@ -78,7 +86,7 @@ impl<'a> Parser<'a> {
                 }
                 self.restore_snapshot(snapshot);
             }
-            self.parse_generic_bounds(colon_span)?
+            self.parse_generic_bounds()?
         } else {
             Vec::new()
         };
@@ -120,6 +128,42 @@ impl<'a> Parser<'a> {
         })
     }
 
+    pub(crate) fn recover_const_param_with_mistyped_const(
+        &mut self,
+        preceding_attrs: AttrVec,
+        mistyped_const_ident: Ident,
+    ) -> PResult<'a, GenericParam> {
+        let ident = self.parse_ident()?;
+        self.expect(&token::Colon)?;
+        let ty = self.parse_ty()?;
+
+        // Parse optional const generics default value.
+        let default = if self.eat(&token::Eq) { Some(self.parse_const_arg()?) } else { None };
+
+        self.dcx()
+            .struct_span_err(
+                mistyped_const_ident.span,
+                format!("`const` keyword was mistyped as `{}`", mistyped_const_ident.as_str()),
+            )
+            .span_suggestion_verbose_mv(
+                mistyped_const_ident.span,
+                "use the `const` keyword",
+                kw::Const.as_str(),
+                Applicability::MachineApplicable,
+            )
+            .emit();
+
+        Ok(GenericParam {
+            ident,
+            id: ast::DUMMY_NODE_ID,
+            attrs: preceding_attrs,
+            bounds: Vec::new(),
+            kind: GenericParamKind::Const { ty, kw_span: mistyped_const_ident.span, default },
+            is_placeholder: false,
+            colon_span: None,
+        })
+    }
+
     /// Parses a (possibly empty) list of lifetime and type parameters, possibly including
     /// a trailing comma and erroneous trailing attributes.
     pub(super) fn parse_generic_params(&mut self) -> PResult<'a, ThinVec<ast::GenericParam>> {
@@ -132,7 +176,7 @@ impl<'a> Parser<'a> {
                     if this.eat_keyword_noexpect(kw::SelfUpper) {
                         // `Self` as a generic param is invalid. Here we emit the diagnostic and continue parsing
                         // as if `Self` never existed.
-                        this.sess.emit_err(UnexpectedSelfInGenericParameters {
+                        this.dcx().emit_err(UnexpectedSelfInGenericParameters {
                             span: this.prev_token.span,
                         });
 
@@ -156,7 +200,7 @@ impl<'a> Parser<'a> {
                             this.bump(); // `=`
                             this.bump(); // `'lifetime`
                             let span = lo.to(this.prev_token.span);
-                            this.sess.emit_err(
+                            this.dcx().emit_err(
                                 UnexpectedDefaultValueForLifetimeInGenericParameters { span },
                             );
                         }
@@ -181,12 +225,9 @@ impl<'a> Parser<'a> {
                         let snapshot = this.create_snapshot_for_diagnostic();
                         match this.parse_ty_where_predicate() {
                             Ok(where_predicate) => {
-                                this.struct_span_err(
-                                    where_predicate.span(),
-                                    "bounds on associated types do not belong here",
-                                )
-                                .span_label(where_predicate.span(), "belongs in `where` clause")
-                                .emit();
+                                this.dcx().emit_err(errors::BadAssocTypeBounds {
+                                    span: where_predicate.span(),
+                                });
                                 // FIXME - try to continue parsing other generics?
                                 return Ok((None, TrailingToken::None));
                             }
@@ -201,22 +242,11 @@ impl<'a> Parser<'a> {
                         // Check for trailing attributes and stop parsing.
                         if !attrs.is_empty() {
                             if !params.is_empty() {
-                                this.struct_span_err(
-                                    attrs[0].span,
-                                    "trailing attribute after generic parameter",
-                                )
-                                .span_label(attrs[0].span, "attributes must go before parameters")
-                                .emit();
+                                this.dcx()
+                                    .emit_err(errors::AttrAfterGeneric { span: attrs[0].span });
                             } else {
-                                this.struct_span_err(
-                                    attrs[0].span,
-                                    "attribute without generic parameters",
-                                )
-                                .span_label(
-                                    attrs[0].span,
-                                    "attributes are only permitted when preceding parameters",
-                                )
-                                .emit();
+                                this.dcx()
+                                    .emit_err(errors::AttrWithoutGenerics { span: attrs[0].span });
                             }
                         }
                         return Ok((None, TrailingToken::None));
@@ -249,7 +279,7 @@ impl<'a> Parser<'a> {
         let span_lo = self.token.span;
         let (params, span) = if self.eat_lt() {
             let params = self.parse_generic_params()?;
-            self.expect_gt()?;
+            self.expect_gt_or_maybe_suggest_closing_generics(&params)?;
             (params, span_lo.to(self.prev_token.span))
         } else {
             (ThinVec::new(), self.prev_token.span.shrink_to_hi())
@@ -304,12 +334,7 @@ impl<'a> Parser<'a> {
         // change we parse those generics now, but report an error.
         if self.choose_generics_over_qpath(0) {
             let generics = self.parse_generics()?;
-            self.struct_span_err(
-                generics.span,
-                "generic parameters on `where` clauses are reserved for future use",
-            )
-            .span_label(generics.span, "currently unsupported")
-            .emit();
+            self.dcx().emit_err(errors::WhereOnGenerics { span: generics.span });
         }
 
         loop {
@@ -345,7 +370,7 @@ impl<'a> Parser<'a> {
             let ate_comma = self.eat(&token::Comma);
 
             if self.eat_keyword_noexpect(kw::Where) {
-                self.sess.emit_err(MultipleWhereClauses {
+                self.dcx().emit_err(MultipleWhereClauses {
                     span: self.token.span,
                     previous: pred_lo,
                     between: prev_token.shrink_to_hi().to(self.prev_token.span),
@@ -397,7 +422,7 @@ impl<'a> Parser<'a> {
                         let body_sp = pred_lo.to(snapshot.prev_token.span);
                         let map = self.sess.source_map();
 
-                        self.sess.emit_err(WhereClauseBeforeTupleStructBody {
+                        self.dcx().emit_err(WhereClauseBeforeTupleStructBody {
                             span: where_sp,
                             name: struct_name.span,
                             body: body_sp,
@@ -438,7 +463,7 @@ impl<'a> Parser<'a> {
         // or with mandatory equality sign and the second type.
         let ty = self.parse_ty_for_where_clause()?;
         if self.eat(&token::Colon) {
-            let bounds = self.parse_generic_bounds(Some(self.prev_token.span))?;
+            let bounds = self.parse_generic_bounds()?;
             Ok(ast::WherePredicate::BoundPredicate(ast::WhereBoundPredicate {
                 span: lo.to(self.prev_token.span),
                 bound_generic_params: lifetime_defs,
@@ -472,6 +497,8 @@ impl<'a> Parser<'a> {
         //     `<` (LIFETIME|IDENT) `:` - generic parameter with bounds
         //     `<` (LIFETIME|IDENT) `=` - generic parameter with a default
         //     `<` const                - generic const parameter
+        //     `<` IDENT `?`            - RECOVERY for `impl<T ?Bound` missing a `:`, meant to
+        //                                avoid the `T?` to `Option<T>` recovery for types.
         // The only truly ambiguous case is
         //     `<` IDENT `>` `::` IDENT ...
         // we disambiguate it in favor of generics (`impl<T> ::absolute::Path<T> { ... }`)
@@ -482,6 +509,9 @@ impl<'a> Parser<'a> {
                 || self.look_ahead(start + 1, |t| t.is_lifetime() || t.is_ident())
                     && self.look_ahead(start + 2, |t| {
                         matches!(t.kind, token::Gt | token::Comma | token::Colon | token::Eq)
+                        // Recovery-only branch -- this could be removed,
+                        // since it only affects diagnostics currently.
+                            || matches!(t.kind, token::Question)
                     })
                 || self.is_keyword_ahead(start + 1, &[kw::Const]))
     }

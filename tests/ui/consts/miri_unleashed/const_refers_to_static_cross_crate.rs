@@ -7,13 +7,16 @@ extern crate static_cross_crate;
 
 // Sneaky: reference to a mutable static.
 // Allowing this would be a disaster for pattern matching, we could violate exhaustiveness checking!
-const SLICE_MUT: &[u8; 1] = { //~ ERROR undefined behavior to use this value
-//~| encountered a reference pointing to a static variable
+const SLICE_MUT: &[u8; 1] = {
+    //~^ ERROR undefined behavior to use this value
+    //~| encountered a reference pointing to a static variable
     unsafe { &static_cross_crate::ZERO }
+    //~^ WARN shared reference of mutable static is discouraged [static_mut_ref]
 };
 
-const U8_MUT: &u8 = { //~ ERROR undefined behavior to use this value
-//~| encountered a reference pointing to a static variable
+const U8_MUT: &u8 = {
+    //~^ ERROR undefined behavior to use this value
+    //~| encountered a reference pointing to a static variable
     unsafe { &static_cross_crate::ZERO[0] }
 };
 
@@ -24,16 +27,20 @@ const U8_MUT2: &u8 = {
     //~| constant accesses static
 };
 const U8_MUT3: &u8 = {
-    unsafe { match static_cross_crate::OPT_ZERO { Some(ref u) => u, None => panic!() } }
-    //~^ ERROR evaluation of constant value failed
-    //~| constant accesses static
+    unsafe {
+        match static_cross_crate::OPT_ZERO {
+            //~^ ERROR evaluation of constant value failed
+            //~| constant accesses static
+            Some(ref u) => u,
+            None => panic!(),
+        }
+    }
 };
 
 pub fn test(x: &[u8; 1]) -> bool {
     match x {
         SLICE_MUT => true,
         //~^ ERROR could not evaluate constant pattern
-        //~| ERROR could not evaluate constant pattern
         &[1..] => false,
     }
 }
@@ -42,7 +49,6 @@ pub fn test2(x: &u8) -> bool {
     match x {
         U8_MUT => true,
         //~^ ERROR could not evaluate constant pattern
-        //~| ERROR could not evaluate constant pattern
         &(1..) => false,
     }
 }
@@ -53,7 +59,6 @@ pub fn test3(x: &u8) -> bool {
     match x {
         U8_MUT2 => true,
         //~^ ERROR could not evaluate constant pattern
-        //~| ERROR could not evaluate constant pattern
         &(1..) => false,
     }
 }
@@ -61,7 +66,6 @@ pub fn test4(x: &u8) -> bool {
     match x {
         U8_MUT3 => true,
         //~^ ERROR could not evaluate constant pattern
-        //~| ERROR could not evaluate constant pattern
         &(1..) => false,
     }
 }

@@ -1,6 +1,6 @@
+use std::any::Any;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::convert::TryInto;
 use std::fs::{
     read_dir, remove_dir, remove_file, rename, DirBuilder, File, FileType, OpenOptions, ReadDir,
 };
@@ -11,13 +11,12 @@ use std::time::SystemTime;
 use log::trace;
 
 use rustc_data_structures::fx::FxHashMap;
-use rustc_target::abi::{Align, Size};
+use rustc_middle::ty::TyCtxt;
+use rustc_target::abi::Size;
 
 use crate::shims::os_str::bytes_to_os_str;
 use crate::*;
-use shims::os_str::os_str_to_bytes;
 use shims::time::system_time_to_duration;
-use shims::unix::linux::fd::epoll::Epoll;
 
 #[derive(Debug)]
 pub struct FileHandle {
@@ -25,21 +24,14 @@ pub struct FileHandle {
     writable: bool,
 }
 
-pub trait FileDescriptor: std::fmt::Debug {
+pub trait FileDescriptor: std::fmt::Debug + Any {
     fn name(&self) -> &'static str;
-
-    fn as_file_handle<'tcx>(&self) -> InterpResult<'tcx, &FileHandle> {
-        throw_unsup_format!("{} cannot be used as FileHandle", self.name());
-    }
-
-    fn as_epoll_handle<'tcx>(&mut self) -> InterpResult<'tcx, &mut Epoll> {
-        throw_unsup_format!("not an epoll file descriptor");
-    }
 
     fn read<'tcx>(
         &mut self,
         _communicate_allowed: bool,
         _bytes: &mut [u8],
+        _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         throw_unsup_format!("cannot read from {}", self.name());
     }
@@ -48,6 +40,7 @@ pub trait FileDescriptor: std::fmt::Debug {
         &self,
         _communicate_allowed: bool,
         _bytes: &[u8],
+        _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         throw_unsup_format!("cannot write to {}", self.name());
     }
@@ -69,11 +62,20 @@ pub trait FileDescriptor: std::fmt::Debug {
 
     fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>>;
 
-    fn is_tty(&self) -> bool;
+    fn is_tty(&self, _communicate_allowed: bool) -> bool {
+        false
+    }
+}
 
-    #[cfg(unix)]
-    fn as_unix_host_fd(&self) -> Option<i32> {
-        None
+impl dyn FileDescriptor {
+    #[inline(always)]
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        (self as &dyn Any).downcast_ref()
+    }
+
+    #[inline(always)]
+    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
+        (self as &mut dyn Any).downcast_mut()
     }
 }
 
@@ -82,14 +84,11 @@ impl FileDescriptor for FileHandle {
         "FILE"
     }
 
-    fn as_file_handle<'tcx>(&self) -> InterpResult<'tcx, &FileHandle> {
-        Ok(self)
-    }
-
     fn read<'tcx>(
         &mut self,
         communicate_allowed: bool,
         bytes: &mut [u8],
+        _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         assert!(communicate_allowed, "isolation should have prevented even opening a file");
         Ok(self.file.read(bytes))
@@ -99,6 +98,7 @@ impl FileDescriptor for FileHandle {
         &self,
         communicate_allowed: bool,
         bytes: &[u8],
+        _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         assert!(communicate_allowed, "isolation should have prevented even opening a file");
         Ok((&mut &self.file).write(bytes))
@@ -144,14 +144,8 @@ impl FileDescriptor for FileHandle {
         Ok(Box::new(FileHandle { file: duplicated, writable: self.writable }))
     }
 
-    #[cfg(unix)]
-    fn as_unix_host_fd(&self) -> Option<i32> {
-        use std::os::unix::io::AsRawFd;
-        Some(self.file.as_raw_fd())
-    }
-
-    fn is_tty(&self) -> bool {
-        self.file.is_terminal()
+    fn is_tty(&self, communicate_allowed: bool) -> bool {
+        communicate_allowed && self.file.is_terminal()
     }
 }
 
@@ -164,6 +158,7 @@ impl FileDescriptor for io::Stdin {
         &mut self,
         communicate_allowed: bool,
         bytes: &mut [u8],
+        _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         if !communicate_allowed {
             // We want isolation mode to be deterministic, so we have to disallow all reads, even stdin.
@@ -176,13 +171,8 @@ impl FileDescriptor for io::Stdin {
         Ok(Box::new(io::stdin()))
     }
 
-    #[cfg(unix)]
-    fn as_unix_host_fd(&self) -> Option<i32> {
-        Some(libc::STDIN_FILENO)
-    }
-
-    fn is_tty(&self) -> bool {
-        self.is_terminal()
+    fn is_tty(&self, communicate_allowed: bool) -> bool {
+        communicate_allowed && self.is_terminal()
     }
 }
 
@@ -195,6 +185,7 @@ impl FileDescriptor for io::Stdout {
         &self,
         _communicate_allowed: bool,
         bytes: &[u8],
+        _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         // We allow writing to stderr even with isolation enabled.
         let result = Write::write(&mut { self }, bytes);
@@ -212,13 +203,8 @@ impl FileDescriptor for io::Stdout {
         Ok(Box::new(io::stdout()))
     }
 
-    #[cfg(unix)]
-    fn as_unix_host_fd(&self) -> Option<i32> {
-        Some(libc::STDOUT_FILENO)
-    }
-
-    fn is_tty(&self) -> bool {
-        self.is_terminal()
+    fn is_tty(&self, communicate_allowed: bool) -> bool {
+        communicate_allowed && self.is_terminal()
     }
 }
 
@@ -231,6 +217,7 @@ impl FileDescriptor for io::Stderr {
         &self,
         _communicate_allowed: bool,
         bytes: &[u8],
+        _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         // We allow writing to stderr even with isolation enabled.
         // No need to flush, stderr is not buffered.
@@ -241,13 +228,8 @@ impl FileDescriptor for io::Stderr {
         Ok(Box::new(io::stderr()))
     }
 
-    #[cfg(unix)]
-    fn as_unix_host_fd(&self) -> Option<i32> {
-        Some(libc::STDERR_FILENO)
-    }
-
-    fn is_tty(&self) -> bool {
-        self.is_terminal()
+    fn is_tty(&self, communicate_allowed: bool) -> bool {
+        communicate_allowed && self.is_terminal()
     }
 }
 
@@ -263,6 +245,7 @@ impl FileDescriptor for NullOutput {
         &self,
         _communicate_allowed: bool,
         bytes: &[u8],
+        _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         // We just don't write anything, but report to the user that we did.
         Ok(Ok(bytes.len()))
@@ -271,10 +254,6 @@ impl FileDescriptor for NullOutput {
     fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>> {
         Ok(Box::new(NullOutput))
     }
-
-    fn is_tty(&self) -> bool {
-        false
-    }
 }
 
 #[derive(Debug)]
@@ -282,8 +261,8 @@ pub struct FileHandler {
     pub handles: BTreeMap<i32, Box<dyn FileDescriptor>>,
 }
 
-impl VisitTags for FileHandler {
-    fn visit_tags(&self, _visit: &mut dyn FnMut(BorTag)) {
+impl VisitProvenance for FileHandler {
+    fn visit_provenance(&self, _visit: &mut VisitWith<'_>) {
         // All our FileDescriptor do not have any tags.
     }
 }
@@ -351,7 +330,8 @@ trait EvalContextExtPrivate<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx
         let (created_sec, created_nsec) = metadata.created.unwrap_or((0, 0));
         let (modified_sec, modified_nsec) = metadata.modified.unwrap_or((0, 0));
 
-        let buf = this.deref_operand(buf_op)?;
+        let buf = this.deref_pointer_as(buf_op, this.libc_ty_layout("stat"))?;
+
         this.write_int_fields_named(
             &[
                 ("st_dev", 0),
@@ -464,7 +444,7 @@ pub struct DirHandler {
 }
 
 impl DirHandler {
-    #[allow(clippy::integer_arithmetic)]
+    #[allow(clippy::arithmetic_side_effects)]
     fn insert_new(&mut self, read_dir: ReadDir) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -483,12 +463,12 @@ impl Default for DirHandler {
     }
 }
 
-impl VisitTags for DirHandler {
-    fn visit_tags(&self, visit: &mut dyn FnMut(BorTag)) {
+impl VisitProvenance for DirHandler {
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         let DirHandler { streams, next_id: _ } = self;
 
         for dir in streams.values() {
-            dir.entry.visit_tags(visit);
+            dir.entry.visit_provenance(visit);
         }
     }
 }
@@ -579,8 +559,21 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 );
             };
 
-            if mode != 0o666 {
-                throw_unsup_format!("non-default mode 0o{:o} is not supported", mode);
+            #[cfg(unix)]
+            {
+                // Support all modes on UNIX host
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(mode);
+            }
+            #[cfg(not(unix))]
+            {
+                // Only support default mode for non-UNIX (i.e. Windows) host
+                if mode != 0o666 {
+                    throw_unsup_format!(
+                        "non-default mode 0o{:o} is not supported on non-Unix hosts",
+                        mode
+                    );
+                }
             }
 
             mirror |= o_creat;
@@ -643,13 +636,6 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let fd = this.read_scalar(&args[0])?.to_i32()?;
         let cmd = this.read_scalar(&args[1])?.to_i32()?;
 
-        // Reject if isolation is enabled.
-        if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
-            this.reject_in_isolation("`fcntl`", reject_with)?;
-            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
-            return Ok(-1);
-        }
-
         // We only support getting the flags for a descriptor.
         if cmd == this.eval_libc_i32("F_GETFD") {
             // Currently this is the only flag that `F_GETFD` returns. It is OK to just return the
@@ -692,9 +678,21 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 None => this.handle_not_found(),
             }
         } else if this.tcx.sess.target.os == "macos" && cmd == this.eval_libc_i32("F_FULLFSYNC") {
+            // Reject if isolation is enabled.
+            if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
+                this.reject_in_isolation("`fcntl`", reject_with)?;
+                this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
+                return Ok(-1);
+            }
+
             if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
                 // FIXME: Support fullfsync for all FDs
-                let FileHandle { file, writable } = file_descriptor.as_file_handle()?;
+                let FileHandle { file, writable } =
+                    file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
+                        err_unsup_format!(
+                            "`F_FULLFSYNC` is only supported on file-backed file descriptors"
+                        )
+                    })?;
                 let io_result = maybe_sync_file(file, *writable, File::sync_all);
                 this.try_unwrap_io_result(io_result)
             } else {
@@ -744,12 +742,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         trace!("Reading from FD {}, size {}", fd, count);
 
         // Check that the *entire* buffer is actually valid memory.
-        this.check_ptr_access_align(
-            buf,
-            Size::from_bytes(count),
-            Align::ONE,
-            CheckInAllocMsg::MemoryAccessTest,
-        )?;
+        this.check_ptr_access(buf, Size::from_bytes(count), CheckInAllocMsg::MemoryAccessTest)?;
 
         // We cap the number of read bytes to the largest value that we are able to fit in both the
         // host's and target's `isize`. This saves us from having to handle overflows later.
@@ -766,8 +759,9 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             let mut bytes = vec![0; usize::try_from(count).unwrap()];
             // `File::read` never returns a value larger than `count`,
             // so this cannot fail.
-            let result =
-                file_descriptor.read(communicate, &mut bytes)?.map(|c| i64::try_from(c).unwrap());
+            let result = file_descriptor
+                .read(communicate, &mut bytes, *this.tcx)?
+                .map(|c| i64::try_from(c).unwrap());
 
             match result {
                 Ok(read_bytes) => {
@@ -797,12 +791,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         // Isolation check is done via `FileDescriptor` trait.
 
         // Check that the *entire* buffer is actually valid memory.
-        this.check_ptr_access_align(
-            buf,
-            Size::from_bytes(count),
-            Align::ONE,
-            CheckInAllocMsg::MemoryAccessTest,
-        )?;
+        this.check_ptr_access(buf, Size::from_bytes(count), CheckInAllocMsg::MemoryAccessTest)?;
 
         // We cap the number of written bytes to the largest value that we are able to fit in both the
         // host's and target's `isize`. This saves us from having to handle overflows later.
@@ -813,8 +802,9 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
             let bytes = this.read_bytes_ptr_strip_provenance(buf, Size::from_bytes(count))?;
-            let result =
-                file_descriptor.write(communicate, bytes)?.map(|c| i64::try_from(c).unwrap());
+            let result = file_descriptor
+                .write(communicate, bytes, *this.tcx)?
+                .map(|c| i64::try_from(c).unwrap());
             this.try_unwrap_io_result(result)
         } else {
             this.handle_not_found()
@@ -1013,20 +1003,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             return Ok(-1);
         }
 
-        // Under normal circumstances, we would use `deref_operand(statxbuf_op)` to produce a
-        // proper `MemPlace` and then write the results of this function to it. However, the
-        // `syscall` function is untyped. This means that all the `statx` parameters are provided
-        // as `isize`s instead of having the proper types. Thus, we have to recover the layout of
-        // `statxbuf_op` by using the `libc::statx` struct type.
-        let statxbuf = {
-            let statx_layout = this.libc_ty_layout("statx");
-            MPlaceTy::from_aligned_ptr(statxbuf_ptr, statx_layout)
-        };
+        let statxbuf = this.deref_pointer_as(statxbuf_op, this.libc_ty_layout("statx"))?;
 
         let path = this.read_path_from_c_str(pathname_ptr)?.into_owned();
         // See <https://github.com/rust-lang/rust/pull/79196> for a discussion of argument sizes.
-        let at_ampty_path = this.eval_libc_i32("AT_EMPTY_PATH");
-        let empty_path_flag = flags & at_ampty_path == at_ampty_path;
+        let at_empty_path = this.eval_libc_i32("AT_EMPTY_PATH");
+        let empty_path_flag = flags & at_empty_path == at_empty_path;
         // We only support:
         // * interpreting `path` as an absolute directory,
         // * interpreting `path` as a path relative to `dirfd` when the latter is `AT_FDCWD`, or
@@ -1063,7 +1045,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             return Ok(-1);
         }
 
-        // the `_mask_op` paramter specifies the file information that the caller requested.
+        // the `_mask_op` parameter specifies the file information that the caller requested.
         // However `statx` is allowed to return information that was not requested or to not
         // return information that was requested. This `mask` represents the information we can
         // actually provide for any target.
@@ -1148,7 +1130,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 ("tv_sec", access_sec.into()),
                 ("tv_nsec", access_nsec.into()),
             ],
-            &this.mplace_field_named(&statxbuf, "stx_atime")?,
+            &this.project_field_named(&statxbuf, "stx_atime")?,
         )?;
         #[rustfmt::skip]
         this.write_int_fields_named(
@@ -1156,7 +1138,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 ("tv_sec", created_sec.into()),
                 ("tv_nsec", created_nsec.into()),
             ],
-            &this.mplace_field_named(&statxbuf, "stx_btime")?,
+            &this.project_field_named(&statxbuf, "stx_btime")?,
         )?;
         #[rustfmt::skip]
         this.write_int_fields_named(
@@ -1164,7 +1146,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 ("tv_sec", 0.into()),
                 ("tv_nsec", 0.into()),
             ],
-            &this.mplace_field_named(&statxbuf, "stx_ctime")?,
+            &this.project_field_named(&statxbuf, "stx_ctime")?,
         )?;
         #[rustfmt::skip]
         this.write_int_fields_named(
@@ -1172,7 +1154,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 ("tv_sec", modified_sec.into()),
                 ("tv_nsec", modified_nsec.into()),
             ],
-            &this.mplace_field_named(&statxbuf, "stx_mtime")?,
+            &this.project_field_named(&statxbuf, "stx_mtime")?,
         )?;
 
         Ok(0)
@@ -1338,7 +1320,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 let mut name = dir_entry.file_name(); // not a Path as there are no separators!
                 name.push("\0"); // Add a NUL terminator
-                let name_bytes = os_str_to_bytes(&name)?;
+                let name_bytes = name.as_encoded_bytes();
                 let name_len = u64::try_from(name_bytes.len()).unwrap();
 
                 let dirent64_layout = this.libc_ty_layout("dirent64");
@@ -1364,7 +1346,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                         ("d_reclen", size.into()),
                         ("d_type", file_type.into()),
                     ],
-                    &MPlaceTy::from_aligned_ptr(entry, dirent64_layout),
+                    &this.ptr_to_mplace(entry, dirent64_layout),
                 )?;
 
                 let name_ptr = entry.offset(Size::from_bytes(d_name_offset), this)?;
@@ -1427,13 +1409,13 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 //     pub d_name: [c_char; 1024],
                 // }
 
-                let entry_place = this.deref_operand(entry_op)?;
-                let name_place = this.mplace_field(&entry_place, 5)?;
+                let entry_place = this.deref_pointer_as(entry_op, this.libc_ty_layout("dirent"))?;
+                let name_place = this.project_field(&entry_place, 5)?;
 
                 let file_name = dir_entry.file_name(); // not a Path as there are no separators!
                 let (name_fits, file_name_buf_len) = this.write_os_str_to_c_str(
                     &file_name,
-                    name_place.ptr,
+                    name_place.ptr(),
                     name_place.layout.size.bytes(),
                 )?;
                 let file_name_len = file_name_buf_len.checked_sub(1).unwrap();
@@ -1442,8 +1424,6 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                         "a directory entry had a name too large to fit in libc::dirent"
                     );
                 }
-
-                let entry_place = this.deref_operand(entry_op)?;
 
                 // If the host is a Unix system, fill in the inode number with its real value.
                 // If not, use 0 as a fallback value.
@@ -1465,14 +1445,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     &entry_place,
                 )?;
 
-                let result_place = this.deref_operand(result_op)?;
-                this.write_scalar(this.read_scalar(entry_op)?, &result_place.into())?;
+                let result_place = this.deref_pointer(result_op)?;
+                this.write_scalar(this.read_scalar(entry_op)?, &result_place)?;
 
                 0
             }
             None => {
                 // end of stream: return 0, assign *result=NULL
-                this.write_null(&this.deref_operand(result_op)?.into())?;
+                this.write_null(&this.deref_pointer(result_op)?)?;
                 0
             }
             Some(Err(e)) =>
@@ -1510,15 +1490,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         }
     }
 
-    fn ftruncate64(
-        &mut self,
-        fd_op: &OpTy<'tcx, Provenance>,
-        length_op: &OpTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+    fn ftruncate64(&mut self, fd: i32, length: i128) -> InterpResult<'tcx, Scalar<Provenance>> {
         let this = self.eval_context_mut();
-
-        let fd = this.read_scalar(fd_op)?.to_i32()?;
-        let length = this.read_scalar(length_op)?.to_i64()?;
 
         // Reject if isolation is enabled.
         if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
@@ -1530,7 +1503,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         Ok(Scalar::from_i32(
             if let Some(file_descriptor) = this.machine.file_handler.handles.get_mut(&fd) {
                 // FIXME: Support ftruncate64 for all FDs
-                let FileHandle { file, writable } = file_descriptor.as_file_handle()?;
+                let FileHandle { file, writable } =
+                    file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
+                        err_unsup_format!(
+                            "`ftruncate64` is only supported on file-backed file descriptors"
+                        )
+                    })?;
                 if *writable {
                     if let Ok(length) = length.try_into() {
                         let result = file.set_len(length);
@@ -1571,7 +1549,10 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
             // FIXME: Support fsync for all FDs
-            let FileHandle { file, writable } = file_descriptor.as_file_handle()?;
+            let FileHandle { file, writable } =
+                file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
+                    err_unsup_format!("`fsync` is only supported on file-backed file descriptors")
+                })?;
             let io_result = maybe_sync_file(file, *writable, File::sync_all);
             this.try_unwrap_io_result(io_result)
         } else {
@@ -1593,7 +1574,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
             // FIXME: Support fdatasync for all FDs
-            let FileHandle { file, writable } = file_descriptor.as_file_handle()?;
+            let FileHandle { file, writable } =
+                file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
+                    err_unsup_format!(
+                        "`fdatasync` is only supported on file-backed file descriptors"
+                    )
+                })?;
             let io_result = maybe_sync_file(file, *writable, File::sync_data);
             this.try_unwrap_io_result(io_result)
         } else {
@@ -1638,7 +1624,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
             // FIXME: Support sync_data_range for all FDs
-            let FileHandle { file, writable } = file_descriptor.as_file_handle()?;
+            let FileHandle { file, writable } =
+                file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
+                    err_unsup_format!(
+                        "`sync_data_range` is only supported on file-backed file descriptors"
+                    )
+                })?;
             let io_result = maybe_sync_file(file, *writable, File::sync_data);
             Ok(Scalar::from_i32(this.try_unwrap_io_result(io_result)?))
         } else {
@@ -1676,7 +1667,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     Cow::Borrowed(resolved.as_ref()),
                     crate::shims::os_str::PathConversion::HostToTarget,
                 );
-                let mut path_bytes = crate::shims::os_str::os_str_to_bytes(resolved.as_ref())?;
+                let mut path_bytes = resolved.as_encoded_bytes();
                 let bufsize: usize = bufsize.try_into().unwrap();
                 if path_bytes.len() > bufsize {
                     path_bytes = &path_bytes[..bufsize]
@@ -1699,15 +1690,18 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let this = self.eval_context_mut();
         // "returns 1 if fd is an open file descriptor referring to a terminal;
         // otherwise 0 is returned, and errno is set to indicate the error"
-        if matches!(this.machine.isolated_op, IsolatedOp::Allow) {
-            let fd = this.read_scalar(miri_fd)?.to_i32()?;
-            if this.machine.file_handler.handles.get(&fd).map(|fd| fd.is_tty()) == Some(true) {
+        let fd = this.read_scalar(miri_fd)?.to_i32()?;
+        let error = if let Some(fd) = this.machine.file_handler.handles.get(&fd) {
+            if fd.is_tty(this.machine.communicate()) {
                 return Ok(Scalar::from_i32(1));
+            } else {
+                this.eval_libc("ENOTTY")
             }
-        }
-        // Fallback when the FD was not found or isolation is enabled.
-        let enotty = this.eval_libc("ENOTTY");
-        this.set_last_error(enotty)?;
+        } else {
+            // FD does not exist
+            this.eval_libc("EBADF")
+        };
+        this.set_last_error(error)?;
         Ok(Scalar::from_i32(0))
     }
 
@@ -1942,7 +1936,15 @@ impl FileMetadata {
     ) -> InterpResult<'tcx, Option<FileMetadata>> {
         let option = ecx.machine.file_handler.handles.get(&fd);
         let file = match option {
-            Some(file_descriptor) => &file_descriptor.as_file_handle()?.file,
+            Some(file_descriptor) =>
+                &file_descriptor
+                    .downcast_ref::<FileHandle>()
+                    .ok_or_else(|| {
+                        err_unsup_format!(
+                            "obtaining metadata is only supported on file-backed file descriptors"
+                        )
+                    })?
+                    .file,
             None => return ecx.handle_not_found().map(|_: i32| None),
         };
         let metadata = file.metadata();

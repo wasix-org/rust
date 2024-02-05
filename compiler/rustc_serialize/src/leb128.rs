@@ -1,3 +1,6 @@
+use crate::opaque::MemDecoder;
+use crate::serialize::Decoder;
+
 /// Returns the length of the longest LEB128 encoding for `T`, assuming `T` is an integer type
 pub const fn max_leb128_len<T>() -> usize {
     // The longest LEB128 encoding for an integer uses 7 bits per byte.
@@ -12,23 +15,20 @@ pub const fn largest_max_leb128_len() -> usize {
 macro_rules! impl_write_unsigned_leb128 {
     ($fn_name:ident, $int_ty:ty) => {
         #[inline]
-        pub fn $fn_name(
-            out: &mut [::std::mem::MaybeUninit<u8>; max_leb128_len::<$int_ty>()],
-            mut value: $int_ty,
-        ) -> &[u8] {
+        pub fn $fn_name(out: &mut [u8; max_leb128_len::<$int_ty>()], mut value: $int_ty) -> usize {
             let mut i = 0;
 
             loop {
                 if value < 0x80 {
                     unsafe {
-                        *out.get_unchecked_mut(i).as_mut_ptr() = value as u8;
+                        *out.get_unchecked_mut(i) = value as u8;
                     }
 
                     i += 1;
                     break;
                 } else {
                     unsafe {
-                        *out.get_unchecked_mut(i).as_mut_ptr() = ((value & 0x7f) | 0x80) as u8;
+                        *out.get_unchecked_mut(i) = ((value & 0x7f) | 0x80) as u8;
                     }
 
                     value >>= 7;
@@ -36,7 +36,7 @@ macro_rules! impl_write_unsigned_leb128 {
                 }
             }
 
-            unsafe { ::std::mem::MaybeUninit::slice_assume_init_ref(&out.get_unchecked(..i)) }
+            i
         }
     };
 }
@@ -50,21 +50,19 @@ impl_write_unsigned_leb128!(write_usize_leb128, usize);
 macro_rules! impl_read_unsigned_leb128 {
     ($fn_name:ident, $int_ty:ty) => {
         #[inline]
-        pub fn $fn_name(slice: &[u8], position: &mut usize) -> $int_ty {
+        pub fn $fn_name(decoder: &mut MemDecoder<'_>) -> $int_ty {
             // The first iteration of this loop is unpeeled. This is a
             // performance win because this code is hot and integer values less
             // than 128 are very common, typically occurring 50-80% or more of
             // the time, even for u64 and u128.
-            let byte = slice[*position];
-            *position += 1;
+            let byte = decoder.read_u8();
             if (byte & 0x80) == 0 {
                 return byte as $int_ty;
             }
             let mut result = (byte & 0x7F) as $int_ty;
             let mut shift = 7;
             loop {
-                let byte = slice[*position];
-                *position += 1;
+                let byte = decoder.read_u8();
                 if (byte & 0x80) == 0 {
                     result |= (byte as $int_ty) << shift;
                     return result;
@@ -86,10 +84,7 @@ impl_read_unsigned_leb128!(read_usize_leb128, usize);
 macro_rules! impl_write_signed_leb128 {
     ($fn_name:ident, $int_ty:ty) => {
         #[inline]
-        pub fn $fn_name(
-            out: &mut [::std::mem::MaybeUninit<u8>; max_leb128_len::<$int_ty>()],
-            mut value: $int_ty,
-        ) -> &[u8] {
+        pub fn $fn_name(out: &mut [u8; max_leb128_len::<$int_ty>()], mut value: $int_ty) -> usize {
             let mut i = 0;
 
             loop {
@@ -103,7 +98,7 @@ macro_rules! impl_write_signed_leb128 {
                 }
 
                 unsafe {
-                    *out.get_unchecked_mut(i).as_mut_ptr() = byte;
+                    *out.get_unchecked_mut(i) = byte;
                 }
 
                 i += 1;
@@ -113,7 +108,7 @@ macro_rules! impl_write_signed_leb128 {
                 }
             }
 
-            unsafe { ::std::mem::MaybeUninit::slice_assume_init_ref(&out.get_unchecked(..i)) }
+            i
         }
     };
 }
@@ -127,14 +122,13 @@ impl_write_signed_leb128!(write_isize_leb128, isize);
 macro_rules! impl_read_signed_leb128 {
     ($fn_name:ident, $int_ty:ty) => {
         #[inline]
-        pub fn $fn_name(slice: &[u8], position: &mut usize) -> $int_ty {
+        pub fn $fn_name(decoder: &mut MemDecoder<'_>) -> $int_ty {
             let mut result = 0;
             let mut shift = 0;
             let mut byte;
 
             loop {
-                byte = slice[*position];
-                *position += 1;
+                byte = decoder.read_u8();
                 result |= <$int_ty>::from(byte & 0x7F) << shift;
                 shift += 7;
 

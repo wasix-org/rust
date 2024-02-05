@@ -11,14 +11,16 @@
 //! modification. These are the ones containing the most important type-related
 //! information, such as `Ty`, `Predicate`, `Region`, and `Const`.
 //!
-//! There are three groups of traits involved in each traversal.
+//! There are three traits involved in each traversal.
 //! - `TypeFoldable`. This is implemented once for many types, including:
 //!   - Types of interest, for which the methods delegate to the folder.
 //!   - All other types, including generic containers like `Vec` and `Option`.
 //!     It defines a "skeleton" of how they should be folded.
-//! - `TypeSuperFoldable`. This is implemented only for each type of interest,
-//!   and defines the folding "skeleton" for these types.
-//! - `TypeFolder`/`FallibleTypeFolder. One of these is implemented for each
+//! - `TypeSuperFoldable`. This is implemented only for recursive types of
+//!   interest, and defines the folding "skeleton" for these types. (This
+//!   excludes `Region` because it is non-recursive, i.e. it never contains
+//!   other types of interest.)
+//! - `TypeFolder`/`FallibleTypeFolder`. One of these is implemented for each
 //!   folder. This defines how types of interest are folded.
 //!
 //! This means each fold is a mixture of (a) generic folding operations, and (b)
@@ -42,13 +44,30 @@
 //!     - ty.super_fold_with(folder)
 //! - u.fold_with(folder)
 //! ```
+
+use rustc_index::{Idx, IndexVec};
+use std::mem;
+
+use crate::Lrc;
 use crate::{visit::TypeVisitable, Interner};
+
+#[cfg(feature = "nightly")]
+type Never = !;
+
+#[cfg(not(feature = "nightly"))]
+type Never = std::convert::Infallible;
 
 /// This trait is implemented for every type that can be folded,
 /// providing the skeleton of the traversal.
 ///
 /// To implement this conveniently, use the derive macro located in
 /// `rustc_macros`.
+///
+/// This trait is a sub-trait of `TypeVisitable`. This is because many
+/// `TypeFolder` instances use the methods in `TypeVisitableExt` while folding,
+/// which means in practice almost every foldable type needs to also be
+/// visitable. (However, there are some types that are visitable without being
+/// foldable.)
 pub trait TypeFoldable<I: Interner>: TypeVisitable<I> {
     /// The entry point for folding. To fold a value `t` with a folder `f`
     /// call: `t.try_fold_with(f)`.
@@ -56,7 +75,7 @@ pub trait TypeFoldable<I: Interner>: TypeVisitable<I> {
     /// For most types, this just traverses the value, calling `try_fold_with`
     /// on each field/element.
     ///
-    /// For types of interest (such as `Ty`), the implementation of method
+    /// For types of interest (such as `Ty`), the implementation of this method
     /// calls a folder method specifically for that type (such as
     /// `F::try_fold_ty`). This is where control transfers from `TypeFoldable`
     /// to `TypeFolder`.
@@ -66,15 +85,18 @@ pub trait TypeFoldable<I: Interner>: TypeVisitable<I> {
     /// folders. Do not override this method, to ensure coherence with
     /// `try_fold_with`.
     fn fold_with<F: TypeFolder<I>>(self, folder: &mut F) -> Self {
-        self.try_fold_with(folder).into_ok()
+        match self.try_fold_with(folder) {
+            Ok(t) => t,
+            Err(e) => match e {},
+        }
     }
 }
 
 // This trait is implemented for types of interest.
 pub trait TypeSuperFoldable<I: Interner>: TypeFoldable<I> {
-    /// Provides a default fold for a type of interest. This should only be
-    /// called within `TypeFolder` methods, when a non-custom traversal is
-    /// desired for the value of the type of interest passed to that method.
+    /// Provides a default fold for a recursive type of interest. This should
+    /// only be called within `TypeFolder` methods, when a non-custom traversal
+    /// is desired for the value of the type of interest passed to that method.
     /// For example, in `MyFolder::try_fold_ty(ty)`, it is valid to call
     /// `ty.try_super_fold_with(self)`, but any other folding should be done
     /// with `xyz.try_fold_with(self)`.
@@ -87,7 +109,10 @@ pub trait TypeSuperFoldable<I: Interner>: TypeFoldable<I> {
     /// infallible folders. Do not override this method, to ensure coherence
     /// with `try_super_fold_with`.
     fn super_fold_with<F: TypeFolder<I>>(self, folder: &mut F) -> Self {
-        self.try_super_fold_with(folder).into_ok()
+        match self.try_super_fold_with(folder) {
+            Ok(t) => t,
+            Err(e) => match e {},
+        }
     }
 }
 
@@ -100,7 +125,7 @@ pub trait TypeSuperFoldable<I: Interner>: TypeFoldable<I> {
 /// A blanket implementation of [`FallibleTypeFolder`] will defer to
 /// the infallible methods of this trait to ensure that the two APIs
 /// are coherent.
-pub trait TypeFolder<I: Interner>: FallibleTypeFolder<I, Error = !> {
+pub trait TypeFolder<I: Interner>: FallibleTypeFolder<I, Error = Never> {
     fn interner(&self) -> I;
 
     fn fold_binder<T>(&mut self, t: I::Binder<T>) -> I::Binder<T>
@@ -118,11 +143,11 @@ pub trait TypeFolder<I: Interner>: FallibleTypeFolder<I, Error = !> {
         t.super_fold_with(self)
     }
 
-    fn fold_region(&mut self, r: I::Region) -> I::Region
-    where
-        I::Region: TypeSuperFoldable<I>,
-    {
-        r.super_fold_with(self)
+    // The default region folder is a no-op because `Region` is non-recursive
+    // and has no `super_fold_with` method to call. That also explains the
+    // lack of `I::Region: TypeSuperFoldable<I>` bound on this method.
+    fn fold_region(&mut self, r: I::Region) -> I::Region {
+        r
     }
 
     fn fold_const(&mut self, c: I::Const) -> I::Const
@@ -167,11 +192,11 @@ pub trait FallibleTypeFolder<I: Interner>: Sized {
         t.try_super_fold_with(self)
     }
 
-    fn try_fold_region(&mut self, r: I::Region) -> Result<I::Region, Self::Error>
-    where
-        I::Region: TypeSuperFoldable<I>,
-    {
-        r.try_super_fold_with(self)
+    // The default region folder is a no-op because `Region` is non-recursive
+    // and has no `super_fold_with` method to call. That also explains the
+    // lack of `I::Region: TypeSuperFoldable<I>` bound on this method.
+    fn try_fold_region(&mut self, r: I::Region) -> Result<I::Region, Self::Error> {
+        Ok(r)
     }
 
     fn try_fold_const(&mut self, c: I::Const) -> Result<I::Const, Self::Error>
@@ -195,13 +220,13 @@ impl<I: Interner, F> FallibleTypeFolder<I> for F
 where
     F: TypeFolder<I>,
 {
-    type Error = !;
+    type Error = Never;
 
     fn interner(&self) -> I {
         TypeFolder::interner(self)
     }
 
-    fn try_fold_binder<T>(&mut self, t: I::Binder<T>) -> Result<I::Binder<T>, !>
+    fn try_fold_binder<T>(&mut self, t: I::Binder<T>) -> Result<I::Binder<T>, Never>
     where
         T: TypeFoldable<I>,
         I::Binder<T>: TypeSuperFoldable<I>,
@@ -209,31 +234,126 @@ where
         Ok(self.fold_binder(t))
     }
 
-    fn try_fold_ty(&mut self, t: I::Ty) -> Result<I::Ty, !>
+    fn try_fold_ty(&mut self, t: I::Ty) -> Result<I::Ty, Never>
     where
         I::Ty: TypeSuperFoldable<I>,
     {
         Ok(self.fold_ty(t))
     }
 
-    fn try_fold_region(&mut self, r: I::Region) -> Result<I::Region, !>
-    where
-        I::Region: TypeSuperFoldable<I>,
-    {
+    fn try_fold_region(&mut self, r: I::Region) -> Result<I::Region, Never> {
         Ok(self.fold_region(r))
     }
 
-    fn try_fold_const(&mut self, c: I::Const) -> Result<I::Const, !>
+    fn try_fold_const(&mut self, c: I::Const) -> Result<I::Const, Never>
     where
         I::Const: TypeSuperFoldable<I>,
     {
         Ok(self.fold_const(c))
     }
 
-    fn try_fold_predicate(&mut self, p: I::Predicate) -> Result<I::Predicate, !>
+    fn try_fold_predicate(&mut self, p: I::Predicate) -> Result<I::Predicate, Never>
     where
         I::Predicate: TypeSuperFoldable<I>,
     {
         Ok(self.fold_predicate(p))
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Traversal implementations.
+
+impl<I: Interner, T: TypeFoldable<I>, U: TypeFoldable<I>> TypeFoldable<I> for (T, U) {
+    fn try_fold_with<F: FallibleTypeFolder<I>>(self, folder: &mut F) -> Result<(T, U), F::Error> {
+        Ok((self.0.try_fold_with(folder)?, self.1.try_fold_with(folder)?))
+    }
+}
+
+impl<I: Interner, A: TypeFoldable<I>, B: TypeFoldable<I>, C: TypeFoldable<I>> TypeFoldable<I>
+    for (A, B, C)
+{
+    fn try_fold_with<F: FallibleTypeFolder<I>>(
+        self,
+        folder: &mut F,
+    ) -> Result<(A, B, C), F::Error> {
+        Ok((
+            self.0.try_fold_with(folder)?,
+            self.1.try_fold_with(folder)?,
+            self.2.try_fold_with(folder)?,
+        ))
+    }
+}
+
+impl<I: Interner, T: TypeFoldable<I>> TypeFoldable<I> for Option<T> {
+    fn try_fold_with<F: FallibleTypeFolder<I>>(self, folder: &mut F) -> Result<Self, F::Error> {
+        Ok(match self {
+            Some(v) => Some(v.try_fold_with(folder)?),
+            None => None,
+        })
+    }
+}
+
+impl<I: Interner, T: TypeFoldable<I>, E: TypeFoldable<I>> TypeFoldable<I> for Result<T, E> {
+    fn try_fold_with<F: FallibleTypeFolder<I>>(self, folder: &mut F) -> Result<Self, F::Error> {
+        Ok(match self {
+            Ok(v) => Ok(v.try_fold_with(folder)?),
+            Err(e) => Err(e.try_fold_with(folder)?),
+        })
+    }
+}
+
+impl<I: Interner, T: TypeFoldable<I>> TypeFoldable<I> for Lrc<T> {
+    fn try_fold_with<F: FallibleTypeFolder<I>>(mut self, folder: &mut F) -> Result<Self, F::Error> {
+        // We merely want to replace the contained `T`, if at all possible,
+        // so that we don't needlessly allocate a new `Lrc` or indeed clone
+        // the contained type.
+        unsafe {
+            // First step is to ensure that we have a unique reference to
+            // the contained type, which `Lrc::make_mut` will accomplish (by
+            // allocating a new `Lrc` and cloning the `T` only if required).
+            // This is done *before* casting to `Lrc<ManuallyDrop<T>>` so that
+            // panicking during `make_mut` does not leak the `T`.
+            Lrc::make_mut(&mut self);
+
+            // Casting to `Lrc<ManuallyDrop<T>>` is safe because `ManuallyDrop`
+            // is `repr(transparent)`.
+            let ptr = Lrc::into_raw(self).cast::<mem::ManuallyDrop<T>>();
+            let mut unique = Lrc::from_raw(ptr);
+
+            // Call to `Lrc::make_mut` above guarantees that `unique` is the
+            // sole reference to the contained value, so we can avoid doing
+            // a checked `get_mut` here.
+            let slot = Lrc::get_mut(&mut unique).unwrap_unchecked();
+
+            // Semantically move the contained type out from `unique`, fold
+            // it, then move the folded value back into `unique`. Should
+            // folding fail, `ManuallyDrop` ensures that the "moved-out"
+            // value is not re-dropped.
+            let owned = mem::ManuallyDrop::take(slot);
+            let folded = owned.try_fold_with(folder)?;
+            *slot = mem::ManuallyDrop::new(folded);
+
+            // Cast back to `Lrc<T>`.
+            Ok(Lrc::from_raw(Lrc::into_raw(unique).cast()))
+        }
+    }
+}
+
+impl<I: Interner, T: TypeFoldable<I>> TypeFoldable<I> for Box<T> {
+    fn try_fold_with<F: FallibleTypeFolder<I>>(mut self, folder: &mut F) -> Result<Self, F::Error> {
+        *self = (*self).try_fold_with(folder)?;
+        Ok(self)
+    }
+}
+
+impl<I: Interner, T: TypeFoldable<I>> TypeFoldable<I> for Vec<T> {
+    fn try_fold_with<F: FallibleTypeFolder<I>>(self, folder: &mut F) -> Result<Self, F::Error> {
+        self.into_iter().map(|t| t.try_fold_with(folder)).collect()
+    }
+}
+
+impl<I: Interner, T: TypeFoldable<I>, Ix: Idx> TypeFoldable<I> for IndexVec<Ix, T> {
+    fn try_fold_with<F: FallibleTypeFolder<I>>(self, folder: &mut F) -> Result<Self, F::Error> {
+        self.raw.try_fold_with(folder).map(IndexVec::from_raw)
     }
 }

@@ -1,5 +1,7 @@
+use smallvec::SmallVec;
+
 use crate::ty::context::TyCtxt;
-use crate::ty::{self, DefId, ParamEnv, Ty};
+use crate::ty::{self, DefId, OpaqueTypeKey, ParamEnv, Ty};
 
 /// Represents whether some type is inhabited in a given context.
 /// Examples of uninhabited types are `!`, `enum Void {}`, or a struct
@@ -19,8 +21,10 @@ pub enum InhabitedPredicate<'tcx> {
     /// type has restricted visibility.
     NotInModule(DefId),
     /// Inhabited if some generic type is inhabited.
-    /// These are replaced by calling [`Self::subst`].
+    /// These are replaced by calling [`Self::instantiate`].
     GenericType(Ty<'tcx>),
+    /// Inhabited if either we don't know the hidden type or we know it and it is inhabited.
+    OpaqueType(OpaqueTypeKey<'tcx>),
     /// A AND B
     And(&'tcx [InhabitedPredicate<'tcx>; 2]),
     /// A OR B
@@ -28,31 +32,53 @@ pub enum InhabitedPredicate<'tcx> {
 }
 
 impl<'tcx> InhabitedPredicate<'tcx> {
-    /// Returns true if the corresponding type is inhabited in the given
-    /// `ParamEnv` and module
+    /// Returns true if the corresponding type is inhabited in the given `ParamEnv` and module.
     pub fn apply(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>, module_def_id: DefId) -> bool {
-        let Ok(result) = self
-            .apply_inner::<!>(tcx, param_env, &|id| Ok(tcx.is_descendant_of(module_def_id, id)));
+        self.apply_revealing_opaque(tcx, param_env, module_def_id, &|_| None)
+    }
+
+    /// Returns true if the corresponding type is inhabited in the given `ParamEnv` and module,
+    /// revealing opaques when possible.
+    pub fn apply_revealing_opaque(
+        self,
+        tcx: TyCtxt<'tcx>,
+        param_env: ParamEnv<'tcx>,
+        module_def_id: DefId,
+        reveal_opaque: &impl Fn(OpaqueTypeKey<'tcx>) -> Option<Ty<'tcx>>,
+    ) -> bool {
+        let Ok(result) = self.apply_inner::<!>(
+            tcx,
+            param_env,
+            &mut Default::default(),
+            &|id| Ok(tcx.is_descendant_of(module_def_id, id)),
+            reveal_opaque,
+        );
         result
     }
 
     /// Same as `apply`, but returns `None` if self contains a module predicate
     pub fn apply_any_module(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>) -> Option<bool> {
-        self.apply_inner(tcx, param_env, &|_| Err(())).ok()
+        self.apply_inner(tcx, param_env, &mut Default::default(), &|_| Err(()), &|_| None).ok()
     }
 
     /// Same as `apply`, but `NotInModule(_)` predicates yield `false`. That is,
     /// privately uninhabited types are considered always uninhabited.
     pub fn apply_ignore_module(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>) -> bool {
-        let Ok(result) = self.apply_inner::<!>(tcx, param_env, &|_| Ok(true));
+        let Ok(result) =
+            self.apply_inner::<!>(tcx, param_env, &mut Default::default(), &|_| Ok(true), &|_| {
+                None
+            });
         result
     }
 
-    fn apply_inner<E>(
+    #[instrument(level = "debug", skip(tcx, param_env, in_module, reveal_opaque), ret)]
+    fn apply_inner<E: std::fmt::Debug>(
         self,
         tcx: TyCtxt<'tcx>,
         param_env: ParamEnv<'tcx>,
+        eval_stack: &mut SmallVec<[Ty<'tcx>; 1]>, // for cycle detection
         in_module: &impl Fn(DefId) -> Result<bool, E>,
+        reveal_opaque: &impl Fn(OpaqueTypeKey<'tcx>) -> Option<Ty<'tcx>>,
     ) -> Result<bool, E> {
         match self {
             Self::False => Ok(false),
@@ -62,9 +88,57 @@ impl<'tcx> InhabitedPredicate<'tcx> {
                 Some(1..) => Ok(false),
             },
             Self::NotInModule(id) => in_module(id).map(|in_mod| !in_mod),
-            Self::GenericType(_) => Ok(true),
-            Self::And([a, b]) => try_and(a, b, |x| x.apply_inner(tcx, param_env, in_module)),
-            Self::Or([a, b]) => try_or(a, b, |x| x.apply_inner(tcx, param_env, in_module)),
+            // `t` may be a projection, for which `inhabited_predicate` returns a `GenericType`. As
+            // we have a param_env available, we can do better.
+            Self::GenericType(t) => {
+                let normalized_pred = tcx
+                    .try_normalize_erasing_regions(param_env, t)
+                    .map_or(self, |t| t.inhabited_predicate(tcx));
+                match normalized_pred {
+                    // We don't have more information than we started with, so consider inhabited.
+                    Self::GenericType(_) => Ok(true),
+                    pred => {
+                        // A type which is cyclic when monomorphized can happen here since the
+                        // layout error would only trigger later. See e.g. `tests/ui/sized/recursive-type-2.rs`.
+                        if eval_stack.contains(&t) {
+                            return Ok(true); // Recover; this will error later.
+                        }
+                        eval_stack.push(t);
+                        let ret =
+                            pred.apply_inner(tcx, param_env, eval_stack, in_module, reveal_opaque);
+                        eval_stack.pop();
+                        ret
+                    }
+                }
+            }
+            Self::OpaqueType(key) => match reveal_opaque(key) {
+                // Unknown opaque is assumed inhabited.
+                None => Ok(true),
+                // Known opaque type is inspected recursively.
+                Some(t) => {
+                    // A cyclic opaque type can happen in corner cases that would only error later.
+                    // See e.g. `tests/ui/type-alias-impl-trait/recursive-tait-conflicting-defn.rs`.
+                    if eval_stack.contains(&t) {
+                        return Ok(true); // Recover; this will error later.
+                    }
+                    eval_stack.push(t);
+                    let ret = t.inhabited_predicate(tcx).apply_inner(
+                        tcx,
+                        param_env,
+                        eval_stack,
+                        in_module,
+                        reveal_opaque,
+                    );
+                    eval_stack.pop();
+                    ret
+                }
+            },
+            Self::And([a, b]) => try_and(a, b, |x| {
+                x.apply_inner(tcx, param_env, eval_stack, in_module, reveal_opaque)
+            }),
+            Self::Or([a, b]) => try_or(a, b, |x| {
+                x.apply_inner(tcx, param_env, eval_stack, in_module, reveal_opaque)
+            }),
         }
     }
 
@@ -151,15 +225,15 @@ impl<'tcx> InhabitedPredicate<'tcx> {
     }
 
     /// Replaces generic types with its corresponding predicate
-    pub fn subst(self, tcx: TyCtxt<'tcx>, substs: ty::SubstsRef<'tcx>) -> Self {
-        self.subst_opt(tcx, substs).unwrap_or(self)
+    pub fn instantiate(self, tcx: TyCtxt<'tcx>, args: ty::GenericArgsRef<'tcx>) -> Self {
+        self.instantiate_opt(tcx, args).unwrap_or(self)
     }
 
-    fn subst_opt(self, tcx: TyCtxt<'tcx>, substs: ty::SubstsRef<'tcx>) -> Option<Self> {
+    fn instantiate_opt(self, tcx: TyCtxt<'tcx>, args: ty::GenericArgsRef<'tcx>) -> Option<Self> {
         match self {
             Self::ConstIsZero(c) => {
-                let c = ty::EarlyBinder(c).subst(tcx, substs);
-                let pred = match c.kind().try_to_target_usize(tcx) {
+                let c = ty::EarlyBinder::bind(c).instantiate(tcx, args);
+                let pred = match c.try_to_target_usize(tcx) {
                     Some(0) => Self::True,
                     Some(1..) => Self::False,
                     None => Self::ConstIsZero(c),
@@ -167,17 +241,17 @@ impl<'tcx> InhabitedPredicate<'tcx> {
                 Some(pred)
             }
             Self::GenericType(t) => {
-                Some(ty::EarlyBinder(t).subst(tcx, substs).inhabited_predicate(tcx))
+                Some(ty::EarlyBinder::bind(t).instantiate(tcx, args).inhabited_predicate(tcx))
             }
-            Self::And(&[a, b]) => match a.subst_opt(tcx, substs) {
-                None => b.subst_opt(tcx, substs).map(|b| a.and(tcx, b)),
+            Self::And(&[a, b]) => match a.instantiate_opt(tcx, args) {
+                None => b.instantiate_opt(tcx, args).map(|b| a.and(tcx, b)),
                 Some(InhabitedPredicate::False) => Some(InhabitedPredicate::False),
-                Some(a) => Some(a.and(tcx, b.subst_opt(tcx, substs).unwrap_or(b))),
+                Some(a) => Some(a.and(tcx, b.instantiate_opt(tcx, args).unwrap_or(b))),
             },
-            Self::Or(&[a, b]) => match a.subst_opt(tcx, substs) {
-                None => b.subst_opt(tcx, substs).map(|b| a.or(tcx, b)),
+            Self::Or(&[a, b]) => match a.instantiate_opt(tcx, args) {
+                None => b.instantiate_opt(tcx, args).map(|b| a.or(tcx, b)),
                 Some(InhabitedPredicate::True) => Some(InhabitedPredicate::True),
-                Some(a) => Some(a.or(tcx, b.subst_opt(tcx, substs).unwrap_or(b))),
+                Some(a) => Some(a.or(tcx, b.instantiate_opt(tcx, args).unwrap_or(b))),
             },
             _ => None,
         }
@@ -186,7 +260,7 @@ impl<'tcx> InhabitedPredicate<'tcx> {
 
 // this is basically like `f(a)? && f(b)?` but different in the case of
 // `Ok(false) && Err(_) -> Ok(false)`
-fn try_and<T, E>(a: T, b: T, f: impl Fn(T) -> Result<bool, E>) -> Result<bool, E> {
+fn try_and<T, E>(a: T, b: T, mut f: impl FnMut(T) -> Result<bool, E>) -> Result<bool, E> {
     let a = f(a);
     if matches!(a, Ok(false)) {
         return Ok(false);
@@ -198,7 +272,7 @@ fn try_and<T, E>(a: T, b: T, f: impl Fn(T) -> Result<bool, E>) -> Result<bool, E
     }
 }
 
-fn try_or<T, E>(a: T, b: T, f: impl Fn(T) -> Result<bool, E>) -> Result<bool, E> {
+fn try_or<T, E>(a: T, b: T, mut f: impl FnMut(T) -> Result<bool, E>) -> Result<bool, E> {
     let a = f(a);
     if matches!(a, Ok(true)) {
         return Ok(true);

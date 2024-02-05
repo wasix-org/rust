@@ -1,59 +1,52 @@
-use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_hir as hir;
-use rustc_hir::def_id::LocalDefId;
-use rustc_hir::definitions;
-use rustc_hir::intravisit::{self, Visitor};
+use rustc_hir::def_id::{LocalDefId, LocalDefIdMap};
+use rustc_hir::intravisit::Visitor;
 use rustc_hir::*;
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_index::{Idx, IndexVec};
 use rustc_middle::span_bug;
-use rustc_session::Session;
-use rustc_span::source_map::SourceMap;
+use rustc_middle::ty::TyCtxt;
 use rustc_span::{Span, DUMMY_SP};
 
 /// A visitor that walks over the HIR and collects `Node`s into a HIR map.
-pub(super) struct NodeCollector<'a, 'hir> {
-    /// Source map
-    source_map: &'a SourceMap,
+struct NodeCollector<'a, 'hir> {
+    tcx: TyCtxt<'hir>,
+
     bodies: &'a SortedMap<ItemLocalId, &'hir Body<'hir>>,
 
     /// Outputs
     nodes: IndexVec<ItemLocalId, Option<ParentedNode<'hir>>>,
-    parenting: FxHashMap<LocalDefId, ItemLocalId>,
+    parenting: LocalDefIdMap<ItemLocalId>,
 
     /// The parent of this node
     parent_node: hir::ItemLocalId,
 
     owner: OwnerId,
-
-    definitions: &'a definitions::Definitions,
 }
 
-#[instrument(level = "debug", skip(sess, definitions, bodies))]
+#[instrument(level = "debug", skip(tcx, bodies))]
 pub(super) fn index_hir<'hir>(
-    sess: &Session,
-    definitions: &definitions::Definitions,
+    tcx: TyCtxt<'hir>,
     item: hir::OwnerNode<'hir>,
     bodies: &SortedMap<ItemLocalId, &'hir Body<'hir>>,
-) -> (IndexVec<ItemLocalId, Option<ParentedNode<'hir>>>, FxHashMap<LocalDefId, ItemLocalId>) {
+) -> (IndexVec<ItemLocalId, Option<ParentedNode<'hir>>>, LocalDefIdMap<ItemLocalId>) {
     let mut nodes = IndexVec::new();
     // This node's parent should never be accessed: the owner's parent is computed by the
     // hir_owner_parent query. Make it invalid (= ItemLocalId::MAX) to force an ICE whenever it is
     // used.
     nodes.push(Some(ParentedNode { parent: ItemLocalId::INVALID, node: item.into() }));
     let mut collector = NodeCollector {
-        source_map: sess.source_map(),
-        definitions,
+        tcx,
         owner: item.def_id(),
         parent_node: ItemLocalId::new(0),
         nodes,
         bodies,
-        parenting: FxHashMap::default(),
+        parenting: Default::default(),
     };
 
     match item {
         OwnerNode::Crate(citem) => {
-            collector.visit_mod(&citem, citem.spans.inner_span, hir::CRATE_HIR_ID)
+            collector.visit_mod(citem, citem.spans.inner_span, hir::CRATE_HIR_ID)
         }
         OwnerNode::Item(item) => collector.visit_item(item),
         OwnerNode::TraitItem(item) => collector.visit_trait_item(item),
@@ -79,17 +72,23 @@ impl<'a, 'hir> NodeCollector<'a, 'hir> {
                     span,
                     "inconsistent HirId at `{:?}` for `{:?}`: \
                      current_dep_node_owner={} ({:?}), hir_id.owner={} ({:?})",
-                    self.source_map.span_to_diagnostic_string(span),
+                    self.tcx.sess.source_map().span_to_diagnostic_string(span),
                     node,
-                    self.definitions.def_path(self.owner.def_id).to_string_no_crate_verbose(),
+                    self.tcx
+                        .definitions_untracked()
+                        .def_path(self.owner.def_id)
+                        .to_string_no_crate_verbose(),
                     self.owner,
-                    self.definitions.def_path(hir_id.owner.def_id).to_string_no_crate_verbose(),
+                    self.tcx
+                        .definitions_untracked()
+                        .def_path(hir_id.owner.def_id)
+                        .to_string_no_crate_verbose(),
                     hir_id.owner,
                 )
             }
         }
 
-        self.nodes.insert(hir_id.local_id, ParentedNode { parent: self.parent_node, node: node });
+        self.nodes.insert(hir_id.local_id, ParentedNode { parent: self.parent_node, node });
     }
 
     fn with_parent<F: FnOnce(&mut Self)>(&mut self, parent_node_id: HirId, f: F) {
@@ -220,6 +219,14 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
 
         self.with_parent(constant.hir_id, |this| {
             intravisit::walk_anon_const(this, constant);
+        });
+    }
+
+    fn visit_inline_const(&mut self, constant: &'hir ConstBlock) {
+        self.insert(DUMMY_SP, constant.hir_id, Node::ConstBlock(constant));
+
+        self.with_parent(constant.hir_id, |this| {
+            intravisit::walk_inline_const(this, constant);
         });
     }
 

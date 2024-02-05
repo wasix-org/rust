@@ -1,6 +1,4 @@
 // check-pass
-// revisions: mir thir
-// [thir]compile-flags: -Zthir-unsafeck
 
 struct Attr {
     name: String,
@@ -24,5 +22,5 @@ impl Element {
 
 fn main() {
     let element = Element { attrs: Vec::new() };
-    let _ = unsafe { element.get_attr("foo") };
+    unsafe { let () = element.get_attr("foo"); };
 }

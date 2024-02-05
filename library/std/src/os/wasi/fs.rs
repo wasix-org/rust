@@ -3,7 +3,7 @@
 //! [`std::fs`]: crate::fs
 
 #![deny(unsafe_op_in_unsafe_fn)]
-#![unstable(feature = "wasi_ext", issue = "71213")]
+#![stable(feature = "rust1", since = "1.0.0")]
 
 use crate::ffi::OsStr;
 use crate::fs::{self, File, Metadata, OpenOptions};
@@ -15,6 +15,7 @@ use crate::sys_common::{AsInner, AsInnerMut, FromInner};
 use io::{Read, Write};
 
 /// WASI-specific extensions to [`File`].
+#[stable(feature = "rust1", since = "1.0.0")]
 pub trait FileExt {
     /// Reads a number of bytes starting from a given offset.
     ///
@@ -27,6 +28,7 @@ pub trait FileExt {
     ///
     /// Note that similar to [`File::read`], it is not an error to return with a
     /// short read.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         let bufs = &mut [IoSliceMut::new(buf)];
         self.read_vectored_at(bufs, offset)
@@ -43,6 +45,7 @@ pub trait FileExt {
     ///
     /// Note that similar to [`File::read_vectored`], it is not an error to
     /// return with a short read.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize>;
 
     /// Reads the exact number of byte required to fill `buf` from the given offset.
@@ -82,7 +85,7 @@ pub trait FileExt {
                     buf = &mut tmp[n..];
                     offset += n as u64;
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(ref e) if e.is_interrupted() => {}
                 Err(e) => return Err(e),
             }
         }
@@ -107,6 +110,7 @@ pub trait FileExt {
     ///
     /// Note that similar to [`File::write`], it is not an error to return a
     /// short write.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
         let bufs = &[IoSlice::new(buf)];
         self.write_vectored_at(bufs, offset)
@@ -126,6 +130,7 @@ pub trait FileExt {
     ///
     /// Note that similar to [`File::write_vectored`], it is not an error to return a
     /// short write.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn write_vectored_at(&self, bufs: &[IoSlice<'_>], offset: u64) -> io::Result<usize>;
 
     /// Attempts to write an entire buffer starting from a given offset.
@@ -162,7 +167,7 @@ pub trait FileExt {
                     buf = &buf[n..];
                     offset += n as u64
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(ref e) if e.is_interrupted() => {}
                 Err(e) => return Err(e),
             }
         }
@@ -173,51 +178,61 @@ pub trait FileExt {
     ///
     /// This corresponds to the `fd_tell` syscall and is similar to
     /// `seek` where you offset 0 bytes from the current position.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn tell(&self) -> io::Result<u64>;
 
     /// Adjust the flags associated with this file.
     ///
     /// This corresponds to the `fd_fdstat_set_flags` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn fdstat_set_flags(&self, flags: u16) -> io::Result<()>;
 
     /// Adjust the rights associated with this file.
     ///
     /// This corresponds to the `fd_fdstat_set_rights` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn fdstat_set_rights(&self, rights: u64, inheriting: u64) -> io::Result<()>;
 
     /// Provide file advisory information on a file descriptor.
     ///
     /// This corresponds to the `fd_advise` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn advise(&self, offset: u64, len: u64, advice: u8) -> io::Result<()>;
 
     /// Force the allocation of space in a file.
     ///
     /// This corresponds to the `fd_allocate` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn allocate(&self, offset: u64, len: u64) -> io::Result<()>;
 
     /// Create a directory.
     ///
     /// This corresponds to the `path_create_directory` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn create_directory<P: AsRef<Path>>(&self, dir: P) -> io::Result<()>;
 
     /// Read the contents of a symbolic link.
     ///
     /// This corresponds to the `path_readlink` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn read_link<P: AsRef<Path>>(&self, path: P) -> io::Result<PathBuf>;
 
     /// Return the attributes of a file or directory.
     ///
     /// This corresponds to the `path_filestat_get` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn metadata_at<P: AsRef<Path>>(&self, lookup_flags: u32, path: P) -> io::Result<Metadata>;
 
     /// Unlink a file.
     ///
     /// This corresponds to the `path_unlink_file` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn remove_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
 
     /// Remove a directory.
     ///
     /// This corresponds to the `path_remove_directory` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn remove_directory<P: AsRef<Path>>(&self, path: P) -> io::Result<()>;
 }
 
@@ -227,7 +242,7 @@ pub trait FileExt {
 // FIXME: bind path_filestat_set_times maybe? - on crates.io for unix
 // FIXME: bind poll_oneoff maybe? - probably should wait for I/O to settle
 // FIXME: bind random_get maybe? - on crates.io for unix
-
+#[stable(feature = "rust1", since = "1.0.0")]
 impl FileExt for fs::File {
     fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
         self.as_inner().as_inner().pread(bufs, offset)
@@ -295,6 +310,7 @@ impl FileExt for fs::File {
 }
 
 /// WASI-specific extensions to [`fs::OpenOptions`].
+#[stable(feature = "rust1", since = "1.0.0")]
 pub trait OpenOptionsExt {
     /// Pass custom `dirflags` argument to `path_open`.
     ///
@@ -305,6 +321,7 @@ pub trait OpenOptionsExt {
     ///
     /// By default this value is `__WASI_LOOKUP_SYMLINK_FOLLOW`, or symlinks are
     /// followed. You can call this method with 0 to disable following symlinks
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn lookup_flags(&mut self, flags: u32) -> &mut Self;
 
     /// Indicates whether `OpenOptions` must open a directory or not.
@@ -314,30 +331,35 @@ pub trait OpenOptionsExt {
     /// path is a directory.
     ///
     /// This option is by default `false`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn directory(&mut self, dir: bool) -> &mut Self;
 
     /// Indicates whether `__WASI_FDFLAG_DSYNC` is passed in the `fs_flags`
     /// field of `path_open`.
     ///
     /// This option is by default `false`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn dsync(&mut self, dsync: bool) -> &mut Self;
 
     /// Indicates whether `__WASI_FDFLAG_NONBLOCK` is passed in the `fs_flags`
     /// field of `path_open`.
     ///
     /// This option is by default `false`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn nonblock(&mut self, nonblock: bool) -> &mut Self;
 
     /// Indicates whether `__WASI_FDFLAG_RSYNC` is passed in the `fs_flags`
     /// field of `path_open`.
     ///
     /// This option is by default `false`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn rsync(&mut self, rsync: bool) -> &mut Self;
 
     /// Indicates whether `__WASI_FDFLAG_SYNC` is passed in the `fs_flags`
     /// field of `path_open`.
     ///
     /// This option is by default `false`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn sync(&mut self, sync: bool) -> &mut Self;
 
     /// Indicates the value that should be passed in for the `fs_rights_base`
@@ -346,6 +368,7 @@ pub trait OpenOptionsExt {
     /// This option defaults based on the `read` and `write` configuration of
     /// this `OpenOptions` builder. If this method is called, however, the
     /// exact mask passed in will be used instead.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn fs_rights_base(&mut self, rights: u64) -> &mut Self;
 
     /// Indicates the value that should be passed in for the
@@ -354,14 +377,17 @@ pub trait OpenOptionsExt {
     /// The default for this option is the same value as what will be passed
     /// for the `fs_rights_base` parameter but if this method is called then
     /// the specified value will be used instead.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn fs_rights_inheriting(&mut self, rights: u64) -> &mut Self;
 
     /// Open a file or directory.
     ///
     /// This corresponds to the `path_open` syscall.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn open_at<P: AsRef<Path>>(&self, file: &File, path: P) -> io::Result<File>;
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl OpenOptionsExt for OpenOptions {
     fn lookup_flags(&mut self, flags: u32) -> &mut OpenOptions {
         self.as_inner_mut().lookup_flags(flags);
@@ -410,23 +436,32 @@ impl OpenOptionsExt for OpenOptions {
 }
 
 /// WASI-specific extensions to [`fs::Metadata`].
+#[stable(feature = "rust1", since = "1.0.0")]
 pub trait MetadataExt {
     /// Returns the `st_dev` field of the internal `filestat_t`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn dev(&self) -> u64;
     /// Returns the `st_ino` field of the internal `filestat_t`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn ino(&self) -> u64;
     /// Returns the `st_nlink` field of the internal `filestat_t`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn nlink(&self) -> u64;
     /// Returns the `st_size` field of the internal `filestat_t`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn size(&self) -> u64;
     /// Returns the `st_atim` field of the internal `filestat_t`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn atim(&self) -> u64;
     /// Returns the `st_mtim` field of the internal `filestat_t`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn mtim(&self) -> u64;
     /// Returns the `st_ctim` field of the internal `filestat_t`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn ctim(&self) -> u64;
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl MetadataExt for fs::Metadata {
     fn dev(&self) -> u64 {
         self.as_inner().as_wasi().dev
@@ -455,21 +490,28 @@ impl MetadataExt for fs::Metadata {
 ///
 /// Adds support for special WASI file types such as block/character devices,
 /// pipes, and sockets.
+#[stable(feature = "rust1", since = "1.0.0")]
 pub trait FileTypeExt {
     /// Returns `true` if this file type is a block device.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn is_block_device(&self) -> bool;
     /// Returns `true` if this file type is a character device.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn is_char_device(&self) -> bool;
     /// Returns `true` if this file type is a socket datagram.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn is_socket_dgram(&self) -> bool;
     /// Returns `true` if this file type is a socket stream.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn is_socket_stream(&self) -> bool;
     /// Returns `true` if this file type is any type of socket.
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn is_socket(&self) -> bool {
         self.is_socket_stream() || self.is_socket_dgram()
     }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl FileTypeExt for fs::FileType {
     fn is_block_device(&self) -> bool {
         self.as_inner().bits().raw() == wasi::FILETYPE_BLOCK_DEVICE.raw()
@@ -486,11 +528,14 @@ impl FileTypeExt for fs::FileType {
 }
 
 /// WASI-specific extension methods for [`fs::DirEntry`].
+#[stable(feature = "rust1", since = "1.0.0")]
 pub trait DirEntryExt {
     /// Returns the underlying `d_ino` field of the `dirent_t`
+    #[stable(feature = "rust1", since = "1.0.0")]
     fn ino(&self) -> u64;
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl DirEntryExt for fs::DirEntry {
     fn ino(&self) -> u64 {
         self.as_inner().ino()
@@ -500,6 +545,7 @@ impl DirEntryExt for fs::DirEntry {
 /// Create a hard link.
 ///
 /// This corresponds to the `path_link` syscall.
+#[stable(feature = "rust1", since = "1.0.0")]
 pub fn link<P: AsRef<Path>, U: AsRef<Path>>(
     old_fd: &File,
     old_flags: u32,
@@ -518,6 +564,7 @@ pub fn link<P: AsRef<Path>, U: AsRef<Path>>(
 /// Rename a file or directory.
 ///
 /// This corresponds to the `path_rename` syscall.
+#[stable(feature = "rust1", since = "1.0.0")]
 pub fn rename<P: AsRef<Path>, U: AsRef<Path>>(
     old_fd: &File,
     old_path: P,
@@ -534,6 +581,7 @@ pub fn rename<P: AsRef<Path>, U: AsRef<Path>>(
 /// Create a symbolic link.
 ///
 /// This corresponds to the `path_symlink` syscall.
+#[stable(feature = "rust1", since = "1.0.0")]
 pub fn symlink<P: AsRef<Path>, U: AsRef<Path>>(
     old_path: P,
     fd: &File,
@@ -548,6 +596,7 @@ pub fn symlink<P: AsRef<Path>, U: AsRef<Path>>(
 ///
 /// This is a convenience API similar to `std::os::unix::fs::symlink` and
 /// `std::os::windows::fs::symlink_file` and `std::os::windows::fs::symlink_dir`.
+#[stable(feature = "rust1", since = "1.0.0")]
 pub fn symlink_path<P: AsRef<Path>, U: AsRef<Path>>(old_path: P, new_path: U) -> io::Result<()> {
     crate::sys::fs::symlink(old_path.as_ref(), new_path.as_ref())
 }

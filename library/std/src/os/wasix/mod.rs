@@ -39,7 +39,6 @@ pub mod fs;
 #[path = "../wasi/io/mod.rs"]
 pub mod io;
 pub mod net;
-#[path = "../wasi/process.rs"]
 pub mod process;
 
 /// A prelude for conveniently writing platform-specific code.

@@ -1,3 +1,5 @@
+//@revisions: stack tree
+//@[tree]compile-flags: -Zmiri-tree-borrows -Zmiri-permissive-provenance
 #![feature(ptr_internals)]
 
 fn main() {
@@ -44,7 +46,7 @@ fn boxed_pair_to_vec() {
     }
 
     #[derive(Debug)]
-    struct Foo(u64);
+    struct Foo(#[allow(dead_code)] u64);
     fn reinterstruct(box_pair: Box<PairFoo>) -> Vec<Foo> {
         let ref_pair = Box::leak(box_pair) as *mut PairFoo;
         let ptr_foo = unsafe { std::ptr::addr_of_mut!((*ref_pair).fst) };

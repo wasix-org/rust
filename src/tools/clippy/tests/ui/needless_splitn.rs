@@ -1,5 +1,4 @@
-// run-rustfix
-// edition:2018
+//@edition:2018
 
 #![warn(clippy::needless_splitn)]
 #![allow(clippy::iter_skip_next, clippy::iter_nth_zero, clippy::manual_split_once)]

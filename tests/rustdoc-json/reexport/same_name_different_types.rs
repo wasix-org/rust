@@ -1,8 +1,5 @@
 // Regression test for <https://github.com/rust-lang/rust/issues/107677>.
 
-#![feature(no_core)]
-#![no_core]
-
 pub mod nested {
     // @set foo_struct = "$.index[*][?(@.docs == 'Foo the struct')].id"
 
@@ -16,10 +13,10 @@ pub mod nested {
     pub fn Foo() {}
 }
 
-// @ismany "$.index[*][?(@.inner.name == 'Foo' && @.kind == 'import')].inner.id" $foo_fn $foo_struct
-// @ismany "$.index[*][?(@.inner.name == 'Bar' && @.kind == 'import')].inner.id" $foo_fn $foo_struct
+// @ismany "$.index[*].inner[?(@.import.name == 'Foo')].import.id" $foo_fn $foo_struct
+// @ismany "$.index[*].inner[?(@.import.name == 'Bar')].import.id" $foo_fn $foo_struct
 
-// @count "$.index[*][?(@.inner.name == 'Foo' && @.kind == 'import')]" 2
+// @count "$.index[*].inner[?(@.import.name == 'Foo')]" 2
 pub use nested::Foo;
-// @count "$.index[*][?(@.inner.name == 'Bar' && @.kind == 'import')]" 2
+// @count "$.index[*].inner[?(@.import.name == 'Bar')]" 2
 pub use Foo as Bar;

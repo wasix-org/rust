@@ -1,129 +1,226 @@
 //! A map of all publicly exported items in a crate.
 
-use std::{fmt, hash::BuildHasherDefault, sync::Arc};
+use std::{fmt, hash::BuildHasherDefault};
 
 use base_db::CrateId;
-use fst::{self, Streamer};
+use fst::{self, raw::IndexedValue, Automaton, Streamer};
 use hir_expand::name::Name;
-use indexmap::{map::Entry, IndexMap};
+use indexmap::IndexMap;
 use itertools::Itertools;
 use rustc_hash::{FxHashSet, FxHasher};
+use smallvec::SmallVec;
+use stdx::{format_to, TupleExt};
+use triomphe::Arc;
 
 use crate::{
-    db::DefDatabase, item_scope::ItemInNs, visibility::Visibility, AssocItemId, ModuleDefId,
-    ModuleId, TraitId,
+    db::DefDatabase,
+    item_scope::{ImportOrExternCrate, ItemInNs},
+    nameres::DefMap,
+    visibility::Visibility,
+    AssocItemId, ModuleDefId, ModuleId, TraitId,
 };
 
-type FxIndexMap<K, V> = IndexMap<K, V, BuildHasherDefault<FxHasher>>;
-
 /// Item import details stored in the `ImportMap`.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImportInfo {
-    /// A path that can be used to import the item, relative to the crate's root.
-    pub path: ImportPath,
+    /// A name that can be used to import the item, relative to the container.
+    pub name: Name,
     /// The module containing this item.
     pub container: ModuleId,
-    /// Whether the import is a trait associated item or not.
-    pub is_trait_assoc_item: bool,
+    /// Whether this item is annotated with `#[doc(hidden)]`.
+    pub is_doc_hidden: bool,
+    /// Whether this item is annotated with `#[unstable(..)]`.
+    pub is_unstable: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ImportPath {
-    pub segments: Vec<Name>,
-}
-
-impl fmt::Display for ImportPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.segments.iter().format("::"), f)
-    }
-}
-
-impl ImportPath {
-    fn len(&self) -> usize {
-        self.segments.len()
-    }
-}
-
-/// A map from publicly exported items to the path needed to import/name them from a downstream
-/// crate.
+/// A map from publicly exported items to its name.
 ///
-/// Reexports of items are taken into account, ie. if something is exported under multiple
-/// names, the one with the shortest import path will be used.
-///
-/// Note that all paths are relative to the containing crate's root, so the crate name still needs
-/// to be prepended to the `ModPath` before the path is valid.
+/// Reexports of items are taken into account.
 #[derive(Default)]
 pub struct ImportMap {
-    map: FxIndexMap<ItemInNs, ImportInfo>,
-
-    /// List of keys stored in `map`, sorted lexicographically by their `ModPath`. Indexed by the
-    /// values returned by running `fst`.
+    /// Maps from `ItemInNs` to information of imports that bring the item into scope.
+    item_to_info_map: ImportMapIndex,
+    /// List of keys stored in [`Self::item_to_info_map`], sorted lexicographically by their
+    /// [`Name`]. Indexed by the values returned by running `fst`.
     ///
-    /// Since a path can refer to multiple items due to namespacing, we store all items with the
-    /// same path right after each other. This allows us to find all items after the FST gives us
-    /// the index of the first one.
-    importables: Vec<ItemInNs>,
+    /// Since a name can refer to multiple items due to namespacing and import aliases, we store all
+    /// items with the same name right after each other. This allows us to find all items after the
+    /// fst gives us the index of the first one.
+    ///
+    /// The [`u32`] is the index into the smallvec in the value of [`Self::item_to_info_map`].
+    importables: Vec<(ItemInNs, u32)>,
     fst: fst::Map<Vec<u8>>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
+enum IsTraitAssocItem {
+    Yes,
+    No,
+}
+
+type FxIndexMap<K, V> = IndexMap<K, V, BuildHasherDefault<FxHasher>>;
+type ImportMapIndex = FxIndexMap<ItemInNs, (SmallVec<[ImportInfo; 1]>, IsTraitAssocItem)>;
+
 impl ImportMap {
-    pub fn import_map_query(db: &dyn DefDatabase, krate: CrateId) -> Arc<Self> {
+    pub fn dump(&self, db: &dyn DefDatabase) -> String {
+        let mut out = String::new();
+        for (k, v) in self.item_to_info_map.iter() {
+            format_to!(out, "{:?} ({:?}) -> ", k, v.1);
+            for v in &v.0 {
+                format_to!(out, "{}:{:?}, ", v.name.display(db.upcast()), v.container);
+            }
+            format_to!(out, "\n");
+        }
+        out
+    }
+
+    pub(crate) fn import_map_query(db: &dyn DefDatabase, krate: CrateId) -> Arc<Self> {
         let _p = profile::span("import_map_query");
 
-        let mut import_map = collect_import_map(db, krate);
+        let map = Self::collect_import_map(db, krate);
 
-        let mut importables = import_map
-            .map
+        let mut importables: Vec<_> = map
             .iter()
-            .map(|(item, info)| (item, fst_path(&info.path)))
-            .collect::<Vec<_>>();
-        importables.sort_by(|(_, fst_path), (_, fst_path2)| fst_path.cmp(fst_path2));
+            // We've only collected items, whose name cannot be tuple field so unwrapping is fine.
+            .flat_map(|(&item, (info, _))| {
+                info.iter()
+                    .enumerate()
+                    .map(move |(idx, info)| (item, info.name.to_smol_str(), idx as u32))
+            })
+            .collect();
+        importables.sort_by(|(_, l_info, _), (_, r_info, _)| {
+            let lhs_chars = l_info.chars().map(|c| c.to_ascii_lowercase());
+            let rhs_chars = r_info.chars().map(|c| c.to_ascii_lowercase());
+            lhs_chars.cmp(rhs_chars)
+        });
+        importables.dedup();
 
         // Build the FST, taking care not to insert duplicate values.
-
         let mut builder = fst::MapBuilder::memory();
-        let mut last_batch_start = 0;
+        let mut iter = importables
+            .iter()
+            .enumerate()
+            .dedup_by(|&(_, (_, lhs, _)), &(_, (_, rhs, _))| lhs.eq_ignore_ascii_case(rhs));
 
-        for idx in 0..importables.len() {
-            let key = &importables[last_batch_start].1;
-            if let Some((_, fst_path)) = importables.get(idx + 1) {
-                if key == fst_path {
-                    continue;
-                }
+        let mut insert = |name: &str, start, end| {
+            builder.insert(name.to_ascii_lowercase(), ((start as u64) << 32) | end as u64).unwrap()
+        };
+
+        if let Some((mut last, (_, name, _))) = iter.next() {
+            debug_assert_eq!(last, 0);
+            let mut last_name = name;
+            for (next, (_, next_name, _)) in iter {
+                insert(last_name, last, next);
+                last = next;
+                last_name = next_name;
             }
-
-            let _ = builder.insert(key, last_batch_start as u64);
-
-            last_batch_start = idx + 1;
+            insert(last_name, last, importables.len());
         }
 
-        import_map.fst = builder.into_map();
-        import_map.importables = importables.iter().map(|&(&item, _)| item).collect();
-
-        Arc::new(import_map)
+        let importables = importables.into_iter().map(|(item, _, idx)| (item, idx)).collect();
+        Arc::new(ImportMap { item_to_info_map: map, fst: builder.into_map(), importables })
     }
 
-    /// Returns the `ModPath` needed to import/mention `item`, relative to this crate's root.
-    pub fn path_of(&self, item: ItemInNs) -> Option<&ImportPath> {
-        self.import_info_for(item).map(|it| &it.path)
+    pub fn import_info_for(&self, item: ItemInNs) -> Option<&[ImportInfo]> {
+        self.item_to_info_map.get(&item).map(|(info, _)| &**info)
     }
 
-    pub fn import_info_for(&self, item: ItemInNs) -> Option<&ImportInfo> {
-        self.map.get(&item)
+    fn collect_import_map(db: &dyn DefDatabase, krate: CrateId) -> ImportMapIndex {
+        let _p = profile::span("collect_import_map");
+
+        let def_map = db.crate_def_map(krate);
+        let mut map = FxIndexMap::default();
+
+        // We look only into modules that are public(ly reexported), starting with the crate root.
+        let root = def_map.module_id(DefMap::ROOT);
+        let mut worklist = vec![root];
+        let mut visited = FxHashSet::default();
+
+        while let Some(module) = worklist.pop() {
+            if !visited.insert(module) {
+                continue;
+            }
+            let ext_def_map;
+            let mod_data = if module.krate == krate {
+                &def_map[module.local_id]
+            } else {
+                // The crate might reexport a module defined in another crate.
+                ext_def_map = module.def_map(db);
+                &ext_def_map[module.local_id]
+            };
+
+            let visible_items = mod_data.scope.entries().filter_map(|(name, per_ns)| {
+                let per_ns = per_ns.filter_visibility(|vis| vis == Visibility::Public);
+                if per_ns.is_none() {
+                    None
+                } else {
+                    Some((name, per_ns))
+                }
+            });
+
+            for (name, per_ns) in visible_items {
+                for (item, import) in per_ns.iter_items() {
+                    let attr_id = if let Some(import) = import {
+                        match import {
+                            ImportOrExternCrate::ExternCrate(id) => Some(id.into()),
+                            ImportOrExternCrate::Import(id) => Some(id.import.into()),
+                        }
+                    } else {
+                        match item {
+                            ItemInNs::Types(id) | ItemInNs::Values(id) => id.try_into().ok(),
+                            ItemInNs::Macros(id) => Some(id.into()),
+                        }
+                    };
+                    let (is_doc_hidden, is_unstable) = attr_id.map_or((false, false), |attr_id| {
+                        let attrs = db.attrs(attr_id);
+                        (attrs.has_doc_hidden(), attrs.is_unstable())
+                    });
+
+                    let import_info = ImportInfo {
+                        name: name.clone(),
+                        container: module,
+                        is_doc_hidden,
+                        is_unstable,
+                    };
+
+                    if let Some(ModuleDefId::TraitId(tr)) = item.as_module_def_id() {
+                        Self::collect_trait_assoc_items(
+                            db,
+                            &mut map,
+                            tr,
+                            matches!(item, ItemInNs::Types(_)),
+                            &import_info,
+                        );
+                    }
+
+                    let (infos, _) =
+                        map.entry(item).or_insert_with(|| (SmallVec::new(), IsTraitAssocItem::No));
+                    infos.reserve_exact(1);
+                    infos.push(import_info);
+
+                    // If we've just added a module, descend into it.
+                    if let Some(ModuleDefId::ModuleId(mod_id)) = item.as_module_def_id() {
+                        worklist.push(mod_id);
+                    }
+                }
+            }
+        }
+        map.shrink_to_fit();
+        map
     }
 
     fn collect_trait_assoc_items(
-        &mut self,
         db: &dyn DefDatabase,
+        map: &mut ImportMapIndex,
         tr: TraitId,
         is_type_in_ns: bool,
-        original_import_info: &ImportInfo,
+        trait_import_info: &ImportInfo,
     ) {
         let _p = profile::span("collect_trait_assoc_items");
-        for (assoc_item_name, item) in &db.trait_data(tr).items {
+        for &(ref assoc_item_name, item) in &db.trait_data(tr).items {
             let module_def_id = match item {
-                AssocItemId::FunctionId(f) => ModuleDefId::from(*f),
-                AssocItemId::ConstId(c) => ModuleDefId::from(*c),
+                AssocItemId::FunctionId(f) => ModuleDefId::from(f),
+                AssocItemId::ConstId(c) => ModuleDefId::from(c),
                 // cannot use associated type aliases directly: need a `<Struct as Trait>::TypeAlias`
                 // qualifier, ergo no need to store it for imports in import_map
                 AssocItemId::TypeAliasId(_) => {
@@ -137,161 +234,116 @@ impl ImportMap {
                 ItemInNs::Values(module_def_id)
             };
 
-            let mut assoc_item_info = original_import_info.clone();
-            assoc_item_info.path.segments.push(assoc_item_name.to_owned());
-            assoc_item_info.is_trait_assoc_item = true;
-            self.map.insert(assoc_item, assoc_item_info);
-        }
-    }
-}
-
-fn collect_import_map(db: &dyn DefDatabase, krate: CrateId) -> ImportMap {
-    let _p = profile::span("collect_import_map");
-
-    let def_map = db.crate_def_map(krate);
-    let mut import_map = ImportMap::default();
-
-    // We look only into modules that are public(ly reexported), starting with the crate root.
-    let empty = ImportPath { segments: vec![] };
-    let root = def_map.module_id(def_map.root());
-    let mut worklist = vec![(root, empty)];
-    while let Some((module, mod_path)) = worklist.pop() {
-        let ext_def_map;
-        let mod_data = if module.krate == krate {
-            &def_map[module.local_id]
-        } else {
-            // The crate might reexport a module defined in another crate.
-            ext_def_map = module.def_map(db);
-            &ext_def_map[module.local_id]
-        };
-
-        let visible_items = mod_data.scope.entries().filter_map(|(name, per_ns)| {
-            let per_ns = per_ns.filter_visibility(|vis| vis == Visibility::Public);
-            if per_ns.is_none() { None } else { Some((name, per_ns)) }
-        });
-
-        for (name, per_ns) in visible_items {
-            let mk_path = || {
-                let mut path = mod_path.clone();
-                path.segments.push(name.clone());
-                path
+            let attrs = &db.attrs(item.into());
+            let assoc_item_info = ImportInfo {
+                container: trait_import_info.container,
+                name: assoc_item_name.clone(),
+                is_doc_hidden: attrs.has_doc_hidden(),
+                is_unstable: attrs.is_unstable(),
             };
 
-            for item in per_ns.iter_items() {
-                let path = mk_path();
-                let path_len = path.len();
-                let import_info =
-                    ImportInfo { path, container: module, is_trait_assoc_item: false };
-
-                if let Some(ModuleDefId::TraitId(tr)) = item.as_module_def_id() {
-                    import_map.collect_trait_assoc_items(
-                        db,
-                        tr,
-                        matches!(item, ItemInNs::Types(_)),
-                        &import_info,
-                    );
-                }
-
-                match import_map.map.entry(item) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(import_info);
-                    }
-                    Entry::Occupied(mut entry) => {
-                        // If the new path is shorter, prefer that one.
-                        if path_len < entry.get().path.len() {
-                            *entry.get_mut() = import_info;
-                        } else {
-                            continue;
-                        }
-                    }
-                }
-
-                // If we've just added a path to a module, descend into it. We might traverse
-                // modules multiple times, but only if the new path to it is shorter than the
-                // first (else we `continue` above).
-                if let Some(ModuleDefId::ModuleId(mod_id)) = item.as_module_def_id() {
-                    worklist.push((mod_id, mk_path()));
-                }
-            }
+            let (infos, _) =
+                map.entry(assoc_item).or_insert_with(|| (SmallVec::new(), IsTraitAssocItem::Yes));
+            infos.reserve_exact(1);
+            infos.push(assoc_item_info);
         }
-    }
-
-    import_map
-}
-
-impl PartialEq for ImportMap {
-    fn eq(&self, other: &Self) -> bool {
-        // `fst` and `importables` are built from `map`, so we don't need to compare them.
-        self.map == other.map
     }
 }
 
 impl Eq for ImportMap {}
-
-impl fmt::Debug for ImportMap {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut importable_paths: Vec<_> = self
-            .map
-            .iter()
-            .map(|(item, info)| {
-                let ns = match item {
-                    ItemInNs::Types(_) => "t",
-                    ItemInNs::Values(_) => "v",
-                    ItemInNs::Macros(_) => "m",
-                };
-                format!("- {} ({ns})", info.path)
-            })
-            .collect();
-
-        importable_paths.sort();
-        f.write_str(&importable_paths.join("\n"))
+impl PartialEq for ImportMap {
+    fn eq(&self, other: &Self) -> bool {
+        // `fst` and `importables` are built from `map`, so we don't need to compare them.
+        self.item_to_info_map == other.item_to_info_map
     }
 }
 
-fn fst_path(path: &ImportPath) -> String {
-    let _p = profile::span("fst_path");
-    let mut s = path.to_string();
-    s.make_ascii_lowercase();
-    s
-}
+impl fmt::Debug for ImportMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut importable_names: Vec<_> = self
+            .item_to_info_map
+            .iter()
+            .map(|(item, (infos, _))| {
+                let l = infos.len();
+                match item {
+                    ItemInNs::Types(it) => format!("- {it:?} (t) [{l}]",),
+                    ItemInNs::Values(it) => format!("- {it:?} (v) [{l}]",),
+                    ItemInNs::Macros(it) => format!("- {it:?} (m) [{l}]",),
+                }
+            })
+            .collect();
 
-#[derive(Debug, Eq, PartialEq, Hash)]
-pub enum ImportKind {
-    Module,
-    Function,
-    Adt,
-    EnumVariant,
-    Const,
-    Static,
-    Trait,
-    TypeAlias,
-    BuiltinType,
-    AssociatedItem,
-    Macro,
+        importable_names.sort();
+        f.write_str(&importable_names.join("\n"))
+    }
 }
 
 /// A way to match import map contents against the search query.
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SearchMode {
     /// Import map entry should strictly match the query string.
-    Equals,
-    /// Import map entry should contain the query string.
-    Contains,
+    Exact,
     /// Import map entry should contain all letters from the query string,
     /// in the same order, but not necessary adjacent.
     Fuzzy,
+    /// Import map entry should match the query string by prefix.
+    Prefix,
+}
+
+impl SearchMode {
+    pub fn check(self, query: &str, case_sensitive: bool, candidate: &str) -> bool {
+        match self {
+            SearchMode::Exact if case_sensitive => candidate == query,
+            SearchMode::Exact => candidate.eq_ignore_ascii_case(&query),
+            SearchMode::Prefix => {
+                query.len() <= candidate.len() && {
+                    let prefix = &candidate[..query.len() as usize];
+                    if case_sensitive {
+                        prefix == query
+                    } else {
+                        prefix.eq_ignore_ascii_case(&query)
+                    }
+                }
+            }
+            SearchMode::Fuzzy => {
+                let mut name = candidate;
+                query.chars().all(|query_char| {
+                    let m = if case_sensitive {
+                        name.match_indices(query_char).next()
+                    } else {
+                        name.match_indices([query_char, query_char.to_ascii_uppercase()]).next()
+                    };
+                    match m {
+                        Some((index, _)) => {
+                            name = &name[index + 1..];
+                            true
+                        }
+                        None => false,
+                    }
+                })
+            }
+        }
+    }
+}
+
+/// Three possible ways to search for the name in associated and/or other items.
+#[derive(Debug, Clone, Copy)]
+pub enum AssocSearchMode {
+    /// Search for the name in both associated and other items.
+    Include,
+    /// Search for the name in other items only.
+    Exclude,
+    /// Search for the name in the associated items only.
+    AssocItemsOnly,
 }
 
 #[derive(Debug)]
 pub struct Query {
     query: String,
     lowercased: String,
-    name_only: bool,
-    assoc_items_only: bool,
     search_mode: SearchMode,
+    assoc_mode: AssocSearchMode,
     case_sensitive: bool,
-    limit: usize,
-    exclude_import_kinds: FxHashSet<ImportKind>,
 }
 
 impl Query {
@@ -300,35 +352,28 @@ impl Query {
         Self {
             query,
             lowercased,
-            name_only: false,
-            assoc_items_only: false,
-            search_mode: SearchMode::Contains,
+            search_mode: SearchMode::Exact,
+            assoc_mode: AssocSearchMode::Include,
             case_sensitive: false,
-            limit: usize::max_value(),
-            exclude_import_kinds: FxHashSet::default(),
         }
     }
 
-    /// Matches entries' names only, ignoring the rest of
-    /// the qualifier.
-    /// Example: for `std::marker::PhantomData`, the name is `PhantomData`.
-    pub fn name_only(self) -> Self {
-        Self { name_only: true, ..self }
+    /// Fuzzy finds items instead of exact matching.
+    pub fn fuzzy(self) -> Self {
+        Self { search_mode: SearchMode::Fuzzy, ..self }
     }
 
-    /// Matches only the entries that are associated items, ignoring the rest.
-    pub fn assoc_items_only(self) -> Self {
-        Self { assoc_items_only: true, ..self }
+    pub fn prefix(self) -> Self {
+        Self { search_mode: SearchMode::Prefix, ..self }
     }
 
-    /// Specifies the way to search for the entries using the query.
-    pub fn search_mode(self, search_mode: SearchMode) -> Self {
-        Self { search_mode, ..self }
+    pub fn exact(self) -> Self {
+        Self { search_mode: SearchMode::Exact, ..self }
     }
 
-    /// Limits the returned number of items to `limit`.
-    pub fn limit(self, limit: usize) -> Self {
-        Self { limit, ..self }
+    /// Specifies whether we want to include associated items in the result.
+    pub fn assoc_search_mode(self, assoc_mode: AssocSearchMode) -> Self {
+        Self { assoc_mode, ..self }
     }
 
     /// Respect casing of the query string when matching.
@@ -336,154 +381,140 @@ impl Query {
         Self { case_sensitive: true, ..self }
     }
 
-    /// Do not include imports of the specified kind in the search results.
-    pub fn exclude_import_kind(mut self, import_kind: ImportKind) -> Self {
-        self.exclude_import_kinds.insert(import_kind);
-        self
-    }
-
-    fn import_matches(&self, import: &ImportInfo, enforce_lowercase: bool) -> bool {
-        let _p = profile::span("import_map::Query::import_matches");
-        if import.is_trait_assoc_item {
-            if self.exclude_import_kinds.contains(&ImportKind::AssociatedItem) {
-                return false;
-            }
-        } else if self.assoc_items_only {
-            return false;
-        }
-
-        let mut input = if import.is_trait_assoc_item || self.name_only {
-            import.path.segments.last().unwrap().to_string()
-        } else {
-            import.path.to_string()
-        };
-        if enforce_lowercase || !self.case_sensitive {
-            input.make_ascii_lowercase();
-        }
-
-        let query_string =
-            if !enforce_lowercase && self.case_sensitive { &self.query } else { &self.lowercased };
-
-        match self.search_mode {
-            SearchMode::Equals => &input == query_string,
-            SearchMode::Contains => input.contains(query_string),
-            SearchMode::Fuzzy => {
-                let mut unchecked_query_chars = query_string.chars();
-                let mut mismatching_query_char = unchecked_query_chars.next();
-
-                for input_char in input.chars() {
-                    match mismatching_query_char {
-                        None => return true,
-                        Some(matching_query_char) if matching_query_char == input_char => {
-                            mismatching_query_char = unchecked_query_chars.next();
-                        }
-                        _ => (),
-                    }
-                }
-                mismatching_query_char.is_none()
-            }
+    fn matches_assoc_mode(&self, is_trait_assoc_item: IsTraitAssocItem) -> bool {
+        match (is_trait_assoc_item, self.assoc_mode) {
+            (IsTraitAssocItem::Yes, AssocSearchMode::Exclude)
+            | (IsTraitAssocItem::No, AssocSearchMode::AssocItemsOnly) => false,
+            _ => true,
         }
     }
 }
 
-/// Searches dependencies of `krate` for an importable path matching `query`.
+/// Searches dependencies of `krate` for an importable name matching `query`.
 ///
 /// This returns a list of items that could be imported from dependencies of `krate`.
 pub fn search_dependencies(
     db: &dyn DefDatabase,
     krate: CrateId,
-    query: Query,
+    ref query: Query,
 ) -> FxHashSet<ItemInNs> {
     let _p = profile::span("search_dependencies").detail(|| format!("{query:?}"));
 
     let graph = db.crate_graph();
+
     let import_maps: Vec<_> =
         graph[krate].dependencies.iter().map(|dep| db.import_map(dep.crate_id)).collect();
 
-    let automaton = fst::automaton::Subsequence::new(&query.lowercased);
-
     let mut op = fst::map::OpBuilder::new();
-    for map in &import_maps {
-        op = op.add(map.fst.search(&automaton));
-    }
 
-    let mut stream = op.union();
+    match query.search_mode {
+        SearchMode::Exact => {
+            let automaton = fst::automaton::Str::new(&query.lowercased);
 
-    let mut all_indexed_values = FxHashSet::default();
-    while let Some((_, indexed_values)) = stream.next() {
-        all_indexed_values.extend(indexed_values.iter().copied());
-    }
-
-    let mut res = FxHashSet::default();
-    for indexed_value in all_indexed_values {
-        let import_map = &import_maps[indexed_value.index];
-        let importables = &import_map.importables[indexed_value.value as usize..];
-
-        let common_importable_data = &import_map.map[&importables[0]];
-        if !query.import_matches(common_importable_data, true) {
-            continue;
+            for map in &import_maps {
+                op = op.add(map.fst.search(&automaton));
+            }
+            search_maps(&import_maps, op.union(), query)
         }
+        SearchMode::Fuzzy => {
+            let automaton = fst::automaton::Subsequence::new(&query.lowercased);
 
-        // Path shared by the importable items in this group.
-        let common_importables_path_fst = fst_path(&common_importable_data.path);
-        // Add the items from this `ModPath` group. Those are all subsequent items in
-        // `importables` whose paths match `path`.
-        let iter = importables
-            .iter()
-            .copied()
-            .take_while(|item| common_importables_path_fst == fst_path(&import_map.map[item].path))
-            .filter(|&item| match item_import_kind(item) {
-                Some(import_kind) => !query.exclude_import_kinds.contains(&import_kind),
-                None => true,
-            })
-            .filter(|item| {
-                !query.case_sensitive // we've already checked the common importables path case-insensitively
-                        || query.import_matches(&import_map.map[item], false)
-            });
-        res.extend(iter);
+            for map in &import_maps {
+                op = op.add(map.fst.search(&automaton));
+            }
+            search_maps(&import_maps, op.union(), query)
+        }
+        SearchMode::Prefix => {
+            let automaton = fst::automaton::Str::new(&query.lowercased).starts_with();
 
-        if res.len() >= query.limit {
-            return res;
+            for map in &import_maps {
+                op = op.add(map.fst.search(&automaton));
+            }
+            search_maps(&import_maps, op.union(), query)
+        }
+    }
+}
+
+fn search_maps(
+    import_maps: &[Arc<ImportMap>],
+    mut stream: fst::map::Union<'_>,
+    query: &Query,
+) -> FxHashSet<ItemInNs> {
+    let mut res = FxHashSet::default();
+    while let Some((_, indexed_values)) = stream.next() {
+        for &IndexedValue { index: import_map_idx, value } in indexed_values {
+            let end = (value & 0xFFFF_FFFF) as usize;
+            let start = (value >> 32) as usize;
+            let ImportMap { item_to_info_map, importables, .. } = &*import_maps[import_map_idx];
+            let importables = &importables[start as usize..end];
+
+            let iter = importables
+                .iter()
+                .copied()
+                .filter_map(|(item, info_idx)| {
+                    let (import_infos, assoc_mode) = &item_to_info_map[&item];
+                    query
+                        .matches_assoc_mode(*assoc_mode)
+                        .then(|| (item, &import_infos[info_idx as usize]))
+                })
+                .filter(|&(_, info)| {
+                    query.search_mode.check(
+                        &query.query,
+                        query.case_sensitive,
+                        &info.name.to_smol_str(),
+                    )
+                });
+            res.extend(iter.map(TupleExt::head));
         }
     }
 
     res
 }
 
-fn item_import_kind(item: ItemInNs) -> Option<ImportKind> {
-    Some(match item.as_module_def_id()? {
-        ModuleDefId::ModuleId(_) => ImportKind::Module,
-        ModuleDefId::FunctionId(_) => ImportKind::Function,
-        ModuleDefId::AdtId(_) => ImportKind::Adt,
-        ModuleDefId::EnumVariantId(_) => ImportKind::EnumVariant,
-        ModuleDefId::ConstId(_) => ImportKind::Const,
-        ModuleDefId::StaticId(_) => ImportKind::Static,
-        ModuleDefId::TraitId(_) => ImportKind::Trait,
-        ModuleDefId::TypeAliasId(_) => ImportKind::TypeAlias,
-        ModuleDefId::BuiltinType(_) => ImportKind::BuiltinType,
-        ModuleDefId::MacroId(_) => ImportKind::Macro,
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use base_db::{fixture::WithFixture, SourceDatabase, Upcast};
+    use base_db::{SourceDatabase, Upcast};
     use expect_test::{expect, Expect};
+    use test_fixture::WithFixture;
 
-    use crate::{test_db::TestDB, ItemContainerId, Lookup};
+    use crate::{db::DefDatabase, test_db::TestDB, ItemContainerId, Lookup};
 
     use super::*;
+
+    impl ImportMap {
+        fn fmt_for_test(&self, db: &dyn DefDatabase) -> String {
+            let mut importable_paths: Vec<_> = self
+                .item_to_info_map
+                .iter()
+                .flat_map(|(item, (info, _))| info.iter().map(move |info| (item, info)))
+                .map(|(item, info)| {
+                    let path = render_path(db, info);
+                    let ns = match item {
+                        ItemInNs::Types(_) => "t",
+                        ItemInNs::Values(_) => "v",
+                        ItemInNs::Macros(_) => "m",
+                    };
+                    format!("- {path} ({ns})")
+                })
+                .collect();
+
+            importable_paths.sort();
+            importable_paths.join("\n")
+        }
+    }
 
     fn check_search(ra_fixture: &str, crate_name: &str, query: Query, expect: Expect) {
         let db = TestDB::with_files(ra_fixture);
         let crate_graph = db.crate_graph();
         let krate = crate_graph
             .iter()
-            .find(|krate| {
-                crate_graph[*krate].display_name.as_ref().map(|n| n.to_string())
-                    == Some(crate_name.to_string())
+            .find(|&krate| {
+                crate_graph[krate]
+                    .display_name
+                    .as_ref()
+                    .is_some_and(|it| &**it.crate_name() == crate_name)
             })
-            .unwrap();
+            .expect("could not find crate");
 
         let actual = search_dependencies(db.upcast(), krate, query)
             .into_iter()
@@ -494,7 +525,7 @@ mod tests {
                 let (path, mark) = match assoc_item_path(&db, &dependency_imports, dependency) {
                     Some(assoc_item_path) => (assoc_item_path, "a"),
                     None => (
-                        dependency_imports.path_of(dependency)?.to_string(),
+                        render_path(&db, &dependency_imports.import_info_for(dependency)?[0]),
                         match dependency {
                             ItemInNs::Types(ModuleDefId::FunctionId(_))
                             | ItemInNs::Values(ModuleDefId::FunctionId(_)) => "f",
@@ -524,53 +555,30 @@ mod tests {
         dependency_imports: &ImportMap,
         dependency: ItemInNs,
     ) -> Option<String> {
-        let dependency_assoc_item_id = match dependency {
-            ItemInNs::Types(ModuleDefId::FunctionId(id))
-            | ItemInNs::Values(ModuleDefId::FunctionId(id)) => AssocItemId::from(id),
-            ItemInNs::Types(ModuleDefId::ConstId(id))
-            | ItemInNs::Values(ModuleDefId::ConstId(id)) => AssocItemId::from(id),
-            ItemInNs::Types(ModuleDefId::TypeAliasId(id))
-            | ItemInNs::Values(ModuleDefId::TypeAliasId(id)) => AssocItemId::from(id),
+        let (dependency_assoc_item_id, container) = match dependency.as_module_def_id()? {
+            ModuleDefId::FunctionId(id) => (AssocItemId::from(id), id.lookup(db).container),
+            ModuleDefId::ConstId(id) => (AssocItemId::from(id), id.lookup(db).container),
+            ModuleDefId::TypeAliasId(id) => (AssocItemId::from(id), id.lookup(db).container),
             _ => return None,
         };
 
-        let trait_ = assoc_to_trait(db, dependency)?;
-        if let ModuleDefId::TraitId(tr) = trait_.as_module_def_id()? {
-            let trait_data = db.trait_data(tr);
-            let assoc_item_name =
-                trait_data.items.iter().find_map(|(assoc_item_name, assoc_item_id)| {
-                    if &dependency_assoc_item_id == assoc_item_id {
-                        Some(assoc_item_name)
-                    } else {
-                        None
-                    }
-                })?;
-            return Some(format!("{}::{assoc_item_name}", dependency_imports.path_of(trait_)?));
-        }
-        None
-    }
-
-    fn assoc_to_trait(db: &dyn DefDatabase, item: ItemInNs) -> Option<ItemInNs> {
-        let assoc: AssocItemId = match item {
-            ItemInNs::Types(it) | ItemInNs::Values(it) => match it {
-                ModuleDefId::TypeAliasId(it) => it.into(),
-                ModuleDefId::FunctionId(it) => it.into(),
-                ModuleDefId::ConstId(it) => it.into(),
-                _ => return None,
-            },
-            _ => return None,
+        let ItemContainerId::TraitId(trait_id) = container else {
+            return None;
         };
 
-        let container = match assoc {
-            AssocItemId::FunctionId(it) => it.lookup(db).container,
-            AssocItemId::ConstId(it) => it.lookup(db).container,
-            AssocItemId::TypeAliasId(it) => it.lookup(db).container,
-        };
+        let trait_info = dependency_imports.import_info_for(ItemInNs::Types(trait_id.into()))?;
 
-        match container {
-            ItemContainerId::TraitId(it) => Some(ItemInNs::Types(it.into())),
-            _ => None,
-        }
+        let trait_data = db.trait_data(trait_id);
+        let (assoc_item_name, _) = trait_data
+            .items
+            .iter()
+            .find(|(_, assoc_item_id)| &dependency_assoc_item_id == assoc_item_id)?;
+        // FIXME: This should check all import infos, not just the first
+        Some(format!(
+            "{}::{}",
+            render_path(db, &trait_info[0]),
+            assoc_item_name.display(db.upcast())
+        ))
     }
 
     fn check(ra_fixture: &str, expect: Expect) {
@@ -585,12 +593,30 @@ mod tests {
 
                 let map = db.import_map(krate);
 
-                Some(format!("{name}:\n{map:?}\n"))
+                Some(format!("{name}:\n{}\n", map.fmt_for_test(db.upcast())))
             })
             .sorted()
             .collect::<String>();
 
         expect.assert_eq(&actual)
+    }
+
+    fn render_path(db: &dyn DefDatabase, info: &ImportInfo) -> String {
+        let mut module = info.container;
+        let mut segments = vec![&info.name];
+
+        let def_map = module.def_map(db);
+        assert!(def_map.block_id().is_none(), "block local items should not be in `ImportMap`");
+
+        while let Some(parent) = module.containing_module(db) {
+            let parent_data = &def_map[parent.local_id];
+            let (name, _) =
+                parent_data.children.iter().find(|(_, id)| **id == module.local_id).unwrap();
+            segments.push(name);
+            module = parent;
+        }
+
+        segments.iter().rev().map(|it| it.display(db.upcast())).join("::")
     }
 
     #[test]
@@ -628,6 +654,7 @@ mod tests {
                 main:
                 - publ1 (t)
                 - real_pu2 (t)
+                - real_pu2::Pub (t)
                 - real_pub (t)
                 - real_pub::Pub (t)
             "#]],
@@ -653,6 +680,7 @@ mod tests {
                 - sub (t)
                 - sub::Def (t)
                 - sub::subsub (t)
+                - sub::subsub::Def (t)
             "#]],
         );
     }
@@ -709,6 +737,7 @@ mod tests {
     #[test]
     fn module_reexport() {
         // Reexporting modules from a dependency adds all contents to the import map.
+        // XXX: The rendered paths are relative to the defining crate.
         check(
             r"
             //- /main.rs crate:main deps:lib
@@ -724,9 +753,9 @@ mod tests {
                 - module::S (t)
                 - module::S (v)
                 main:
+                - module::S (t)
+                - module::S (v)
                 - reexported_module (t)
-                - reexported_module::S (t)
-                - reexported_module::S (v)
             "#]],
         );
     }
@@ -751,7 +780,9 @@ mod tests {
                 - module (t)
                 - module::S (t)
                 - module::S (v)
+                - module::module (t)
                 - sub (t)
+                - sub::module (t)
             "#]],
         );
     }
@@ -828,10 +859,9 @@ mod tests {
         check_search(
             ra_fixture,
             "main",
-            Query::new("fmt".to_string()).search_mode(SearchMode::Fuzzy),
+            Query::new("fmt".to_string()).fuzzy(),
             expect![[r#"
                 dep::fmt (t)
-                dep::fmt::Display (t)
                 dep::fmt::Display::FMT_CONST (a)
                 dep::fmt::Display::format_function (a)
                 dep::fmt::Display::format_method (a)
@@ -858,7 +888,9 @@ mod tests {
         check_search(
             ra_fixture,
             "main",
-            Query::new("fmt".to_string()).search_mode(SearchMode::Fuzzy).assoc_items_only(),
+            Query::new("fmt".to_string())
+                .fuzzy()
+                .assoc_search_mode(AssocSearchMode::AssocItemsOnly),
             expect![[r#"
                 dep::fmt::Display::FMT_CONST (a)
                 dep::fmt::Display::format_function (a)
@@ -869,62 +901,48 @@ mod tests {
         check_search(
             ra_fixture,
             "main",
-            Query::new("fmt".to_string())
-                .search_mode(SearchMode::Fuzzy)
-                .exclude_import_kind(ImportKind::AssociatedItem),
+            Query::new("fmt".to_string()).fuzzy().assoc_search_mode(AssocSearchMode::Exclude),
             expect![[r#"
-            dep::fmt (t)
-            dep::fmt::Display (t)
-        "#]],
-        );
-
-        check_search(
-            ra_fixture,
-            "main",
-            Query::new("fmt".to_string())
-                .search_mode(SearchMode::Fuzzy)
-                .assoc_items_only()
-                .exclude_import_kind(ImportKind::AssociatedItem),
-            expect![[r#""#]],
+                dep::fmt (t)
+            "#]],
         );
     }
 
     #[test]
     fn search_mode() {
         let ra_fixture = r#"
-            //- /main.rs crate:main deps:dep
-            //- /dep.rs crate:dep deps:tdep
-            use tdep::fmt as fmt_dep;
-            pub mod fmt {
-                pub trait Display {
-                    fn fmt();
-                }
-            }
-            #[macro_export]
-            macro_rules! Fmt {
-                () => {};
-            }
-            pub struct Fmt;
+//- /main.rs crate:main deps:dep
+//- /dep.rs crate:dep deps:tdep
+use tdep::fmt as fmt_dep;
+pub mod fmt {
+    pub trait Display {
+        fn fmt();
+    }
+}
+#[macro_export]
+macro_rules! Fmt {
+    () => {};
+}
+pub struct Fmt;
 
-            pub fn format() {}
-            pub fn no() {}
+pub fn format() {}
+pub fn no() {}
 
-            //- /tdep.rs crate:tdep
-            pub mod fmt {
-                pub struct NotImportableFromMain;
-            }
-        "#;
+//- /tdep.rs crate:tdep
+pub mod fmt {
+    pub struct NotImportableFromMain;
+}
+"#;
 
         check_search(
             ra_fixture,
             "main",
-            Query::new("fmt".to_string()).search_mode(SearchMode::Fuzzy),
+            Query::new("fmt".to_string()).fuzzy(),
             expect![[r#"
                 dep::Fmt (m)
                 dep::Fmt (t)
                 dep::Fmt (v)
                 dep::fmt (t)
-                dep::fmt::Display (t)
                 dep::fmt::Display::fmt (a)
                 dep::format (f)
             "#]],
@@ -933,26 +951,12 @@ mod tests {
         check_search(
             ra_fixture,
             "main",
-            Query::new("fmt".to_string()).search_mode(SearchMode::Equals),
+            Query::new("fmt".to_string()),
             expect![[r#"
                 dep::Fmt (m)
                 dep::Fmt (t)
                 dep::Fmt (v)
                 dep::fmt (t)
-                dep::fmt::Display::fmt (a)
-            "#]],
-        );
-
-        check_search(
-            ra_fixture,
-            "main",
-            Query::new("fmt".to_string()).search_mode(SearchMode::Contains),
-            expect![[r#"
-                dep::Fmt (m)
-                dep::Fmt (t)
-                dep::Fmt (v)
-                dep::fmt (t)
-                dep::fmt::Display (t)
                 dep::fmt::Display::fmt (a)
             "#]],
         );
@@ -993,20 +997,6 @@ mod tests {
                 dep::Fmt (t)
                 dep::Fmt (v)
                 dep::fmt (t)
-                dep::fmt::Display (t)
-                dep::fmt::Display::fmt (a)
-            "#]],
-        );
-
-        check_search(
-            ra_fixture,
-            "main",
-            Query::new("fmt".to_string()).name_only(),
-            expect![[r#"
-                dep::Fmt (m)
-                dep::Fmt (t)
-                dep::Fmt (v)
-                dep::fmt (t)
                 dep::fmt::Display::fmt (a)
             "#]],
         );
@@ -1042,67 +1032,6 @@ mod tests {
                 dep::FMT (t)
                 dep::FMT (v)
             "#]],
-        );
-    }
-
-    #[test]
-    fn search_limit() {
-        check_search(
-            r#"
-        //- /main.rs crate:main deps:dep
-        //- /dep.rs crate:dep
-        pub mod fmt {
-            pub trait Display {
-                fn fmt();
-            }
-        }
-        #[macro_export]
-        macro_rules! Fmt {
-            () => {};
-        }
-        pub struct Fmt;
-
-        pub fn format() {}
-        pub fn no() {}
-    "#,
-            "main",
-            Query::new("".to_string()).limit(2),
-            expect![[r#"
-                dep::Fmt (m)
-                dep::Fmt (t)
-                dep::Fmt (v)
-                dep::fmt (t)
-            "#]],
-        );
-    }
-
-    #[test]
-    fn search_exclusions() {
-        let ra_fixture = r#"
-            //- /main.rs crate:main deps:dep
-            //- /dep.rs crate:dep
-
-            pub struct fmt;
-            pub struct FMT;
-        "#;
-
-        check_search(
-            ra_fixture,
-            "main",
-            Query::new("FMT".to_string()),
-            expect![[r#"
-                dep::FMT (t)
-                dep::FMT (v)
-                dep::fmt (t)
-                dep::fmt (v)
-            "#]],
-        );
-
-        check_search(
-            ra_fixture,
-            "main",
-            Query::new("FMT".to_string()).exclude_import_kind(ImportKind::Adt),
-            expect![[r#""#]],
         );
     }
 }

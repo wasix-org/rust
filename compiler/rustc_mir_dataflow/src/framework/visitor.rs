@@ -4,13 +4,13 @@ use super::{Analysis, Direction, Results};
 
 /// Calls the corresponding method in `ResultsVisitor` for every location in a `mir::Body` with the
 /// dataflow state at that location.
-pub fn visit_results<'mir, 'tcx, F, V>(
+pub fn visit_results<'mir, 'tcx, F, R>(
     body: &'mir mir::Body<'tcx>,
     blocks: impl IntoIterator<Item = BasicBlock>,
-    results: &V,
-    vis: &mut impl ResultsVisitor<'mir, 'tcx, FlowState = F>,
+    results: &mut R,
+    vis: &mut impl ResultsVisitor<'mir, 'tcx, R, FlowState = F>,
 ) where
-    V: ResultsVisitable<'tcx, FlowState = F>,
+    R: ResultsVisitable<'tcx, FlowState = F>,
 {
     let mut state = results.new_flow_state(body);
 
@@ -22,25 +22,22 @@ pub fn visit_results<'mir, 'tcx, F, V>(
         assert!(reachable_blocks.contains(block));
 
         let block_data = &body[block];
-        V::Direction::visit_results_in_block(&mut state, block, block_data, results, vis);
+        R::Direction::visit_results_in_block(&mut state, block, block_data, results, vis);
     }
 }
 
-pub trait ResultsVisitor<'mir, 'tcx> {
+/// A visitor over the results of an `Analysis`. The type parameter `R` is the results type being
+/// visited.
+pub trait ResultsVisitor<'mir, 'tcx, R> {
     type FlowState;
 
-    fn visit_block_start(
-        &mut self,
-        _state: &Self::FlowState,
-        _block_data: &'mir mir::BasicBlockData<'tcx>,
-        _block: BasicBlock,
-    ) {
-    }
+    fn visit_block_start(&mut self, _state: &Self::FlowState) {}
 
     /// Called with the `before_statement_effect` of the given statement applied to `state` but not
     /// its `statement_effect`.
     fn visit_statement_before_primary_effect(
         &mut self,
+        _results: &mut R,
         _state: &Self::FlowState,
         _statement: &'mir mir::Statement<'tcx>,
         _location: Location,
@@ -51,6 +48,7 @@ pub trait ResultsVisitor<'mir, 'tcx> {
     /// statement applied to `state`.
     fn visit_statement_after_primary_effect(
         &mut self,
+        _results: &mut R,
         _state: &Self::FlowState,
         _statement: &'mir mir::Statement<'tcx>,
         _location: Location,
@@ -61,6 +59,7 @@ pub trait ResultsVisitor<'mir, 'tcx> {
     /// its `terminator_effect`.
     fn visit_terminator_before_primary_effect(
         &mut self,
+        _results: &mut R,
         _state: &Self::FlowState,
         _terminator: &'mir mir::Terminator<'tcx>,
         _location: Location,
@@ -73,25 +72,20 @@ pub trait ResultsVisitor<'mir, 'tcx> {
     /// The `call_return_effect` (if one exists) will *not* be applied to `state`.
     fn visit_terminator_after_primary_effect(
         &mut self,
+        _results: &mut R,
         _state: &Self::FlowState,
         _terminator: &'mir mir::Terminator<'tcx>,
         _location: Location,
     ) {
     }
 
-    fn visit_block_end(
-        &mut self,
-        _state: &Self::FlowState,
-        _block_data: &'mir mir::BasicBlockData<'tcx>,
-        _block: BasicBlock,
-    ) {
-    }
+    fn visit_block_end(&mut self, _state: &Self::FlowState) {}
 }
 
 /// Things that can be visited by a `ResultsVisitor`.
 ///
-/// This trait exists so that we can visit the results of multiple dataflow analyses simultaneously.
-/// DO NOT IMPLEMENT MANUALLY. Instead, use the `impl_visitable` macro below.
+/// This trait exists so that we can visit the results of one or more dataflow analyses
+/// simultaneously.
 pub trait ResultsVisitable<'tcx> {
     type Direction: Direction;
     type FlowState;
@@ -105,28 +99,28 @@ pub trait ResultsVisitable<'tcx> {
     fn reset_to_block_entry(&self, state: &mut Self::FlowState, block: BasicBlock);
 
     fn reconstruct_before_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::FlowState,
         statement: &mir::Statement<'tcx>,
         location: Location,
     );
 
     fn reconstruct_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::FlowState,
         statement: &mir::Statement<'tcx>,
         location: Location,
     );
 
     fn reconstruct_before_terminator_effect(
-        &self,
+        &mut self,
         state: &mut Self::FlowState,
         terminator: &mir::Terminator<'tcx>,
         location: Location,
     );
 
     fn reconstruct_terminator_effect(
-        &self,
+        &mut self,
         state: &mut Self::FlowState,
         terminator: &mir::Terminator<'tcx>,
         location: Location,
@@ -146,11 +140,11 @@ where
     }
 
     fn reset_to_block_entry(&self, state: &mut Self::FlowState, block: BasicBlock) {
-        state.clone_from(&self.entry_set_for_block(block));
+        state.clone_from(self.entry_set_for_block(block));
     }
 
     fn reconstruct_before_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::FlowState,
         stmt: &mir::Statement<'tcx>,
         loc: Location,
@@ -159,7 +153,7 @@ where
     }
 
     fn reconstruct_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::FlowState,
         stmt: &mir::Statement<'tcx>,
         loc: Location,
@@ -168,7 +162,7 @@ where
     }
 
     fn reconstruct_before_terminator_effect(
-        &self,
+        &mut self,
         state: &mut Self::FlowState,
         term: &mir::Terminator<'tcx>,
         loc: Location,
@@ -177,7 +171,7 @@ where
     }
 
     fn reconstruct_terminator_effect(
-        &self,
+        &mut self,
         state: &mut Self::FlowState,
         term: &mir::Terminator<'tcx>,
         loc: Location,

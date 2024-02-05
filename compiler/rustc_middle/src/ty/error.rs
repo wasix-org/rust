@@ -7,11 +7,10 @@ use rustc_hir::def_id::DefId;
 use rustc_span::symbol::Symbol;
 use rustc_target::spec::abi;
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TypeFoldable, TypeVisitable)]
 pub struct ExpectedFound<T> {
     pub expected: T,
     pub found: T,
@@ -28,7 +27,7 @@ impl<T> ExpectedFound<T> {
 }
 
 // Data structures used in type unification
-#[derive(Copy, Clone, Debug, TypeFoldable, TypeVisitable, Lift, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, TypeVisitable, PartialEq, Eq)]
 #[rustc_pass_by_value]
 pub enum TypeError<'tcx> {
     Mismatch,
@@ -45,7 +44,6 @@ pub enum TypeError<'tcx> {
 
     RegionsDoesNotOutlive(Region<'tcx>, Region<'tcx>),
     RegionsInsufficientlyPolymorphic(BoundRegionKind, Region<'tcx>),
-    RegionsOverlyPolymorphic(BoundRegionKind, Region<'tcx>),
     RegionsPlaceholderMismatch,
 
     Sorts(ExpectedFound<Ty<'tcx>>),
@@ -74,7 +72,6 @@ impl TypeError<'_> {
         match self {
             TypeError::RegionsDoesNotOutlive(_, _)
             | TypeError::RegionsInsufficientlyPolymorphic(_, _)
-            | TypeError::RegionsOverlyPolymorphic(_, _)
             | TypeError::RegionsPlaceholderMismatch => true,
             _ => false,
         }
@@ -92,16 +89,11 @@ impl<'tcx> TypeError<'tcx> {
             // A naive approach to making sure that we're not reporting silly errors such as:
             // (expected closure, found closure).
             if expected == found {
-                format!("expected {}, found a different {}", expected, found)
+                format!("expected {expected}, found a different {found}")
             } else {
-                format!("expected {}, found {}", expected, found)
+                format!("expected {expected}, found {found}")
             }
         }
-
-        let br_string = |br: ty::BoundRegionKind| match br {
-            ty::BrNamed(_, name) => format!(" {}", name),
-            _ => String::new(),
-        };
 
         match self {
             CyclicTy(_) => "cyclic type of infinite size".into(),
@@ -138,25 +130,16 @@ impl<'tcx> TypeError<'tcx> {
             )
             .into(),
             ArgCount => "incorrect number of function parameters".into(),
-            FieldMisMatch(adt, field) => format!("field type mismatch: {}.{}", adt, field).into(),
+            FieldMisMatch(adt, field) => format!("field type mismatch: {adt}.{field}").into(),
             RegionsDoesNotOutlive(..) => "lifetime mismatch".into(),
             // Actually naming the region here is a bit confusing because context is lacking
             RegionsInsufficientlyPolymorphic(..) => {
                 "one type is more general than the other".into()
             }
-            RegionsOverlyPolymorphic(br, _) => format!(
-                "expected concrete lifetime, found bound lifetime parameter{}",
-                br_string(br)
-            )
-            .into(),
             RegionsPlaceholderMismatch => "one type is more general than the other".into(),
             ArgumentSorts(values, _) | Sorts(values) => {
-                let mut expected = values.expected.sort_string(tcx);
-                let mut found = values.found.sort_string(tcx);
-                if expected == found {
-                    expected = values.expected.sort_string(tcx);
-                    found = values.found.sort_string(tcx);
-                }
+                let expected = values.expected.sort_string(tcx);
+                let found = values.found.sort_string(tcx);
                 report_maybe_different(&expected, &found).into()
             }
             Traits(values) => {
@@ -180,7 +163,7 @@ impl<'tcx> TypeError<'tcx> {
                     ty::IntVarValue::IntType(ty) => ty.name_str(),
                     ty::IntVarValue::UintType(ty) => ty.name_str(),
                 };
-                format!("expected `{}`, found `{}`", expected, found).into()
+                format!("expected `{expected}`, found `{found}`").into()
             }
             FloatMismatch(ref values) => format!(
                 "expected `{}`, found `{}`",
@@ -232,7 +215,6 @@ impl<'tcx> TypeError<'tcx> {
             | FieldMisMatch(..)
             | RegionsDoesNotOutlive(..)
             | RegionsInsufficientlyPolymorphic(..)
-            | RegionsOverlyPolymorphic(..)
             | RegionsPlaceholderMismatch
             | Traits(_)
             | ProjectionMismatched(_)
@@ -253,14 +235,15 @@ impl<'tcx> Ty<'tcx> {
                 _ => "fn item".into(),
             },
             ty::FnPtr(_) => "fn pointer".into(),
-            ty::Dynamic(ref inner, ..) if let Some(principal) = inner.principal() => {
+            ty::Dynamic(inner, ..) if let Some(principal) = inner.principal() => {
                 format!("`dyn {}`", tcx.def_path_str(principal.def_id())).into()
             }
             ty::Dynamic(..) => "trait object".into(),
             ty::Closure(..) => "closure".into(),
-            ty::Generator(def_id, ..) => tcx.generator_kind(def_id).unwrap().descr().into(),
-            ty::GeneratorWitness(..) |
-            ty::GeneratorWitnessMIR(..) => "generator witness".into(),
+            ty::Coroutine(def_id, ..) => {
+                format!("{:#}", tcx.coroutine_kind(def_id).unwrap()).into()
+            }
+            ty::CoroutineWitness(..) => "coroutine witness".into(),
             ty::Infer(ty::TyVar(_)) => "inferred type".into(),
             ty::Infer(ty::IntVar(_)) => "integer".into(),
             ty::Infer(ty::FloatVar(_)) => "floating-point number".into(),
@@ -269,9 +252,15 @@ impl<'tcx> Ty<'tcx> {
             ty::Infer(ty::FreshTy(_)) => "fresh type".into(),
             ty::Infer(ty::FreshIntTy(_)) => "fresh integral type".into(),
             ty::Infer(ty::FreshFloatTy(_)) => "fresh floating-point type".into(),
-            ty::Alias(ty::Projection, _) => "associated type".into(),
+            ty::Alias(ty::Projection | ty::Inherent, _) => "associated type".into(),
             ty::Param(p) => format!("type parameter `{p}`").into(),
-            ty::Alias(ty::Opaque, ..) => if tcx.ty_is_opaque_future(self) { "future".into() } else { "opaque type".into() },
+            ty::Alias(ty::Opaque, ..) => {
+                if tcx.ty_is_opaque_future(self) {
+                    "future".into()
+                } else {
+                    "opaque type".into()
+                }
+            }
             ty::Error(_) => "type error".into(),
             _ => {
                 let width = tcx.sess.diagnostic_width();
@@ -292,7 +281,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Float(_)
             | ty::Str
             | ty::Never => "type".into(),
-            ty::Tuple(ref tys) if tys.is_empty() => "unit type".into(),
+            ty::Tuple(tys) if tys.is_empty() => "unit type".into(),
             ty::Adt(def, _) => def.descr().into(),
             ty::Foreign(_) => "extern type".into(),
             ty::Array(..) => "array".into(),
@@ -311,12 +300,15 @@ impl<'tcx> Ty<'tcx> {
             ty::FnPtr(_) => "fn pointer".into(),
             ty::Dynamic(..) => "trait object".into(),
             ty::Closure(..) => "closure".into(),
-            ty::Generator(def_id, ..) => tcx.generator_kind(def_id).unwrap().descr().into(),
-            ty::GeneratorWitness(..) | ty::GeneratorWitnessMIR(..) => "generator witness".into(),
+            ty::Coroutine(def_id, ..) => {
+                format!("{:#}", tcx.coroutine_kind(def_id).unwrap()).into()
+            }
+            ty::CoroutineWitness(..) => "coroutine witness".into(),
             ty::Tuple(..) => "tuple".into(),
             ty::Placeholder(..) => "higher-ranked type".into(),
             ty::Bound(..) => "bound type variable".into(),
-            ty::Alias(ty::Projection, _) => "associated type".into(),
+            ty::Alias(ty::Projection | ty::Inherent, _) => "associated type".into(),
+            ty::Alias(ty::Weak, _) => "type alias".into(),
             ty::Param(_) => "type parameter".into(),
             ty::Alias(ty::Opaque, ..) => "opaque type".into(),
         }
@@ -326,26 +318,25 @@ impl<'tcx> Ty<'tcx> {
 impl<'tcx> TyCtxt<'tcx> {
     pub fn ty_string_with_limit(self, ty: Ty<'tcx>, length_limit: usize) -> String {
         let mut type_limit = 50;
-        let regular = FmtPrinter::new(self, hir::def::Namespace::TypeNS)
-            .pretty_print_type(ty)
-            .expect("could not write to `String`")
-            .into_buffer();
+        let regular = FmtPrinter::print_string(self, hir::def::Namespace::TypeNS, |cx| {
+            cx.pretty_print_type(ty)
+        })
+        .expect("could not write to `String`");
         if regular.len() <= length_limit {
             return regular;
         }
         let mut short;
         loop {
             // Look for the longest properly trimmed path that still fits in length_limit.
-            short = with_forced_trimmed_paths!(
-                FmtPrinter::new_with_limit(
+            short = with_forced_trimmed_paths!({
+                let mut cx = FmtPrinter::new_with_limit(
                     self,
                     hir::def::Namespace::TypeNS,
                     rustc_session::Limit(type_limit),
-                )
-                .pretty_print_type(ty)
-                .expect("could not write to `String`")
-                .into_buffer()
-            );
+                );
+                cx.pretty_print_type(ty).expect("could not write to `String`");
+                cx.into_buffer()
+            });
             if short.len() <= length_limit || type_limit == 0 {
                 break;
             }
@@ -354,28 +345,35 @@ impl<'tcx> TyCtxt<'tcx> {
         short
     }
 
-    pub fn short_ty_string(self, ty: Ty<'tcx>) -> (String, Option<PathBuf>) {
+    pub fn short_ty_string(self, ty: Ty<'tcx>, path: &mut Option<PathBuf>) -> String {
+        let regular = FmtPrinter::print_string(self, hir::def::Namespace::TypeNS, |cx| {
+            cx.pretty_print_type(ty)
+        })
+        .expect("could not write to `String`");
+
+        if !self.sess.opts.unstable_opts.write_long_types_to_disk {
+            return regular;
+        }
+
         let width = self.sess.diagnostic_width();
         let length_limit = width.saturating_sub(30);
-        let regular = FmtPrinter::new(self, hir::def::Namespace::TypeNS)
-            .pretty_print_type(ty)
-            .expect("could not write to `String`")
-            .into_buffer();
         if regular.len() <= width {
-            return (regular, None);
+            return regular;
         }
         let short = self.ty_string_with_limit(ty, length_limit);
         if regular == short {
-            return (regular, None);
+            return regular;
         }
-        // Multiple types might be shortened in a single error, ensure we create a file for each.
+        // Ensure we create an unique file for the type passed in when we create a file.
         let mut s = DefaultHasher::new();
         ty.hash(&mut s);
         let hash = s.finish();
-        let path = self.output_filenames(()).temp_path_ext(&format!("long-type-{hash}.txt"), None);
-        match std::fs::write(&path, &regular) {
-            Ok(_) => (short, Some(path)),
-            Err(_) => (regular, None),
+        *path = Some(path.take().unwrap_or_else(|| {
+            self.output_filenames(()).temp_path_ext(&format!("long-type-{hash}.txt"), None)
+        }));
+        match std::fs::write(path.as_ref().unwrap(), &format!("{regular}\n")) {
+            Ok(_) => short,
+            Err(_) => regular,
         }
     }
 }

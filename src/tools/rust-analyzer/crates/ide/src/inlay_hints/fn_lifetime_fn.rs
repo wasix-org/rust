@@ -10,7 +10,7 @@ use syntax::{
     SyntaxToken,
 };
 
-use crate::{InlayHint, InlayHintsConfig, InlayKind, LifetimeElisionHints};
+use crate::{InlayHint, InlayHintPosition, InlayHintsConfig, InlayKind, LifetimeElisionHints};
 
 pub(super) fn hints(
     acc: &mut Vec<InlayHint>,
@@ -22,9 +22,14 @@ pub(super) fn hints(
     }
 
     let mk_lt_hint = |t: SyntaxToken, label: String| InlayHint {
+        needs_resolve: false,
         range: t.text_range(),
         kind: InlayKind::Lifetime,
         label: label.into(),
+        text_edit: None,
+        position: InlayHintPosition::After,
+        pad_left: false,
+        pad_right: true,
     };
 
     let param_list = func.param_list()?;
@@ -181,6 +186,7 @@ pub(super) fn hints(
             let angle_tok = gpl.l_angle_token()?;
             let is_empty = gpl.generic_params().next().is_none();
             acc.push(InlayHint {
+                needs_resolve: false,
                 range: angle_tok.text_range(),
                 kind: InlayKind::Lifetime,
                 label: format!(
@@ -189,12 +195,21 @@ pub(super) fn hints(
                     if is_empty { "" } else { ", " }
                 )
                 .into(),
+                text_edit: None,
+                position: InlayHintPosition::After,
+                pad_left: false,
+                pad_right: true,
             });
         }
         (None, allocated_lifetimes) => acc.push(InlayHint {
+            needs_resolve: false,
             range: func.name()?.syntax().text_range(),
             kind: InlayKind::GenericParamList,
             label: format!("<{}>", allocated_lifetimes.iter().format(", "),).into(),
+            text_edit: None,
+            position: InlayHintPosition::After,
+            pad_left: false,
+            pad_right: false,
         }),
     }
     Some(())

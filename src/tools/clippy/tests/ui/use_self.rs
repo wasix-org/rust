@@ -1,5 +1,4 @@
-// run-rustfix
-// aux-build:proc_macro_derive.rs
+//@aux-build:proc_macro_derive.rs
 
 #![warn(clippy::use_self)]
 #![allow(dead_code, unreachable_code)]
@@ -644,6 +643,16 @@ fn msrv_1_37() {
             match self {
                 E::A => {},
             }
+        }
+    }
+}
+
+mod issue_10371 {
+    struct Val<const V: i32> {}
+
+    impl<const V: i32> From<Val<V>> for i32 {
+        fn from(_: Val<V>) -> Self {
+            todo!()
         }
     }
 }

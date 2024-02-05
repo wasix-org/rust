@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![warn(clippy::enum_glob_use)]
 #![allow(unused)]
 #![warn(unused_imports)]
@@ -21,6 +19,7 @@ mod in_fn_test {
 }
 
 mod blurg {
+    #[allow(unused_imports)]
     pub use std::cmp::Ordering::*; // ok, re-export
 }
 

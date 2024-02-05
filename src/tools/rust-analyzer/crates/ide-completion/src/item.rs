@@ -1,9 +1,13 @@
 //! See `CompletionItem` structure.
 
-use std::fmt;
+use std::{fmt, mem};
 
-use hir::{Documentation, Mutability};
-use ide_db::{imports::import_assets::LocatedImport, SnippetCap, SymbolKind};
+use hir::Mutability;
+use ide_db::{
+    documentation::Documentation, imports::import_assets::LocatedImport, RootDatabase, SnippetCap,
+    SymbolKind,
+};
+use itertools::Itertools;
 use smallvec::SmallVec;
 use stdx::{impl_from, never};
 use syntax::{SmolStr, TextRange, TextSize};
@@ -22,6 +26,10 @@ use crate::{
 pub struct CompletionItem {
     /// Label in the completion pop up which identifies completion.
     pub label: SmolStr,
+    /// Additional label details in the completion pop up that are
+    /// displayed and aligned on the right side after the label.
+    pub label_detail: Option<SmolStr>,
+
     /// Range of identifier that is being completed.
     ///
     /// It should be used primarily for UI, but we also use this to convert
@@ -45,7 +53,7 @@ pub struct CompletionItem {
     ///
     /// That is, in `foo.bar$0` lookup of `abracadabra` will be accepted (it
     /// contains `bar` sub sequence), and `quux` will rejected.
-    pub lookup: Option<SmolStr>,
+    pub lookup: SmolStr,
 
     /// Additional info to show in the UI pop up.
     pub detail: Option<String>,
@@ -75,7 +83,8 @@ pub struct CompletionItem {
     pub ref_match: Option<(Mutability, TextSize)>,
 
     /// The import data to add to completion's edits.
-    pub import_to_add: SmallVec<[LocatedImport; 1]>,
+    /// (ImportPath, LastSegment)
+    pub import_to_add: SmallVec<[(String, String); 1]>,
 }
 
 // We use custom debug for CompletionItem to make snapshot tests more readable.
@@ -84,7 +93,7 @@ impl fmt::Debug for CompletionItem {
         let mut s = f.debug_struct("CompletionItem");
         s.field("label", &self.label).field("source_range", &self.source_range);
         if self.text_edit.len() == 1 {
-            let atom = &self.text_edit.iter().next().unwrap();
+            let atom = self.text_edit.iter().next().unwrap();
             s.field("delete", &atom.delete);
             s.field("insert", &atom.insert);
         } else {
@@ -288,7 +297,7 @@ impl_from!(SymbolKind for CompletionItemKind);
 
 impl CompletionItemKind {
     #[cfg(test)]
-    pub(crate) fn tag(&self) -> &'static str {
+    pub(crate) fn tag(self) -> &'static str {
         match self {
             CompletionItemKind::SymbolKind(kind) => match kind {
                 SymbolKind::Attribute => "at",
@@ -312,6 +321,7 @@ impl CompletionItemKind {
                 SymbolKind::Struct => "st",
                 SymbolKind::ToolModule => "tm",
                 SymbolKind::Trait => "tt",
+                SymbolKind::TraitAlias => "tr",
                 SymbolKind::TypeAlias => "ta",
                 SymbolKind::TypeParam => "tp",
                 SymbolKind::Union => "un",
@@ -352,12 +362,13 @@ impl CompletionItem {
             relevance: CompletionRelevance::default(),
             ref_match: None,
             imports_to_add: Default::default(),
+            doc_aliases: vec![],
         }
     }
 
     /// What string is used for filtering.
     pub fn lookup(&self) -> &str {
-        self.lookup.as_deref().unwrap_or(&self.label)
+        self.lookup.as_str()
     }
 
     pub fn ref_match(&self) -> Option<(String, text_edit::Indel, CompletionRelevance)> {
@@ -384,6 +395,7 @@ pub(crate) struct Builder {
     source_range: TextRange,
     imports_to_add: SmallVec<[LocatedImport; 1]>,
     trait_name: Option<SmolStr>,
+    doc_aliases: Vec<SmolStr>,
     label: SmolStr,
     insert_text: Option<String>,
     is_snippet: bool,
@@ -405,24 +417,57 @@ impl Builder {
         local_name: hir::Name,
         resolution: hir::ScopeDef,
     ) -> Self {
-        render_path_resolution(RenderContext::new(ctx), path_ctx, local_name, resolution)
+        let doc_aliases = ctx.doc_aliases_in_scope(resolution);
+        render_path_resolution(
+            RenderContext::new(ctx).doc_aliases(doc_aliases),
+            path_ctx,
+            local_name,
+            resolution,
+        )
     }
 
-    pub(crate) fn build(self) -> CompletionItem {
+    pub(crate) fn build(self, db: &RootDatabase) -> CompletionItem {
         let _p = profile::span("item::Builder::build");
 
-        let mut label = self.label;
-        let mut lookup = self.lookup;
+        let label = self.label;
+        let mut label_detail = None;
+        let mut lookup = self.lookup.unwrap_or_else(|| label.clone());
         let insert_text = self.insert_text.unwrap_or_else(|| label.to_string());
 
+        if !self.doc_aliases.is_empty() {
+            let doc_aliases = self.doc_aliases.iter().join(", ");
+            label_detail.replace(SmolStr::from(format!(" (alias {doc_aliases})")));
+            let lookup_doc_aliases = self
+                .doc_aliases
+                .iter()
+                // Don't include aliases in `lookup` that aren't valid identifiers as including
+                // them results in weird completion filtering behavior e.g. `Partial>` matching
+                // `PartialOrd` because it has an alias of ">".
+                .filter(|alias| {
+                    let mut chars = alias.chars();
+                    chars.next().is_some_and(char::is_alphabetic)
+                        && chars.all(|c| c.is_alphanumeric() || c == '_')
+                })
+                // Deliberately concatenated without separators as adding separators e.g.
+                // `alias1, alias2` results in LSP clients continuing to display the completion even
+                // after typing a comma or space.
+                .join("");
+            if !lookup_doc_aliases.is_empty() {
+                lookup = SmolStr::from(format!("{lookup}{lookup_doc_aliases}"));
+            }
+        }
         if let [import_edit] = &*self.imports_to_add {
             // snippets can have multiple imports, but normal completions only have up to one
-            if let Some(original_path) = import_edit.original_path.as_ref() {
-                lookup = lookup.or_else(|| Some(label.clone()));
-                label = SmolStr::from(format!("{label} (use {original_path})"));
-            }
+            label_detail.replace(SmolStr::from(format!(
+                "{} (use {})",
+                label_detail.as_deref().unwrap_or_default(),
+                import_edit.import_path.display(db)
+            )));
         } else if let Some(trait_name) = self.trait_name {
-            label = SmolStr::from(format!("{label} (as {trait_name})"));
+            label_detail.replace(SmolStr::from(format!(
+                "{} (as {trait_name})",
+                label_detail.as_deref().unwrap_or_default(),
+            )));
         }
 
         let text_edit = match self.text_edit {
@@ -430,9 +475,21 @@ impl Builder {
             None => TextEdit::replace(self.source_range, insert_text),
         };
 
+        let import_to_add = self
+            .imports_to_add
+            .into_iter()
+            .filter_map(|import| {
+                Some((
+                    import.import_path.display(db).to_string(),
+                    import.import_path.segments().last()?.display(db).to_string(),
+                ))
+            })
+            .collect();
+
         CompletionItem {
             source_range: self.source_range,
             label,
+            label_detail,
             text_edit,
             is_snippet: self.is_snippet,
             detail: self.detail,
@@ -443,7 +500,7 @@ impl Builder {
             trigger_call_info: self.trigger_call_info,
             relevance: self.relevance,
             ref_match: self.ref_match,
-            import_to_add: self.imports_to_add,
+            import_to_add,
         }
     }
     pub(crate) fn lookup_by(&mut self, lookup: impl Into<SmolStr>) -> &mut Builder {
@@ -456,6 +513,10 @@ impl Builder {
     }
     pub(crate) fn trait_name(&mut self, trait_name: SmolStr) -> &mut Builder {
         self.trait_name = Some(trait_name);
+        self
+    }
+    pub(crate) fn doc_aliases(&mut self, doc_aliases: Vec<SmolStr>) -> &mut Builder {
+        self.doc_aliases = doc_aliases;
         self
     }
     pub(crate) fn insert_text(&mut self, insert_text: impl Into<String>) -> &mut Builder {
@@ -505,6 +566,13 @@ impl Builder {
     }
     pub(crate) fn set_relevance(&mut self, relevance: CompletionRelevance) -> &mut Builder {
         self.relevance = relevance;
+        self
+    }
+    pub(crate) fn with_relevance(
+        &mut self,
+        relevance: impl FnOnce(CompletionRelevance) -> CompletionRelevance,
+    ) -> &mut Builder {
+        self.relevance = relevance(mem::take(&mut self.relevance));
         self
     }
     pub(crate) fn trigger_call_info(&mut self) -> &mut Builder {

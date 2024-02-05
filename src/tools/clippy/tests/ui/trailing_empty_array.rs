@@ -3,33 +3,39 @@
 // Do lint:
 
 struct RarelyUseful {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     field: i32,
     last: [usize; 0],
 }
 
 struct OnlyField {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     first_and_last: [usize; 0],
 }
 
 struct GenericArrayType<T> {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     field: i32,
     last: [T; 0],
 }
 
 #[must_use]
 struct OnlyAnotherAttribute {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     field: i32,
     last: [usize; 0],
 }
 
 #[derive(Debug)]
 struct OnlyADeriveAttribute {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     field: i32,
     last: [usize; 0],
 }
 
 const ZERO: usize = 0;
 struct ZeroSizedWithConst {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     field: i32,
     last: [usize; ZERO],
 }
@@ -39,6 +45,7 @@ const fn compute_zero() -> usize {
     (4 + 6) - (2 * 5)
 }
 struct ZeroSizedWithConstFunction {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     field: i32,
     last: [usize; compute_zero()],
 }
@@ -47,15 +54,19 @@ const fn compute_zero_from_arg(x: usize) -> usize {
     x - 1
 }
 struct ZeroSizedWithConstFunction2 {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     field: i32,
     last: [usize; compute_zero_from_arg(1)],
 }
 
 struct ZeroSizedArrayWrapper([usize; 0]);
+//~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
 
 struct TupleStruct(i32, [usize; 0]);
+//~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
 
 struct LotsOfFields {
+    //~^ ERROR: trailing zero-sized array in a struct which is not marked with a `repr` attrib
     f1: u32,
     f2: u32,
     f3: u32,
@@ -144,7 +155,7 @@ struct ReprCAlign {
 
 // NOTE: because of https://doc.rust-lang.org/stable/reference/type-layout.html#primitive-representation-of-enums-with-fields and I'm not sure when in the compilation pipeline that would happen
 #[repr(C)]
-enum DontLintAnonymousStructsFromDesuraging {
+enum DontLintAnonymousStructsFromDesugaring {
     A(u32),
     B(f32, [u64; 0]),
     C { x: u32, y: [u64; 0] },
@@ -155,7 +166,6 @@ struct TupleStructReprC(i32, [usize; 0]);
 
 type NamedTuple = (i32, [usize; 0]);
 
-#[rustfmt::skip] // [rustfmt#4995](https://github.com/rust-lang/rustfmt/issues/4995)
 struct ConstParamZeroDefault<const N: usize = 0> {
     field: i32,
     last: [usize; N],
@@ -166,7 +176,6 @@ struct ConstParamNoDefault<const N: usize> {
     last: [usize; N],
 }
 
-#[rustfmt::skip] 
 struct ConstParamNonZeroDefault<const N: usize = 1> {
     field: i32,
     last: [usize; N],

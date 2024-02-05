@@ -3,16 +3,22 @@ use crate::path::Path;
 use crate::sys::cvt;
 use crate::{fmt, io, mem};
 
-pub(super) fn sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+#[repr(C)]
+pub(crate) struct sockaddr_un {
+    pub sun_family: libc::sa_family_t,
+    pub sun_path: [libc::c_char; 108],
+}
+
+pub(super) fn sockaddr_un(path: &Path) -> io::Result<(sockaddr_un, libc::socklen_t)> {
     Err(crate::io::const_io_error!(
         crate::io::ErrorKind::Unsupported,
         "unix sockets are not supported on this platform",
     ))
 }
 
-fn sun_path_offset(addr: &libc::sockaddr_un) -> usize {
+fn sun_path_offset(addr: &sockaddr_un) -> usize {
     // Work with an actual instance of the type since using a null pointer is UB
-    let base = (addr as *const libc::sockaddr_un).addr();
+    let base = (addr as *const sockaddr_un).addr();
     let path = (&addr.sun_path as *const libc::c_char).addr();
     path - base
 }
@@ -20,11 +26,23 @@ fn sun_path_offset(addr: &libc::sockaddr_un) -> usize {
 /// An address associated with a Unix socket.
 ///
 /// Not currently supported on this platform
-#[derive(Clone)]
 #[stable(feature = "unix_socket", since = "1.10.0")]
 pub struct SocketAddr {
-    pub(super) addr: libc::sockaddr_un,
+    pub(super) addr: sockaddr_un,
     pub(super) len: libc::socklen_t,
+}
+
+#[stable(feature = "unix_socket", since = "1.10.0")]
+impl core::clone::Clone for SocketAddr {
+    fn clone(&self) -> Self {
+        SocketAddr {
+            addr: sockaddr_un {
+                sun_family: self.addr.sun_family,
+                sun_path: self.addr.sun_path,
+            },
+            len: self.len,
+        }
+    }
 }
 
 impl SocketAddr {
@@ -33,15 +51,15 @@ impl SocketAddr {
         F: FnOnce(*mut libc::sockaddr, *mut libc::socklen_t) -> libc::c_int,
     {
         unsafe {
-            let mut addr: libc::sockaddr_un = mem::zeroed();
-            let mut len = mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            let mut addr: sockaddr_un = mem::zeroed();
+            let mut len = mem::size_of::<sockaddr_un>() as libc::socklen_t;
             cvt(f(&mut addr as *mut _ as *mut _, &mut len))?;
             SocketAddr::from_parts(addr, len)
         }
     }
 
     pub(super) fn from_parts(
-        addr: libc::sockaddr_un,
+        addr: sockaddr_un,
         mut len: libc::socklen_t,
     ) -> io::Result<SocketAddr> {
         if len == 0 {

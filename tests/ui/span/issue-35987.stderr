@@ -11,9 +11,9 @@ LL | impl<T: Clone, Add> Add for Foo<T> {
    |
 help: consider importing this trait instead
    |
-LL | use std::ops::Add;
+LL + use std::ops::Add;
    |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0404`.

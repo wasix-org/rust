@@ -78,11 +78,11 @@ impl<'tcx> JsonRenderer<'tcx> {
                         // HACK(hkmatsumoto): For impls of primitive types, we index them
                         // regardless of whether they're local. This is because users can
                         // document primitive items in an arbitrary crate by using
-                        // `doc(primitive)`.
+                        // `rustc_doc_primitive`.
                         let mut is_primitive_impl = false;
-                        if let clean::types::ItemKind::ImplItem(ref impl_) = *item.kind &&
-                            impl_.trait_.is_none() &&
-                            let clean::types::Type::Primitive(_) = impl_.for_
+                        if let clean::types::ItemKind::ImplItem(ref impl_) = *item.kind
+                            && impl_.trait_.is_none()
+                            && let clean::types::Type::Primitive(_) = impl_.for_
                         {
                             is_primitive_impl = true;
                         }
@@ -139,7 +139,7 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
     fn item(&mut self, item: clean::Item) -> Result<(), Error> {
         let item_type = item.type_();
         let item_name = item.name;
-        trace!("rendering {} {:?}", item_type, item_name);
+        trace!("rendering {item_type} {item_name:?}");
 
         // Flatten items that recursively store other items. We include orphaned items from
         // stripped modules and etc that are otherwise reachable.
@@ -184,7 +184,7 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
                 | types::ItemEnum::Variant(_)
                 | types::ItemEnum::TraitAlias(_)
                 | types::ItemEnum::Impl(_)
-                | types::ItemEnum::Typedef(_)
+                | types::ItemEnum::TypeAlias(_)
                 | types::ItemEnum::OpaqueTy(_)
                 | types::ItemEnum::Constant(_)
                 | types::ItemEnum::Static(_)
@@ -203,11 +203,11 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
                 if !can_be_ignored {
                     assert_eq!(old_item, new_item);
                 }
-                trace!("replaced {:?}\nwith {:?}", old_item, new_item);
+                trace!("replaced {old_item:?}\nwith {new_item:?}");
             }
         }
 
-        trace!("done rendering {} {:?}", item_type, item_name);
+        trace!("done rendering {item_type} {item_name:?}");
         Ok(())
     }
 
@@ -279,7 +279,10 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
         p.push(output.index.get(&output.root).unwrap().name.clone().unwrap());
         p.set_extension("json");
         let mut file = BufWriter::new(try_err!(File::create(&p), p));
-        serde_json::ser::to_writer(&mut file, &output).unwrap();
+        self.tcx
+            .sess
+            .time("rustdoc_json_serialization", || serde_json::ser::to_writer(&mut file, &output))
+            .unwrap();
         try_err!(file.flush(), p);
 
         Ok(())

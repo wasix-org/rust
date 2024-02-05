@@ -1,3 +1,5 @@
+// ignore-compare-mode-next-solver (hangs)
+
 #![feature(type_alias_impl_trait)]
 
 type Bar<'a, 'b> = impl PartialEq<Bar<'b, 'a>> + std::fmt::Debug;
@@ -10,7 +12,7 @@ fn bar<'a, 'b>(i: &'a i32) -> Bar<'a, 'b> {
 type Foo<'a, 'b> = (i32, impl PartialEq<Foo<'a, 'b>> + std::fmt::Debug);
 
 fn foo<'a, 'b>(i: &'a i32) -> Foo<'a, 'b> {
-    //~^ ERROR can't compare `&i32` with `(i32, &i32)`
+    //~^ ERROR can't compare `&i32` with `(i32, Foo<'a, 'b>::{opaque#0})`
     (42, i)
 }
 

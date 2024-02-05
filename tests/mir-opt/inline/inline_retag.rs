@@ -8,6 +8,17 @@ fn main() {
 
 // EMIT_MIR inline_retag.bar.Inline.after.mir
 fn bar() -> bool {
+    // CHECK-LABEL: fn bar(
+    // CHECK: (inlined foo)
+    // CHECK: debug x => [[x:_.*]];
+    // CHECK: debug y => [[y:_.*]];
+    // CHECK: bb0: {
+    // CHECK: Retag
+    // CHECK: Retag
+    // CHECK: Retag([[x]]);
+    // CHECK: Retag([[y]]);
+    // CHECK: return;
+    // CHECK-NEXT: }
     let f = foo;
     f(&1, &-1)
 }

@@ -189,7 +189,7 @@ impl Thread {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos"))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"))]
     pub fn set_name(name: &CStr) {
         unsafe {
             let name = truncate_cstr::<{ libc::MAXTHREADNAMESIZE }>(name);
@@ -202,10 +202,9 @@ impl Thread {
     #[cfg(target_os = "netbsd")]
     pub fn set_name(name: &CStr) {
         unsafe {
-            let cname = CStr::from_bytes_with_nul_unchecked(b"%s\0".as_slice());
             let res = libc::pthread_setname_np(
                 libc::pthread_self(),
-                cname.as_ptr(),
+                c"%s".as_ptr(),
                 name.as_ptr() as *mut libc::c_void,
             );
             debug_assert_eq!(res, 0);
@@ -221,6 +220,9 @@ impl Thread {
         }
 
         if let Some(f) = pthread_setname_np.get() {
+            #[cfg(target_os = "nto")]
+            let name = truncate_cstr::<{ libc::_NTO_THREAD_NAME_MAX as usize }>(name);
+
             let res = unsafe { f(libc::pthread_self(), name.as_ptr()) };
             debug_assert_eq!(res, 0);
         }
@@ -243,7 +245,9 @@ impl Thread {
     pub fn set_name(name: &CStr) {
         unsafe {
             let thread_self = libc::find_thread(ptr::null_mut());
-            libc::rename_thread(thread_self, name.as_ptr());
+            let res = libc::rename_thread(thread_self, name.as_ptr());
+            // We have no good way of propagating errors here, but in debug-builds let's check that this actually worked.
+            debug_assert_eq!(res, libc::B_OK);
         }
     }
 
@@ -253,7 +257,9 @@ impl Thread {
         target_os = "emscripten",
         target_os = "wasi",
         target_os = "redox",
-        target_os = "vxworks"
+        target_os = "vxworks",
+        target_os = "hurd",
+        target_os = "aix",
     ))]
     pub fn set_name(_name: &CStr) {
         // Newlib, Emscripten, and VxWorks have no way to set a thread name.
@@ -324,7 +330,14 @@ impl Drop for Thread {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", target_os = "watchos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "nto",
+))]
 fn truncate_cstr<const MAX_WITH_NUL: usize>(cstr: &CStr) -> [libc::c_char; MAX_WITH_NUL] {
     let mut result = [0; MAX_WITH_NUL];
     for (src, dst) in cstr.to_bytes().iter().zip(&mut result[..MAX_WITH_NUL - 1]) {
@@ -340,32 +353,97 @@ pub fn available_parallelism() -> io::Result<NonZeroUsize> {
             target_os = "emscripten",
             target_os = "wasi",
             target_os = "fuchsia",
+            target_os = "hurd",
             target_os = "ios",
+            target_os = "tvos",
             target_os = "linux",
             target_os = "macos",
             target_os = "solaris",
             target_os = "illumos",
+            target_os = "aix",
         ))] {
+            #[allow(unused_assignments)]
+            #[allow(unused_mut)]
+            let mut quota = usize::MAX;
+
             #[cfg(any(target_os = "android", target_os = "linux"))]
             {
-                let quota = cgroups::quota().max(1);
+                quota = cgroups::quota().max(1);
                 let mut set: libc::cpu_set_t = unsafe { mem::zeroed() };
                 unsafe {
                     if libc::sched_getaffinity(0, mem::size_of::<libc::cpu_set_t>(), &mut set) == 0 {
                         let count = libc::CPU_COUNT(&set) as usize;
                         let count = count.min(quota);
-                        // SAFETY: affinity mask can't be empty and the quota gets clamped to a minimum of 1
-                        return Ok(NonZeroUsize::new_unchecked(count));
+
+                        // According to sched_getaffinity's API it should always be non-zero, but
+                        // some old MIPS kernels were buggy and zero-initialized the mask if
+                        // none was explicitly set.
+                        // In that case we use the sysconf fallback.
+                        if let Some(count) = NonZeroUsize::new(count) {
+                            return Ok(count)
+                        }
                     }
                 }
             }
             match unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } {
                 -1 => Err(io::Error::last_os_error()),
                 0 => Err(io::const_io_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform")),
-                cpus => Ok(unsafe { NonZeroUsize::new_unchecked(cpus as usize) }),
+                cpus => {
+                    let count = cpus as usize;
+                    // Cover the unusual situation where we were able to get the quota but not the affinity mask
+                    let count = count.min(quota);
+                    Ok(unsafe { NonZeroUsize::new_unchecked(count) })
+                }
             }
-        } else if #[cfg(any(target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd"))] {
+        } else if #[cfg(any(
+                   target_os = "freebsd",
+                   target_os = "dragonfly",
+                   target_os = "openbsd",
+                   target_os = "netbsd",
+               ))] {
             use crate::ptr;
+
+            #[cfg(target_os = "freebsd")]
+            {
+                let mut set: libc::cpuset_t = unsafe { mem::zeroed() };
+                unsafe {
+                    if libc::cpuset_getaffinity(
+                        libc::CPU_LEVEL_WHICH,
+                        libc::CPU_WHICH_PID,
+                        -1,
+                        mem::size_of::<libc::cpuset_t>(),
+                        &mut set,
+                    ) == 0 {
+                        let count = libc::CPU_COUNT(&set) as usize;
+                        if count > 0 {
+                            return Ok(NonZeroUsize::new_unchecked(count));
+                        }
+                    }
+                }
+            }
+
+            #[cfg(target_os = "netbsd")]
+            {
+                unsafe {
+                    let set = libc::_cpuset_create();
+                    if !set.is_null() {
+                        let mut count: usize = 0;
+                        if libc::pthread_getaffinity_np(libc::pthread_self(), libc::_cpuset_size(set), set) == 0 {
+                            for i in 0..u64::MAX {
+                                match libc::_cpuset_isset(i, set) {
+                                    -1 => break,
+                                    0 => continue,
+                                    _ => count = count + 1,
+                                }
+                            }
+                        }
+                        libc::_cpuset_destroy(set);
+                        if let Some(count) = NonZeroUsize::new(count) {
+                            return Ok(count);
+                        }
+                    }
+                }
+            }
 
             let mut cpus: libc::c_uint = 0;
             let mut cpus_size = crate::mem::size_of_val(&cpus);
@@ -394,31 +472,6 @@ pub fn available_parallelism() -> io::Result<NonZeroUsize> {
                 } else if cpus == 0 {
                     return Err(io::const_io_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform"));
                 }
-            }
-            Ok(unsafe { NonZeroUsize::new_unchecked(cpus as usize) })
-        } else if #[cfg(target_os = "openbsd")] {
-            use crate::ptr;
-
-            let mut cpus: libc::c_uint = 0;
-            let mut cpus_size = crate::mem::size_of_val(&cpus);
-            let mut mib = [libc::CTL_HW, libc::HW_NCPU, 0, 0];
-
-            let res = unsafe {
-                libc::sysctl(
-                    mib.as_mut_ptr(),
-                    2,
-                    &mut cpus as *mut _ as *mut _,
-                    &mut cpus_size as *mut _ as *mut _,
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-
-            // Handle errors if any.
-            if res == -1 {
-                return Err(io::Error::last_os_error());
-            } else if cpus == 0 {
-                return Err(io::const_io_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform"));
             }
 
             Ok(unsafe { NonZeroUsize::new_unchecked(cpus as usize) })
@@ -678,6 +731,7 @@ mod cgroups {
 #[cfg(all(
     not(target_os = "linux"),
     not(target_os = "freebsd"),
+    not(target_os = "hurd"),
     not(target_os = "macos"),
     not(target_os = "netbsd"),
     not(target_os = "openbsd"),
@@ -698,6 +752,7 @@ pub mod guard {
 #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
+    target_os = "hurd",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "openbsd",
@@ -754,6 +809,7 @@ pub mod guard {
     #[cfg(any(
         target_os = "android",
         target_os = "freebsd",
+        target_os = "hurd",
         target_os = "linux",
         target_os = "netbsd",
         target_os = "l4re"
@@ -891,6 +947,7 @@ pub mod guard {
     #[cfg(any(
         target_os = "android",
         target_os = "freebsd",
+        target_os = "hurd",
         target_os = "linux",
         target_os = "netbsd",
         target_os = "l4re"
@@ -922,7 +979,7 @@ pub mod guard {
             assert_eq!(libc::pthread_attr_getstack(&attr, &mut stackptr, &mut size), 0);
 
             let stackaddr = stackptr.addr();
-            ret = if cfg!(any(target_os = "freebsd", target_os = "netbsd")) {
+            ret = if cfg!(any(target_os = "freebsd", target_os = "netbsd", target_os = "hurd")) {
                 Some(stackaddr - guardsize..stackaddr)
             } else if cfg!(all(target_os = "linux", target_env = "musl")) {
                 Some(stackaddr - guardsize..stackaddr)

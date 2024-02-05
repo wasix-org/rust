@@ -1,12 +1,10 @@
-use std::borrow::Cow;
-
 use crate::base::{DummyResult, ExtCtxt, MacResult};
 use crate::expand::{parse_ast_fragment, AstFragmentKind};
 use crate::mbe::{
     macro_parser::{MatcherLoc, NamedParseResult, ParseResult::*, TtParser},
     macro_rules::{try_match_macro, Tracker},
 };
-use rustc_ast::token::{self, Token};
+use rustc_ast::token::{self, Token, TokenKind};
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast_pretty::pprust;
 use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder, DiagnosticMessage};
@@ -14,6 +12,7 @@ use rustc_parse::parser::{Parser, Recovery};
 use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::Ident;
 use rustc_span::Span;
+use std::borrow::Cow;
 
 use super::macro_rules::{parser_from_cx, NoopTracker};
 
@@ -35,7 +34,10 @@ pub(super) fn failed_to_match_macro<'cx>(
     if try_success_result.is_ok() {
         // Nonterminal parser recovery might turn failed matches into successful ones,
         // but for that it must have emitted an error already
-        tracker.cx.sess.delay_span_bug(sp, "Macro matching returned a success on the second try");
+        tracker
+            .cx
+            .dcx()
+            .span_delayed_bug(sp, "Macro matching returned a success on the second try");
     }
 
     if let Some(result) = tracker.result {
@@ -43,13 +45,14 @@ pub(super) fn failed_to_match_macro<'cx>(
         return result;
     }
 
-    let Some(BestFailure { token, msg: label, remaining_matcher, .. }) = tracker.best_failure else {
+    let Some(BestFailure { token, msg: label, remaining_matcher, .. }) = tracker.best_failure
+    else {
         return DummyResult::any(sp);
     };
 
     let span = token.span.substitute_dummy(sp);
 
-    let mut err = cx.struct_span_err(span, &parse_failure_msg(&token));
+    let mut err = cx.dcx().struct_span_err(span, parse_failure_msg(&token));
     err.span_label(span, label);
     if !def_span.is_dummy() && !cx.source_map().is_imported(def_span) {
         err.span_label(cx.source_map().guess_head_span(def_span), "when calling this macro");
@@ -61,6 +64,24 @@ pub(super) fn failed_to_match_macro<'cx>(
         err.span_note(span, format!("while trying to match {remaining_matcher}"));
     } else {
         err.note(format!("while trying to match {remaining_matcher}"));
+    }
+
+    if let MatcherLoc::Token { token: expected_token } = &remaining_matcher
+        && (matches!(expected_token.kind, TokenKind::Interpolated(_))
+            || matches!(token.kind, TokenKind::Interpolated(_)))
+    {
+        if let TokenKind::Interpolated(node) = &expected_token.kind {
+            err.span_label(node.1, "");
+        }
+        if let TokenKind::Interpolated(node) = &token.kind {
+            err.span_label(node.1, "");
+        }
+        err.note("captured metavariables except for `:tt`, `:ident` and `:lifetime` cannot be compared to other tokens");
+        err.note("see <https://doc.rust-lang.org/nightly/reference/macros-by-example.html#forwarding-a-matched-fragment> for more information");
+
+        if !def_span.is_dummy() && !cx.source_map().is_imported(def_span) {
+            err.help("try using `:tt` instead in the macro definition");
+        }
     }
 
     // Check whether there's a missing comma in this macro call, like `println!("{}" a);`
@@ -133,7 +154,7 @@ impl<'a, 'cx, 'matcher> Tracker<'matcher> for CollectTrackerAndEmitter<'a, 'cx, 
             Success(_) => {
                 // Nonterminal parser recovery might turn failed matches into successful ones,
                 // but for that it must have emitted an error already
-                self.cx.sess.delay_span_bug(
+                self.cx.dcx().span_delayed_bug(
                     self.root_span,
                     "should not collect detailed info for successful macro match",
                 );
@@ -159,7 +180,7 @@ impl<'a, 'cx, 'matcher> Tracker<'matcher> for CollectTrackerAndEmitter<'a, 'cx, 
             }
             Error(err_sp, msg) => {
                 let span = err_sp.substitute_dummy(self.root_span);
-                self.cx.struct_span_err(span, msg).emit();
+                self.cx.dcx().struct_span_err(span, msg.clone()).emit();
                 self.result = Some(DummyResult::any(span));
             }
             ErrorReported(_) => self.result = Some(DummyResult::any(self.root_span)),
@@ -197,7 +218,7 @@ impl<'matcher> Tracker<'matcher> for FailureForwarder {
 }
 
 pub(super) fn emit_frag_parse_err(
-    mut e: DiagnosticBuilder<'_, rustc_errors::ErrorGuaranteed>,
+    mut e: DiagnosticBuilder<'_>,
     parser: &Parser<'_>,
     orig_parser: &mut Parser<'_>,
     site_span: Span,
@@ -206,12 +227,12 @@ pub(super) fn emit_frag_parse_err(
 ) {
     // FIXME(davidtwco): avoid depending on the error message text
     if parser.token == token::Eof
-        && let DiagnosticMessage::Str(message) = &e.message[0].0
+        && let DiagnosticMessage::Str(message) = &e.messages[0].0
         && message.ends_with(", found `<eof>`")
     {
-        let msg = &e.message[0];
-        e.message[0] = (
-            DiagnosticMessage::Str(format!(
+        let msg = &e.messages[0];
+        e.messages[0] = (
+            DiagnosticMessage::from(format!(
                 "macro expansion ends with an incomplete expression: {}",
                 message.replace(", found `<eof>`", ""),
             )),
@@ -239,12 +260,24 @@ pub(super) fn emit_frag_parse_err(
                 e.note(
                     "the macro call doesn't expand to an expression, but it can expand to a statement",
                 );
-                e.span_suggestion_verbose(
-                    site_span.shrink_to_hi(),
-                    "add `;` to interpret the expansion as a statement",
-                    ";",
-                    Applicability::MaybeIncorrect,
-                );
+
+                if parser.token == token::Semi {
+                    if let Ok(snippet) = parser.sess.source_map().span_to_snippet(site_span) {
+                        e.span_suggestion_verbose(
+                            site_span,
+                            "surround the macro invocation with `{}` to interpret the expansion as a statement",
+                            format!("{{ {snippet}; }}"),
+                            Applicability::MaybeIncorrect,
+                        );
+                    }
+                } else {
+                    e.span_suggestion_verbose(
+                        site_span.shrink_to_hi(),
+                        "add `;` to interpret the expansion as a statement",
+                        ";",
+                        Applicability::MaybeIncorrect,
+                    );
+                }
             }
         },
         _ => annotate_err_with_kind(&mut e, kind, site_span),
@@ -290,9 +323,9 @@ pub(super) fn annotate_doc_comment(err: &mut Diagnostic, sm: &SourceMap, span: S
 
 /// Generates an appropriate parsing failure message. For EOF, this is "unexpected end...". For
 /// other tokens, this is "unexpected token...".
-pub(super) fn parse_failure_msg(tok: &Token) -> String {
+pub(super) fn parse_failure_msg(tok: &Token) -> Cow<'static, str> {
     match tok.kind {
-        token::Eof => "unexpected end of macro invocation".to_string(),
-        _ => format!("no rules expected the token `{}`", pprust::token_to_string(tok),),
+        token::Eof => Cow::from("unexpected end of macro invocation"),
+        _ => Cow::from(format!("no rules expected the token `{}`", pprust::token_to_string(tok))),
     }
 }

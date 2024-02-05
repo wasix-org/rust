@@ -1,28 +1,24 @@
+// check-pass
+
 #![allow(non_camel_case_types)] // genus is always capitalized
 
 pub(crate) struct Snail;
-//~^ NOTE `Snail` declared as private
 
 mod sea {
     pub(super) struct Turtle;
-    //~^ NOTE `Turtle` declared as crate-private
 }
 
 struct Tortoise;
-//~^ NOTE `Tortoise` declared as private
 
 pub struct Shell<T> {
     pub(crate) creature: T,
 }
 
 pub type Helix_pomatia = Shell<Snail>;
-//~^ ERROR private type `Snail` in public interface
-//~| NOTE can't leak private type
+//~^ WARNING type `Snail` is more private than the item `Helix_pomatia`
 pub type Dermochelys_coriacea = Shell<sea::Turtle>;
-//~^ ERROR crate-private type `Turtle` in public interface
-//~| NOTE can't leak crate-private type
+//~^ WARNING type `Turtle` is more private than the item `Dermochelys_coriacea`
 pub type Testudo_graeca = Shell<Tortoise>;
-//~^ ERROR private type `Tortoise` in public interface
-//~| NOTE can't leak private type
+//~^ WARNING type `Tortoise` is more private than the item `Testudo_graeca`
 
 fn main() {}

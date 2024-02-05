@@ -5,7 +5,7 @@ use rustc_hir::{BorrowKind, Expr, ExprKind, MatchSource, Mutability};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::Span;
 
 declare_clippy_lint! {
@@ -39,7 +39,9 @@ declare_lint_pass!(DebugAssertWithMutCall => [DEBUG_ASSERT_WITH_MUT_CALL]);
 
 impl<'tcx> LateLintPass<'tcx> for DebugAssertWithMutCall {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
-        let Some(macro_call) = root_macro_call_first_node(cx, e) else { return };
+        let Some(macro_call) = root_macro_call_first_node(cx, e) else {
+            return;
+        };
         let macro_name = cx.tcx.item_name(macro_call.def_id);
         if !matches!(
             macro_name.as_str(),
@@ -47,7 +49,9 @@ impl<'tcx> LateLintPass<'tcx> for DebugAssertWithMutCall {
         ) {
             return;
         }
-        let Some((lhs, rhs, _)) = find_assert_eq_args(cx, e, macro_call.expn) else { return };
+        let Some((lhs, rhs, _)) = find_assert_eq_args(cx, e, macro_call.expn) else {
+            return;
+        };
         for arg in [lhs, rhs] {
             let mut visitor = MutArgVisitor::new(cx);
             visitor.visit_expr(arg);

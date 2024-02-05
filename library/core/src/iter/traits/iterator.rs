@@ -1,5 +1,6 @@
 use crate::array;
 use crate::cmp::{self, Ordering};
+use crate::num::NonZeroUsize;
 use crate::ops::{ChangeOutputType, ControlFlow, FromResidual, Residual, Try};
 
 use super::super::try_process;
@@ -9,7 +10,8 @@ use super::super::{ArrayChunks, Chain, Cloned, Copied, Cycle, Enumerate, Filter,
 use super::super::{FlatMap, Flatten};
 use super::super::{FromIterator, Intersperse, IntersperseWith, Product, Sum, Zip};
 use super::super::{
-    Inspect, Map, MapWhile, Peekable, Rev, Scan, Skip, SkipWhile, StepBy, Take, TakeWhile,
+    Inspect, Map, MapWhile, MapWindows, Peekable, Rev, Scan, Skip, SkipWhile, StepBy, Take,
+    TakeWhile,
 };
 
 fn _assert_is_object_safe(_: &dyn Iterator<Item = ()>) {}
@@ -25,13 +27,13 @@ fn _assert_is_object_safe(_: &dyn Iterator<Item = ()>) {}
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_on_unimplemented(
     on(
-        _Self = "std::ops::RangeTo<Idx>",
+        _Self = "core::ops::range::RangeTo<Idx>",
         label = "if you meant to iterate until a value, add a starting value",
         note = "`..end` is a `RangeTo`, which cannot be iterated on; you might have meant to have a \
               bounded `Range`: `0..end`"
     ),
     on(
-        _Self = "std::ops::RangeToInclusive<Idx>",
+        _Self = "core::ops::range::RangeToInclusive<Idx>",
         label = "if you meant to iterate until a value (including it), add a starting value",
         note = "`..=end` is a `RangeToInclusive`, which cannot be iterated on; you might have meant \
               to have a bounded `RangeInclusive`: `0..=end`"
@@ -42,7 +44,7 @@ fn _assert_is_object_safe(_: &dyn Iterator<Item = ()>) {}
     ),
     on(_Self = "&[]", label = "`{Self}` is not an iterator; try calling `.iter()`"),
     on(
-        _Self = "std::vec::Vec<T, A>",
+        _Self = "alloc::vec::Vec<T, A>",
         label = "`{Self}` is not an iterator; try calling `.into_iter()` or `.iter()`"
     ),
     on(
@@ -50,7 +52,7 @@ fn _assert_is_object_safe(_: &dyn Iterator<Item = ()>) {}
         label = "`{Self}` is not an iterator; try calling `.chars()` or `.bytes()`"
     ),
     on(
-        _Self = "std::string::String",
+        _Self = "alloc::string::String",
         label = "`{Self}` is not an iterator; try calling `.chars()` or `.bytes()`"
     ),
     on(
@@ -67,9 +69,9 @@ fn _assert_is_object_safe(_: &dyn Iterator<Item = ()>) {}
     message = "`{Self}` is not an iterator"
 )]
 #[doc(notable_trait)]
+#[lang = "iterator"]
 #[rustc_diagnostic_item = "Iterator"]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
-#[cfg_attr(not(bootstrap), const_trait)]
 pub trait Iterator {
     /// The type of the elements being iterated over.
     #[rustc_diagnostic_item = "IteratorItem"]
@@ -307,10 +309,11 @@ pub trait Iterator {
     /// This method will eagerly skip `n` elements by calling [`next`] up to `n`
     /// times until [`None`] is encountered.
     ///
-    /// `advance_by(n)` will return [`Ok(())`][Ok] if the iterator successfully advances by
-    /// `n` elements, or [`Err(k)`][Err] if [`None`] is encountered, where `k` is the number
-    /// of elements the iterator is advanced by before running out of elements (i.e. the
-    /// length of the iterator). Note that `k` is always less than `n`.
+    /// `advance_by(n)` will return `Ok(())` if the iterator successfully advances by
+    /// `n` elements, or a `Err(NonZeroUsize)` with value `k` if [`None`] is encountered,
+    /// where `k` is remaining number of steps that could not be advanced because the iterator ran out.
+    /// If `self` is empty and `n` is non-zero, then this returns `Err(n)`.
+    /// Otherwise, `k` is always less than `n`.
     ///
     /// Calling `advance_by(0)` can do meaningful work, for example [`Flatten`]
     /// can advance its outer iterator until it finds an inner iterator that is not empty, which
@@ -326,20 +329,24 @@ pub trait Iterator {
     /// ```
     /// #![feature(iter_advance_by)]
     ///
+    /// use std::num::NonZeroUsize;
     /// let a = [1, 2, 3, 4];
     /// let mut iter = a.iter();
     ///
     /// assert_eq!(iter.advance_by(2), Ok(()));
     /// assert_eq!(iter.next(), Some(&3));
     /// assert_eq!(iter.advance_by(0), Ok(()));
-    /// assert_eq!(iter.advance_by(100), Err(1)); // only `&4` was skipped
+    /// assert_eq!(iter.advance_by(100), Err(NonZeroUsize::new(99).unwrap())); // only `&4` was skipped
     /// ```
     #[inline]
     #[unstable(feature = "iter_advance_by", reason = "recently added", issue = "77404")]
     #[rustc_do_not_const_check]
-    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+    fn advance_by(&mut self, n: usize) -> Result<(), NonZeroUsize> {
         for i in 0..n {
-            self.next().ok_or(i)?;
+            if self.next().is_none() {
+                // SAFETY: `i` is always less than `n`.
+                return Err(unsafe { NonZeroUsize::new_unchecked(n - i) });
+            }
         }
         Ok(())
     }
@@ -758,7 +765,6 @@ pub trait Iterator {
     /// more idiomatic to use [`for`] than `map()`.
     ///
     /// [`for`]: ../../book/ch03-05-control-flow.html#looping-through-a-collection-with-for
-    /// [`FnMut`]: crate::ops::FnMut
     ///
     /// # Examples
     ///
@@ -1587,6 +1593,163 @@ pub trait Iterator {
         Flatten::new(self)
     }
 
+    /// Calls the given function `f` for each contiguous window of size `N` over
+    /// `self` and returns an iterator over the outputs of `f`. Like [`slice::windows()`],
+    /// the windows during mapping overlap as well.
+    ///
+    /// In the following example, the closure is called three times with the
+    /// arguments `&['a', 'b']`, `&['b', 'c']` and `&['c', 'd']` respectively.
+    ///
+    /// ```
+    /// #![feature(iter_map_windows)]
+    ///
+    /// let strings = "abcd".chars()
+    ///     .map_windows(|[x, y]| format!("{}+{}", x, y))
+    ///     .collect::<Vec<String>>();
+    ///
+    /// assert_eq!(strings, vec!["a+b", "b+c", "c+d"]);
+    /// ```
+    ///
+    /// Note that the const parameter `N` is usually inferred by the
+    /// destructured argument in the closure.
+    ///
+    /// The returned iterator yields 𝑘 − `N` + 1 items (where 𝑘 is the number of
+    /// items yielded by `self`). If 𝑘 is less than `N`, this method yields an
+    /// empty iterator.
+    ///
+    /// The returned iterator implements [`FusedIterator`], because once `self`
+    /// returns `None`, even if it returns a `Some(T)` again in the next iterations,
+    /// we cannot put it into a contigious array buffer, and thus the returned iterator
+    /// should be fused.
+    ///
+    /// [`slice::windows()`]: slice::windows
+    /// [`FusedIterator`]: crate::iter::FusedIterator
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N` is 0. This check will most probably get changed to a
+    /// compile time error before this method gets stabilized.
+    ///
+    /// ```should_panic
+    /// #![feature(iter_map_windows)]
+    ///
+    /// let iter = std::iter::repeat(0).map_windows(|&[]| ());
+    /// ```
+    ///
+    /// # Examples
+    ///
+    /// Building the sums of neighboring numbers.
+    ///
+    /// ```
+    /// #![feature(iter_map_windows)]
+    ///
+    /// let mut it = [1, 3, 8, 1].iter().map_windows(|&[a, b]| a + b);
+    /// assert_eq!(it.next(), Some(4));  // 1 + 3
+    /// assert_eq!(it.next(), Some(11)); // 3 + 8
+    /// assert_eq!(it.next(), Some(9));  // 8 + 1
+    /// assert_eq!(it.next(), None);
+    /// ```
+    ///
+    /// Since the elements in the following example implement `Copy`, we can
+    /// just copy the array and get an iterator over the windows.
+    ///
+    /// ```
+    /// #![feature(iter_map_windows)]
+    ///
+    /// let mut it = "ferris".chars().map_windows(|w: &[_; 3]| *w);
+    /// assert_eq!(it.next(), Some(['f', 'e', 'r']));
+    /// assert_eq!(it.next(), Some(['e', 'r', 'r']));
+    /// assert_eq!(it.next(), Some(['r', 'r', 'i']));
+    /// assert_eq!(it.next(), Some(['r', 'i', 's']));
+    /// assert_eq!(it.next(), None);
+    /// ```
+    ///
+    /// You can also use this function to check the sortedness of an iterator.
+    /// For the simple case, rather use [`Iterator::is_sorted`].
+    ///
+    /// ```
+    /// #![feature(iter_map_windows)]
+    ///
+    /// let mut it = [0.5, 1.0, 3.5, 3.0, 8.5, 8.5, f32::NAN].iter()
+    ///     .map_windows(|[a, b]| a <= b);
+    ///
+    /// assert_eq!(it.next(), Some(true));  // 0.5 <= 1.0
+    /// assert_eq!(it.next(), Some(true));  // 1.0 <= 3.5
+    /// assert_eq!(it.next(), Some(false)); // 3.5 <= 3.0
+    /// assert_eq!(it.next(), Some(true));  // 3.0 <= 8.5
+    /// assert_eq!(it.next(), Some(true));  // 8.5 <= 8.5
+    /// assert_eq!(it.next(), Some(false)); // 8.5 <= NAN
+    /// assert_eq!(it.next(), None);
+    /// ```
+    ///
+    /// For non-fused iterators, they are fused after `map_windows`.
+    ///
+    /// ```
+    /// #![feature(iter_map_windows)]
+    ///
+    /// #[derive(Default)]
+    /// struct NonFusedIterator {
+    ///     state: i32,
+    /// }
+    ///
+    /// impl Iterator for NonFusedIterator {
+    ///     type Item = i32;
+    ///
+    ///     fn next(&mut self) -> Option<i32> {
+    ///         let val = self.state;
+    ///         self.state = self.state + 1;
+    ///
+    ///         // yields `0..5` first, then only even numbers since `6..`.
+    ///         if val < 5 || val % 2 == 0 {
+    ///             Some(val)
+    ///         } else {
+    ///             None
+    ///         }
+    ///     }
+    /// }
+    ///
+    ///
+    /// let mut iter = NonFusedIterator::default();
+    ///
+    /// // yields 0..5 first.
+    /// assert_eq!(iter.next(), Some(0));
+    /// assert_eq!(iter.next(), Some(1));
+    /// assert_eq!(iter.next(), Some(2));
+    /// assert_eq!(iter.next(), Some(3));
+    /// assert_eq!(iter.next(), Some(4));
+    /// // then we can see our iterator going back and forth
+    /// assert_eq!(iter.next(), None);
+    /// assert_eq!(iter.next(), Some(6));
+    /// assert_eq!(iter.next(), None);
+    /// assert_eq!(iter.next(), Some(8));
+    /// assert_eq!(iter.next(), None);
+    ///
+    /// // however, with `.map_windows()`, it is fused.
+    /// let mut iter = NonFusedIterator::default()
+    ///     .map_windows(|arr: &[_; 2]| *arr);
+    ///
+    /// assert_eq!(iter.next(), Some([0, 1]));
+    /// assert_eq!(iter.next(), Some([1, 2]));
+    /// assert_eq!(iter.next(), Some([2, 3]));
+    /// assert_eq!(iter.next(), Some([3, 4]));
+    /// assert_eq!(iter.next(), None);
+    ///
+    /// // it will always return `None` after the first time.
+    /// assert_eq!(iter.next(), None);
+    /// assert_eq!(iter.next(), None);
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    #[inline]
+    #[unstable(feature = "iter_map_windows", reason = "recently added", issue = "87155")]
+    #[rustc_do_not_const_check]
+    fn map_windows<F, R, const N: usize>(self, f: F) -> MapWindows<Self, F, N>
+    where
+        Self: Sized,
+        F: FnMut(&[Self::Item; N]) -> R,
+    {
+        MapWindows::new(self, f)
+    }
+
     /// Creates an iterator which ends after the first [`None`].
     ///
     /// After an iterator returns [`None`], future calls may or may not yield
@@ -1979,7 +2142,7 @@ pub trait Iterator {
     /// passed collection. The collection is then returned, so the call chain
     /// can be continued.
     ///
-    /// This is useful when you already have a collection and wants to add
+    /// This is useful when you already have a collection and want to add
     /// the iterator items to it.
     ///
     /// This method is a convenience method to call [Extend::extend](trait.Extend.html),
@@ -1998,7 +2161,7 @@ pub trait Iterator {
     /// a.iter().map(|&x| x * 2).collect_into(&mut vec);
     /// a.iter().map(|&x| x * 10).collect_into(&mut vec);
     ///
-    /// assert_eq!(vec![0, 1, 2, 4, 6, 10, 20, 30], vec);
+    /// assert_eq!(vec, vec![0, 1, 2, 4, 6, 10, 20, 30]);
     /// ```
     ///
     /// `Vec` can have a manual set capacity to avoid reallocating it:
@@ -2013,7 +2176,7 @@ pub trait Iterator {
     /// a.iter().map(|&x| x * 10).collect_into(&mut vec);
     ///
     /// assert_eq!(6, vec.capacity());
-    /// println!("{:?}", vec);
+    /// assert_eq!(vec, vec![2, 4, 6, 10, 20, 30]);
     /// ```
     ///
     /// The returned mutable reference can be used to continue the call chain:
@@ -2027,12 +2190,12 @@ pub trait Iterator {
     /// let count = a.iter().collect_into(&mut vec).iter().count();
     ///
     /// assert_eq!(count, vec.len());
-    /// println!("Vec len is {}", count);
+    /// assert_eq!(vec, vec![1, 2, 3]);
     ///
     /// let count = a.iter().collect_into(&mut vec).iter().count();
     ///
     /// assert_eq!(count, vec.len());
-    /// println!("Vec len now is {}", count);
+    /// assert_eq!(vec, vec![1, 2, 3, 1, 2, 3]);
     /// ```
     #[inline]
     #[unstable(feature = "iter_collect_into", reason = "new API", issue = "94780")]
@@ -2109,8 +2272,8 @@ pub trait Iterator {
     ///
     /// # Current implementation
     ///
-    /// Current algorithms tries finding the first element for which the predicate evaluates
-    /// to false, and the last element for which it evaluates to true and repeatedly swaps them.
+    /// The current algorithm tries to find the first element for which the predicate evaluates
+    /// to false and the last element for which it evaluates to true, and repeatedly swaps them.
     ///
     /// Time complexity: *O*(*n*)
     ///
@@ -2931,16 +3094,23 @@ pub trait Iterator {
         P: FnMut(Self::Item) -> bool,
     {
         #[inline]
-        fn check<T>(
-            mut predicate: impl FnMut(T) -> bool,
-        ) -> impl FnMut(usize, T) -> ControlFlow<usize, usize> {
+        fn check<'a, T>(
+            mut predicate: impl FnMut(T) -> bool + 'a,
+            acc: &'a mut usize,
+        ) -> impl FnMut((), T) -> ControlFlow<usize, ()> + 'a {
             #[rustc_inherit_overflow_checks]
-            move |i, x| {
-                if predicate(x) { ControlFlow::Break(i) } else { ControlFlow::Continue(i + 1) }
+            move |_, x| {
+                if predicate(x) {
+                    ControlFlow::Break(*acc)
+                } else {
+                    *acc += 1;
+                    ControlFlow::Continue(())
+                }
             }
         }
 
-        self.try_fold(0, check(predicate)).break_value()
+        let mut acc = 0;
+        self.try_fold((), check(predicate, &mut acc)).break_value()
     }
 
     /// Searches for an element in an iterator from the right, returning its
@@ -3443,6 +3613,9 @@ pub trait Iterator {
     ///
     /// An empty iterator returns the zero value of the type.
     ///
+    /// `sum()` can be used to sum any type implementing [`Sum`][`core::iter::Sum`],
+    /// including [`Option`][`Option::sum`] and [`Result`][`Result::sum`].
+    ///
     /// # Panics
     ///
     /// When calling `sum()` and a primitive integer type is being returned, this
@@ -3472,6 +3645,9 @@ pub trait Iterator {
     /// Iterates over the entire iterator, multiplying all the elements
     ///
     /// An empty iterator returns the one value of the type.
+    ///
+    /// `product()` can be used to multiply any type implementing [`Product`][`core::iter::Product`],
+    /// including [`Option`][`Option::product`] and [`Result`][`Result::product`].
     ///
     /// # Panics
     ///
@@ -3721,7 +3897,7 @@ pub trait Iterator {
         }
     }
 
-    /// Determines if the elements of this [`Iterator`] are unequal to those of
+    /// Determines if the elements of this [`Iterator`] are not equal to those of
     /// another.
     ///
     /// # Examples
@@ -4002,10 +4178,72 @@ impl<I: Iterator + ?Sized> Iterator for &mut I {
     fn size_hint(&self) -> (usize, Option<usize>) {
         (**self).size_hint()
     }
-    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+    fn advance_by(&mut self, n: usize) -> Result<(), NonZeroUsize> {
         (**self).advance_by(n)
     }
     fn nth(&mut self, n: usize) -> Option<Self::Item> {
         (**self).nth(n)
+    }
+    fn fold<B, F>(self, init: B, f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        self.spec_fold(init, f)
+    }
+    fn try_fold<B, F, R>(&mut self, init: B, f: F) -> R
+    where
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>,
+    {
+        self.spec_try_fold(init, f)
+    }
+}
+
+/// Helper trait to specialize `fold` and `try_fold` for `&mut I where I: Sized`
+trait IteratorRefSpec: Iterator {
+    fn spec_fold<B, F>(self, init: B, f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B;
+
+    fn spec_try_fold<B, F, R>(&mut self, init: B, f: F) -> R
+    where
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>;
+}
+
+impl<I: Iterator + ?Sized> IteratorRefSpec for &mut I {
+    default fn spec_fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        let mut accum = init;
+        while let Some(x) = self.next() {
+            accum = f(accum, x);
+        }
+        accum
+    }
+
+    default fn spec_try_fold<B, F, R>(&mut self, init: B, mut f: F) -> R
+    where
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>,
+    {
+        let mut accum = init;
+        while let Some(x) = self.next() {
+            accum = f(accum, x)?;
+        }
+        try { accum }
+    }
+}
+
+impl<I: Iterator> IteratorRefSpec for &mut I {
+    impl_fold_via_try_fold! { spec_fold -> spec_try_fold }
+
+    fn spec_try_fold<B, F, R>(&mut self, init: B, f: F) -> R
+    where
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>,
+    {
+        (**self).try_fold(init, f)
     }
 }

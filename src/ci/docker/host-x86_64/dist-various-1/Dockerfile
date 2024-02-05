@@ -1,6 +1,7 @@
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
   g++ \
   automake \
   bison \
@@ -28,8 +29,6 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
   g++-arm-linux-gnueabi \
   g++-arm-linux-gnueabihf \
   g++-aarch64-linux-gnu \
-  g++-mips64-linux-gnuabi64 \
-  g++-mips64el-linux-gnuabi64 \
   gcc-arm-none-eabi \
   gcc-sparc64-linux-gnu \
   libc6-dev-sparc64-cross \
@@ -47,14 +46,14 @@ WORKDIR /build
 COPY host-x86_64/dist-various-1/install-x86_64-redox.sh /build
 RUN ./install-x86_64-redox.sh
 
-COPY host-x86_64/dist-various-1/install-mips-musl.sh /build
-RUN ./install-mips-musl.sh
-
-COPY host-x86_64/dist-various-1/install-mipsel-musl.sh /build
-RUN ./install-mipsel-musl.sh
-
 COPY host-x86_64/dist-various-1/install-aarch64-none-elf.sh /build
 RUN ./install-aarch64-none-elf.sh
+
+COPY host-x86_64/dist-various-1/install-riscv64-none-elf.sh /build
+RUN ./install-riscv64-none-elf.sh
+
+COPY host-x86_64/dist-various-1/install-riscv32-none-elf.sh /build
+RUN ./install-riscv32-none-elf.sh
 
 # Suppress some warnings in the openwrt toolchains we downloaded
 ENV STAGING_DIR=/tmp
@@ -73,46 +72,16 @@ RUN env \
     CXX=arm-linux-gnueabihf-g++ CXXFLAGS="-march=armv6 -marm -mfpu=vfp" \
     bash musl.sh armhf && \
     env \
-    CC=arm-linux-gnueabihf-gcc CFLAGS="-march=armv7-a" \
-    CXX=arm-linux-gnueabihf-g++ CXXFLAGS="-march=armv7-a" \
-    bash musl.sh armv7hf && \
-    env \
-    CC=mips-openwrt-linux-gcc \
-    CXX=mips-openwrt-linux-g++ \
-    bash musl.sh mips && \
-    env \
-    CC=mipsel-openwrt-linux-gcc \
-    CXX=mipsel-openwrt-linux-g++ \
-    bash musl.sh mipsel && \
-    env \
-    CC=mips64-linux-gnuabi64-gcc \
-    CXX=mips64-linux-gnuabi64-g++ \
-    bash musl.sh mips64 && \
-    env \
-    CC=mips64el-linux-gnuabi64-gcc \
-    CXX=mips64el-linux-gnuabi64-g++ \
-    bash musl.sh mips64el && \
-    rm -rf /build/*
-
-# FIXME(mozilla/sccache#235) this shouldn't be necessary but is currently
-# necessary to disambiguate the mips compiler with the mipsel compiler. We want
-# to give these two wrapper scripts (currently identical ones) different hashes
-# to ensure that sccache understands that they're different compilers.
-RUN \
-  echo "# a" >> /usr/local/mips-linux-musl/bin/mips-openwrt-linux-musl-wrapper.sh && \
-  echo "# b" >> /usr/local/mipsel-linux-musl/bin/mipsel-openwrt-linux-musl-wrapper.sh
+    CC=arm-linux-gnueabihf-gcc CFLAGS="-march=armv7-a+fp" \
+    CXX=arm-linux-gnueabihf-g++ CXXFLAGS="-march=armv7-a+fp" \
+    bash musl.sh armv7hf
 
 ENV RUN_MAKE_TARGETS=thumbv6m-none-eabi
 ENV RUN_MAKE_TARGETS=$RUN_MAKE_TARGETS,thumbv7m-none-eabi
 ENV RUN_MAKE_TARGETS=$RUN_MAKE_TARGETS,thumbv7em-none-eabi
 ENV RUN_MAKE_TARGETS=$RUN_MAKE_TARGETS,thumbv7em-none-eabihf
 
-ENV TARGETS=asmjs-unknown-emscripten
-ENV TARGETS=$TARGETS,wasm32-unknown-emscripten
-ENV TARGETS=$TARGETS,mips-unknown-linux-musl
-ENV TARGETS=$TARGETS,mipsel-unknown-linux-musl
-ENV TARGETS=$TARGETS,mips64-unknown-linux-muslabi64
-ENV TARGETS=$TARGETS,mips64el-unknown-linux-muslabi64
+ENV TARGETS=wasm32-unknown-emscripten
 ENV TARGETS=$TARGETS,arm-unknown-linux-musleabi
 ENV TARGETS=$TARGETS,arm-unknown-linux-musleabihf
 ENV TARGETS=$TARGETS,armv5te-unknown-linux-gnueabi
@@ -132,6 +101,7 @@ ENV TARGETS=$TARGETS,thumbv8m.main-none-eabihf
 ENV TARGETS=$TARGETS,riscv32i-unknown-none-elf
 ENV TARGETS=$TARGETS,riscv32imc-unknown-none-elf
 ENV TARGETS=$TARGETS,riscv32imac-unknown-none-elf
+ENV TARGETS=$TARGETS,riscv32imafc-unknown-none-elf
 ENV TARGETS=$TARGETS,riscv64imac-unknown-none-elf
 ENV TARGETS=$TARGETS,riscv64gc-unknown-none-elf
 ENV TARGETS=$TARGETS,armebv7r-none-eabi
@@ -141,17 +111,10 @@ ENV TARGETS=$TARGETS,armv7r-none-eabihf
 ENV TARGETS=$TARGETS,thumbv7neon-unknown-linux-gnueabihf
 ENV TARGETS=$TARGETS,armv7a-none-eabi
 
-# riscv targets currently do not need a C compiler, as compiler_builtins
-# doesn't currently have it enabled, and the riscv gcc compiler is not
-# installed.
 ENV CFLAGS_armv5te_unknown_linux_musleabi="-march=armv5te -marm -mfloat-abi=soft" \
     CFLAGS_arm_unknown_linux_musleabi="-march=armv6 -marm" \
     CFLAGS_arm_unknown_linux_musleabihf="-march=armv6 -marm -mfpu=vfp" \
-    CFLAGS_armv7_unknown_linux_musleabihf="-march=armv7-a" \
-    CC_mipsel_unknown_linux_musl=mipsel-openwrt-linux-gcc \
-    CC_mips_unknown_linux_musl=mips-openwrt-linux-gcc \
-    CC_mips64el_unknown_linux_muslabi64=mips64el-linux-gnuabi64-gcc \
-    CC_mips64_unknown_linux_muslabi64=mips64-linux-gnuabi64-gcc \
+    CFLAGS_armv7_unknown_linux_musleabihf="-march=armv7-a+fp" \
     CC_sparc64_unknown_linux_gnu=sparc64-linux-gnu-gcc \
     CC_x86_64_unknown_redox=x86_64-unknown-redox-gcc \
     CC_thumbv7neon_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
@@ -165,21 +128,22 @@ ENV CFLAGS_armv5te_unknown_linux_musleabi="-march=armv5te -marm -mfloat-abi=soft
     CFLAGS_aarch64_unknown_none_softfloat=-mstrict-align -march=armv8-a+nofp+nosimd \
     CC_aarch64_unknown_none=aarch64-none-elf-gcc \
     CFLAGS_aarch64_unknown_none=-mstrict-align -march=armv8-a+fp+simd \
-    CC_riscv32i_unknown_none_elf=false \
-    CC_riscv32imc_unknown_none_elf=false \
-    CC_riscv32imac_unknown_none_elf=false \
-    CC_riscv64imac_unknown_none_elf=false \
-    CC_riscv64gc_unknown_none_elf=false
+    CC_riscv32i_unknown_none_elf=riscv32-unknown-elf-gcc \
+    CFLAGS_riscv32i_unknown_none_elf=-march=rv32i -mabi=ilp32 \
+    CC_riscv32imc_unknown_none_elf=riscv32-unknown-elf-gcc \
+    CFLAGS_riscv32imc_unknown_none_elf=-march=rv32imc -mabi=ilp32 \
+    CC_riscv32imac_unknown_none_elf=riscv32-unknown-elf-gcc \
+    CFLAGS_riscv32imac_unknown_none_elf=-march=rv32imac -mabi=ilp32 \
+    CC_riscv64imac_unknown_none_elf=riscv64-unknown-elf-gcc \
+    CFLAGS_riscv64imac_unknown_none_elf=-march=rv64imac -mabi=lp64 \
+    CC_riscv64gc_unknown_none_elf=riscv64-unknown-elf-gcc \
+    CFLAGS_riscv64gc_unknown_none_elf=-march=rv64gc -mabi=lp64
 
 ENV RUST_CONFIGURE_ARGS \
       --musl-root-armv5te=/musl-armv5te \
       --musl-root-arm=/musl-arm \
       --musl-root-armhf=/musl-armhf \
       --musl-root-armv7hf=/musl-armv7hf \
-      --musl-root-mips=/musl-mips \
-      --musl-root-mipsel=/musl-mipsel \
-      --musl-root-mips64=/musl-mips64 \
-      --musl-root-mips64el=/musl-mips64el \
       --disable-docs
 
 ENV SCRIPT \

@@ -303,12 +303,11 @@ pub struct IntoIter<T> {
     rx: Receiver<T>,
 }
 
-/// The sending-half of Rust's asynchronous [`channel`] type. This half can only be
-/// owned by one thread, but it can be cloned to send to other threads.
+/// The sending-half of Rust's asynchronous [`channel`] type.
 ///
 /// Messages can be sent through this channel with [`send`].
 ///
-/// Note: all senders (the original and the clones) need to be dropped for the receiver
+/// Note: all senders (the original and its clones) need to be dropped for the receiver
 /// to stop blocking to receive messages with [`Receiver::recv`].
 ///
 /// [`send`]: Sender::send
@@ -347,8 +346,8 @@ pub struct Sender<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl<T: Send> Send for Sender<T> {}
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl<T> !Sync for Sender<T> {}
+#[stable(feature = "mpsc_sender_sync", since = "1.72.0")]
+unsafe impl<T: Send> Sync for Sender<T> {}
 
 /// The sending-half of Rust's synchronous [`sync_channel`] type.
 ///
@@ -627,11 +626,6 @@ impl<T> Clone for Sender<T> {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {}
-}
-
 #[stable(feature = "mpsc_debug", since = "1.8.0")]
 impl<T> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -754,11 +748,6 @@ impl<T> Clone for SyncSender<T> {
     fn clone(&self) -> SyncSender<T> {
         SyncSender { inner: self.inner.clone() }
     }
-}
-
-#[stable(feature = "rust1", since = "1.0.0")]
-impl<T> Drop for SyncSender<T> {
-    fn drop(&mut self) {}
 }
 
 #[stable(feature = "mpsc_debug", since = "1.8.0")]
@@ -1097,11 +1086,6 @@ impl<T> IntoIterator for Receiver<T> {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl<T> Drop for Receiver<T> {
-    fn drop(&mut self) {}
-}
-
 #[stable(feature = "mpsc_debug", since = "1.8.0")]
 impl<T> fmt::Debug for Receiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1124,7 +1108,7 @@ impl<T> fmt::Display for SendError<T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: Send> error::Error for SendError<T> {
+impl<T> error::Error for SendError<T> {
     #[allow(deprecated)]
     fn description(&self) -> &str {
         "sending on a closed channel"
@@ -1152,7 +1136,7 @@ impl<T> fmt::Display for TrySendError<T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: Send> error::Error for TrySendError<T> {
+impl<T> error::Error for TrySendError<T> {
     #[allow(deprecated)]
     fn description(&self) -> &str {
         match *self {

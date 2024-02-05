@@ -374,3 +374,75 @@ warning: this URL is not a hyperlink
 
 warning: 2 warnings emitted
 ```
+
+## `unescaped_backticks`
+
+This lint is **allowed by default**. It detects backticks (\`) that are not escaped.
+This usually means broken inline code. For example:
+
+```rust
+#![warn(rustdoc::unescaped_backticks)]
+
+/// `add(a, b) is the same as `add(b, a)`.
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+```
+
+Which will give:
+
+```text
+warning: unescaped backtick
+ --> src/lib.rs:3:41
+  |
+3 | /// `add(a, b) is the same as `add(b, a)`.
+  |                                         ^
+  |
+note: the lint level is defined here
+ --> src/lib.rs:1:9
+  |
+1 | #![warn(rustdoc::unescaped_backticks)]
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: a previous inline code might be longer than expected
+  |
+3 | /// `add(a, b)` is the same as `add(b, a)`.
+  |               +
+help: if you meant to use a literal backtick, escape it
+  |
+3 | /// `add(a, b) is the same as `add(b, a)\`.
+  |                                         +
+
+warning: 1 warning emitted
+```
+
+## `redundant_explicit_links`
+
+This lint is **warn-by-default**. It detects explicit links that are the same
+as computed automatic links.
+This usually means the explicit links are removeable. For example:
+
+```rust
+#![warn(rustdoc::redundant_explicit_links)] // note: unnecessary - warns by default.
+
+/// add takes 2 [`usize`](usize) and performs addition
+/// on them, then returns result.
+pub fn add(left: usize, right: usize) -> usize {
+    left + right
+}
+```
+
+Which will give:
+
+```text
+error: redundant explicit rustdoc link
+  --> src/lib.rs:3:27
+   |
+3  | /// add takes 2 [`usize`](usize) and performs addition
+   |                           ^^^^^
+   |
+   = note: Explicit link does not affect the original link
+note: the lint level is defined here
+  --> src/lib.rs:1:9
+   |
+1  | #![deny(rustdoc::redundant_explicit_links)]
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: Remove explicit link instead
+```

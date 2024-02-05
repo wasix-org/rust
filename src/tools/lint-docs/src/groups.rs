@@ -15,6 +15,7 @@ static GROUP_DESCRIPTIONS: &[(&str, &str)] = &[
     ("future-incompatible", "Lints that detect code that has future-compatibility problems"),
     ("rust-2018-compatibility", "Lints used to transition code from the 2015 edition to 2018"),
     ("rust-2021-compatibility", "Lints used to transition code from the 2018 edition to 2021"),
+    ("rust-2024-compatibility", "Lints used to transition code from the 2021 edition to 2024"),
 ];
 
 type LintGroups = BTreeMap<String, BTreeSet<String>>;
@@ -43,7 +44,7 @@ impl<'a> LintExtractor<'a> {
         let output = cmd.output().map_err(|e| format!("failed to run command {:?}\n{}", cmd, e))?;
         if !output.status.success() {
             return Err(format!(
-                "failed to collect lint info: {:?}\n--- stderr\n{}--- stdout\n{}\n",
+                "failed to collect lint info: failed to run {cmd:?}: {:?}\n--- stderr\n{}--- stdout\n{}\n",
                 output.status,
                 std::str::from_utf8(&output.stderr).unwrap(),
                 std::str::from_utf8(&output.stdout).unwrap(),

@@ -1,14 +1,13 @@
 use clippy_utils::consts::{constant_simple, Constant};
 use clippy_utils::def_path_res;
 use clippy_utils::diagnostics::span_lint;
-use if_chain::if_chain;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::Item;
-use rustc_hir_analysis::hir_ty_to_ty;
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty::{self, fast_reject::SimplifiedType, FloatTy};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_middle::ty::fast_reject::SimplifiedType;
+use rustc_middle::ty::FloatTy;
+use rustc_session::declare_lint_pass;
 use rustc_span::symbol::Symbol;
 
 declare_clippy_lint! {
@@ -31,31 +30,24 @@ impl<'tcx> LateLintPass<'tcx> for InvalidPaths {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
         let local_def_id = &cx.tcx.parent_module(item.hir_id());
         let mod_name = &cx.tcx.item_name(local_def_id.to_def_id());
-        if_chain! {
-            if mod_name.as_str() == "paths";
-            if let hir::ItemKind::Const(ty, body_id) = item.kind;
-            let ty = hir_ty_to_ty(cx.tcx, ty);
-            if let ty::Array(el_ty, _) = &ty.kind();
-            if let ty::Ref(_, el_ty, _) = &el_ty.kind();
-            if el_ty.is_str();
-            let body = cx.tcx.hir().body(body_id);
-            let typeck_results = cx.tcx.typeck_body(body_id);
-            if let Some(Constant::Vec(path)) = constant_simple(cx, typeck_results, body.value);
-            let path: Vec<&str> = path
+        if mod_name.as_str() == "paths"
+            && let hir::ItemKind::Const(.., body_id) = item.kind
+            && let body = cx.tcx.hir().body(body_id)
+            && let typeck_results = cx.tcx.typeck_body(body_id)
+            && let Some(Constant::Vec(path)) = constant_simple(cx, typeck_results, body.value)
+            && let Some(path) = path
                 .iter()
                 .map(|x| {
                     if let Constant::Str(s) = x {
-                        s.as_str()
+                        Some(s.as_str())
                     } else {
-                        // We checked the type of the constant above
-                        unreachable!()
+                        None
                     }
                 })
-                .collect();
-            if !check_path(cx, &path[..]);
-            then {
-                span_lint(cx, INVALID_PATHS, item.span, "invalid path");
-            }
+                .collect::<Option<Vec<&str>>>()
+            && !check_path(cx, &path[..])
+        {
+            span_lint(cx, INVALID_PATHS, item.span, "invalid path");
         }
     }
 }
@@ -73,10 +65,10 @@ pub fn check_path(cx: &LateContext<'_>, path: &[&str]) -> bool {
     let lang_items = cx.tcx.lang_items();
     // This list isn't complete, but good enough for our current list of paths.
     let incoherent_impls = [
-        SimplifiedType::FloatSimplifiedType(FloatTy::F32),
-        SimplifiedType::FloatSimplifiedType(FloatTy::F64),
-        SimplifiedType::SliceSimplifiedType,
-        SimplifiedType::StrSimplifiedType,
+        SimplifiedType::Float(FloatTy::F32),
+        SimplifiedType::Float(FloatTy::F64),
+        SimplifiedType::Slice,
+        SimplifiedType::Str,
     ]
     .iter()
     .flat_map(|&ty| cx.tcx.incoherent_impls(ty).iter().copied());
