@@ -15,8 +15,9 @@ use crate::sys_common::{AsInner, FromInner, IntoInner};
 
 /// A borrowed file descriptor.
 ///
-/// This has a lifetime parameter to tie it to the lifetime of something that
-/// owns the file descriptor.
+/// This has a lifetime parameter to tie it to the lifetime of something that owns the file
+/// descriptor. For the duration of that lifetime, it is guaranteed that nobody will close the file
+/// descriptor.
 ///
 /// This uses `repr(transparent)` and has the representation of a host file
 /// descriptor, so it can be used in FFI in places where a file descriptor is
@@ -42,7 +43,8 @@ pub struct BorrowedFd<'fd> {
 
 /// An owned file descriptor.
 ///
-/// This closes the file descriptor on drop.
+/// This closes the file descriptor on drop. It is guaranteed that nobody else will close the file
+/// descriptor.
 ///
 /// This uses `repr(transparent)` and has the representation of a host file
 /// descriptor, so it can be used in FFI in places where a file descriptor is
@@ -95,14 +97,14 @@ impl BorrowedFd<'_> {
         // We want to atomically duplicate this file descriptor and set the
         // CLOEXEC flag, and currently that's done via F_DUPFD_CLOEXEC. This
         // is a POSIX flag that was added to Linux in 2.6.24.
-        #[cfg(not(target_os = "espidf"))]
+        #[cfg(not(any(target_os = "espidf", target_os = "vita")))]
         let cmd = libc::F_DUPFD_CLOEXEC;
 
         // For ESP-IDF, F_DUPFD is used instead, because the CLOEXEC semantics
         // will never be supported, as this is a bare metal framework with
         // no capabilities for multi-process execution. While F_DUPFD is also
         // not supported yet, it might be (currently it returns ENOSYS).
-        #[cfg(target_os = "espidf")]
+        #[cfg(any(target_os = "espidf", target_os = "vita"))]
         let cmd = libc::F_DUPFD;
 
         // Avoid using file descriptors below 3 as they are used for stdio
@@ -117,7 +119,7 @@ impl BorrowedFd<'_> {
     pub fn try_clone_to_owned(&self) -> crate::io::Result<OwnedFd> {
         Err(crate::io::const_io_error!(
             crate::io::ErrorKind::Unsupported,
-            "operation not supported on WASI yet",
+            "operation not supported on this platform",
         ))
     }
 }
@@ -155,7 +157,9 @@ impl FromRawFd for OwnedFd {
     /// # Safety
     ///
     /// The resource pointed to by `fd` must be open and suitable for assuming
-    /// ownership. The resource must not require any cleanup other than `close`.
+    /// [ownership][io-safety]. The resource must not require any cleanup other than `close`.
+    ///
+    /// [io-safety]: io#io-safety
     #[inline]
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         assert_ne!(fd, u32::MAX as RawFd);
@@ -201,7 +205,7 @@ macro_rules! impl_is_terminal {
         #[unstable(feature = "sealed", issue = "none")]
         impl crate::sealed::Sealed for $t {}
 
-        #[unstable(feature = "is_terminal", issue = "98070")]
+        #[stable(feature = "is_terminal", since = "1.70.0")]
         impl crate::io::IsTerminal for $t {
             #[inline]
             fn is_terminal(&self) -> bool {
@@ -268,7 +272,7 @@ impl AsFd for OwnedFd {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
         // Safety: `OwnedFd` and `BorrowedFd` have the same validity
-        // invariants, and the `BorrowdFd` is bounded by the lifetime
+        // invariants, and the `BorrowedFd` is bounded by the lifetime
         // of `&self`.
         unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
     }
@@ -399,7 +403,7 @@ impl<T: AsFd> AsFd for crate::sync::Arc<T> {
     }
 }
 
-#[stable(feature = "asfd_rc", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "asfd_rc", since = "1.69.0")]
 impl<T: AsFd> AsFd for crate::rc::Rc<T> {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {

@@ -1,12 +1,18 @@
-// run-rustfix
-// aux-build: proc_macro_with_span.rs
+//@aux-build: proc_macros.rs
 #![warn(clippy::unnecessary_lazy_evaluations)]
 #![allow(clippy::redundant_closure)]
 #![allow(clippy::bind_instead_of_map)]
 #![allow(clippy::map_identity)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::unnecessary_literal_unwrap)]
+#![allow(clippy::unit_arg)]
+#![allow(arithmetic_overflow)]
+#![allow(unconditional_panic)]
 
-extern crate proc_macro_with_span;
-use proc_macro_with_span::with_span;
+use std::ops::Deref;
+
+extern crate proc_macros;
+use proc_macros::with_span;
 
 struct Deep(Option<usize>);
 
@@ -41,6 +47,15 @@ impl Drop for Issue9427FollowUp {
     }
 }
 
+struct Issue10437;
+impl Deref for Issue10437 {
+    type Target = u32;
+    fn deref(&self) -> &Self::Target {
+        println!("side effect deref");
+        &0
+    }
+}
+
 fn main() {
     let astronomers_pi = 10;
     let ext_arr: [usize; 1] = [2];
@@ -64,6 +79,17 @@ fn main() {
     let _ = opt.ok_or_else(|| 2);
     let _ = nested_tuple_opt.unwrap_or_else(|| Some((1, 2)));
     let _ = cond.then(|| astronomers_pi);
+    let _ = true.then(|| -> _ {});
+    let _ = true.then(|| {});
+
+    // Should lint - Builtin deref
+    let r = &1;
+    let _ = Some(1).unwrap_or_else(|| *r);
+    let b = Box::new(1);
+    let _ = Some(1).unwrap_or_else(|| *b);
+    // Should lint - Builtin deref through autoderef
+    let _ = Some(1).as_ref().unwrap_or_else(|| &r);
+    let _ = Some(1).as_ref().unwrap_or_else(|| &b);
 
     // Cases when unwrap is not called on a simple variable
     let _ = Some(10).unwrap_or_else(|| 2);
@@ -92,6 +118,12 @@ fn main() {
     let _ = deep.0.or_else(some_call);
     let _ = deep.0.or_else(|| some_call());
     let _ = opt.ok_or_else(|| ext_arr[0]);
+
+    let _ = Some(1).unwrap_or_else(|| *Issue10437); // Issue10437 has a deref impl
+    let _ = Some(1).unwrap_or(*Issue10437);
+
+    let _ = Some(1).as_ref().unwrap_or_else(|| &Issue10437);
+    let _ = Some(1).as_ref().unwrap_or(&Issue10437);
 
     // Should not lint - bool
     let _ = (0 == 1).then(|| Issue9427(0)); // Issue9427 has a significant drop
@@ -159,4 +191,80 @@ fn main() {
 fn issue9485() {
     // should not lint, is in proc macro
     with_span!(span Some(42).unwrap_or_else(|| 2););
+}
+
+fn issue9422(x: usize) -> Option<usize> {
+    (x >= 5).then(|| x - 5)
+    // (x >= 5).then_some(x - 5)  // clippy suggestion panics
+}
+
+fn panicky_arithmetic_ops(x: usize, y: isize) {
+    #![allow(clippy::identity_op, clippy::eq_op)]
+
+    // See comments in `eager_or_lazy.rs` for the rules that this is meant to follow
+
+    let _x = false.then(|| i32::MAX + 1);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| i32::MAX * 2);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| i32::MAX - 1);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| i32::MIN - 1);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| (1 + 2 * 3 - 2 / 3 + 9) << 2);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| 255u8 << 7);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| 255u8 << 8);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| 255u8 >> 8);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| 255u8 >> x);
+    let _x = false.then(|| i32::MAX + -1);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| -i32::MAX);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| -i32::MIN);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| -y);
+    let _x = false.then(|| 255 >> -7);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| 255 << -1);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| 1 / 0);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| x << -1);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| x << 2);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| x + x);
+    let _x = false.then(|| x * x);
+    let _x = false.then(|| x - x);
+    let _x = false.then(|| x / x);
+    let _x = false.then(|| x % x);
+    let _x = false.then(|| x + 1);
+    let _x = false.then(|| 1 + x);
+
+    let _x = false.then(|| x / 0);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| x % 0);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| y / -1);
+    let _x = false.then(|| 1 / -1);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| i32::MIN / -1);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| i32::MIN / x as i32);
+    let _x = false.then(|| i32::MIN / 0);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| 4 / 2);
+    //~^ ERROR: unnecessary closure used with `bool::then`
+    let _x = false.then(|| 1 / x);
+
+    // const eval doesn't read variables, but floating point math never panics, so we can still emit a
+    // warning
+    let f1 = 1.0;
+    let f2 = 2.0;
+    let _x = false.then(|| f1 + f2);
+    //~^ ERROR: unnecessary closure used with `bool::then`
 }

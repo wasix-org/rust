@@ -18,11 +18,20 @@ pub fn expand_deriving_eq(
     is_const: bool,
 ) {
     let span = cx.with_def_site_ctxt(span);
-    let attrs = thin_vec![
-        cx.attr_word(sym::inline, span),
-        cx.attr_nested_word(sym::doc, sym::hidden, span),
-        cx.attr_word(sym::no_coverage, span)
-    ];
+
+    let structural_trait_def = TraitDef {
+        span,
+        path: path_std!(marker::StructuralEq),
+        skip_path_as_bound: true, // crucial!
+        needs_copy_as_bound_if_packed: false,
+        additional_bounds: Vec::new(),
+        supports_unions: true,
+        methods: Vec::new(),
+        associated_types: Vec::new(),
+        is_const: false,
+    };
+    structural_trait_def.expand(cx, mitem, item, push);
+
     let trait_def = TraitDef {
         span,
         path: path_std!(cmp::Eq),
@@ -36,7 +45,11 @@ pub fn expand_deriving_eq(
             explicit_self: true,
             nonself_args: vec![],
             ret_ty: Unit,
-            attributes: attrs,
+            attributes: thin_vec![
+                cx.attr_word(sym::inline, span),
+                cx.attr_nested_word(sym::doc, sym::hidden, span),
+                cx.attr_nested_word(sym::coverage, sym::off, span)
+            ],
             fieldless_variants_strategy: FieldlessVariantsStrategy::Unify,
             combine_substructure: combine_substructure(Box::new(|a, b, c| {
                 cs_total_eq_assert(a, b, c)
@@ -45,9 +58,6 @@ pub fn expand_deriving_eq(
         associated_types: Vec::new(),
         is_const,
     };
-
-    super::inject_impl_of_structural_trait(cx, span, item, path_std!(marker::StructuralEq), push);
-
     trait_def.expand_ext(cx, mitem, item, push, true)
 }
 
@@ -63,7 +73,9 @@ fn cs_total_eq_assert(
             // This basic redundancy checking only prevents duplication of
             // assertions like `AssertParamIsEq<Foo>` where the type is a
             // simple name. That's enough to get a lot of cases, though.
-            if let Some(name) = field.ty.kind.is_simple_path() && !seen_type_names.insert(name) {
+            if let Some(name) = field.ty.kind.is_simple_path()
+                && !seen_type_names.insert(name)
+            {
                 // Already produced an assertion for this type.
             } else {
                 // let _: AssertParamIsEq<FieldTy>;

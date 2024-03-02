@@ -1,32 +1,26 @@
 //! Inlining pass for MIR functions
 use crate::deref_separator::deref_finder;
 use rustc_attr::InlineAttr;
+use rustc_const_eval::transform::validate::validate_types;
 use rustc_hir::def_id::DefId;
 use rustc_index::bit_set::BitSet;
-use rustc_index::vec::Idx;
+use rustc_index::Idx;
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
+use rustc_middle::ty::TypeVisitableExt;
 use rustc_middle::ty::{self, Instance, InstanceDef, ParamEnv, Ty, TyCtxt};
 use rustc_session::config::OptLevel;
-use rustc_span::{hygiene::ExpnKind, ExpnData, LocalExpnId, Span};
-use rustc_target::abi::VariantIdx;
+use rustc_target::abi::FieldIdx;
 use rustc_target::spec::abi::Abi;
 
+use crate::cost_checker::CostChecker;
 use crate::simplify::{remove_dead_blocks, CfgSimplifier};
 use crate::util;
-use crate::MirPass;
 use std::iter;
 use std::ops::{Range, RangeFrom};
 
 pub(crate) mod cycle;
-
-const INSTR_COST: usize = 5;
-const CALL_PENALTY: usize = 25;
-const LANDINGPAD_PENALTY: usize = 50;
-const RESUME_PENALTY: usize = 45;
-
-const UNKNOWN_SIZE_COST: usize = 10;
 
 const TOP_DOWN_DEPTH_LIMIT: usize = 5;
 
@@ -37,7 +31,6 @@ struct CallSite<'tcx> {
     callee: Instance<'tcx>,
     fn_sig: ty::PolyFnSig<'tcx>,
     block: BasicBlock,
-    target: Option<BasicBlock>,
     source_info: SourceInfo,
 }
 
@@ -64,7 +57,7 @@ impl<'tcx> MirPass<'tcx> for Inline {
         if inline(tcx, body) {
             debug!("running simplify cfg on {:?}", body.source);
             CfgSimplifier::new(body).simplify();
-            remove_dead_blocks(tcx, body);
+            remove_dead_blocks(body);
             deref_finder(tcx, body);
         }
     }
@@ -80,10 +73,10 @@ fn inline<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) -> bool {
     if body.source.promoted.is_some() {
         return false;
     }
-    // Avoid inlining into generators, since their `optimized_mir` is used for layout computation,
+    // Avoid inlining into coroutines, since their `optimized_mir` is used for layout computation,
     // which can create a cycle, even when no attempt is made to inline the function in the other
     // direction.
-    if body.generator.is_some() {
+    if body.coroutine.is_some() {
         return false;
     }
 
@@ -107,7 +100,7 @@ struct Inliner<'tcx> {
     /// Caller codegen attributes.
     codegen_fn_attrs: &'tcx CodegenFnAttrs,
     /// Stack of inlined instances.
-    /// We only check the `DefId` and not the substs because we want to
+    /// We only check the `DefId` and not the args because we want to
     /// avoid inlining cases of polymorphic recursion.
     /// The number of `DefId`s is finite, so checking history is enough
     /// to ensure that we do not loop endlessly while inlining.
@@ -147,13 +140,16 @@ impl<'tcx> Inliner<'tcx> {
                 Ok(new_blocks) => {
                     debug!("inlined {}", callsite.callee);
                     self.changed = true;
-                    inlined_count += 1;
-                    if inlined_count == inline_limit {
-                        return;
-                    }
+
                     self.history.push(callsite.callee.def_id());
                     self.process_blocks(caller_body, new_blocks);
                     self.history.pop();
+
+                    inlined_count += 1;
+                    if inlined_count == inline_limit {
+                        debug!("inline count reached");
+                        return;
+                    }
                 }
             }
         }
@@ -167,11 +163,25 @@ impl<'tcx> Inliner<'tcx> {
         caller_body: &mut Body<'tcx>,
         callsite: &CallSite<'tcx>,
     ) -> Result<std::ops::Range<BasicBlock>, &'static str> {
-        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());
-        self.check_codegen_attributes(callsite, callee_attrs)?;
         self.check_mir_is_available(caller_body, &callsite.callee)?;
-        let callee_body = self.tcx.instance_mir(callsite.callee.def);
-        self.check_mir_body(callsite, callee_body, callee_attrs)?;
+
+        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());
+        let cross_crate_inlinable = self.tcx.cross_crate_inlinable(callsite.callee.def_id());
+        self.check_codegen_attributes(callsite, callee_attrs, cross_crate_inlinable)?;
+
+        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();
+        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };
+        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;
+        for arg in args {
+            if !arg.ty(&caller_body.local_decls, self.tcx).is_sized(self.tcx, self.param_env) {
+                // We do not allow inlining functions with unsized params. Inlining these functions
+                // could create unsized locals, which are unsound and being phased out.
+                return Err("Call has unsized argument");
+            }
+        }
+
+        let callee_body = try_instance_mir(self.tcx, callsite.callee.def)?;
+        self.check_mir_body(callsite, callee_body, callee_attrs, cross_crate_inlinable)?;
 
         if !self.tcx.consider_optimizing(|| {
             format!("Inline {:?} into {:?}", callsite.callee, caller_body.source)
@@ -179,42 +189,74 @@ impl<'tcx> Inliner<'tcx> {
             return Err("optimization fuel exhausted");
         }
 
-        let Ok(callee_body) = callsite.callee.try_subst_mir_and_normalize_erasing_regions(
+        let Ok(callee_body) = callsite.callee.try_instantiate_mir_and_normalize_erasing_regions(
             self.tcx,
             self.param_env,
-            callee_body.clone(),
+            ty::EarlyBinder::bind(callee_body.clone()),
         ) else {
             return Err("failed to normalize callee body");
         };
 
+        // Normally, this shouldn't be required, but trait normalization failure can create a
+        // validation ICE.
+        if !validate_types(
+            self.tcx,
+            MirPhase::Runtime(RuntimePhase::Optimized),
+            self.param_env,
+            &callee_body,
+        )
+        .is_empty()
+        {
+            return Err("failed to validate callee body");
+        }
+
         // Check call signature compatibility.
         // Normally, this shouldn't be required, but trait normalization failure can create a
         // validation ICE.
-        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();
-        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };
-        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;
         let output_type = callee_body.return_ty();
-        if !util::is_subtype(self.tcx, self.param_env, output_type, destination_ty) {
+        if !util::relate_types(
+            self.tcx,
+            self.param_env,
+            ty::Variance::Covariant,
+            output_type,
+            destination_ty,
+        ) {
             trace!(?output_type, ?destination_ty);
             return Err("failed to normalize return type");
         }
         if callsite.fn_sig.abi() == Abi::RustCall {
-            let (arg_tuple, skipped_args) = match &args[..] {
-                [arg_tuple] => (arg_tuple, 0),
-                [_, arg_tuple] => (arg_tuple, 1),
+            // FIXME: Don't inline user-written `extern "rust-call"` functions,
+            // since this is generally perf-negative on rustc, and we hope that
+            // LLVM will inline these functions instead.
+            if callee_body.spread_arg.is_some() {
+                return Err("do not inline user-written rust-call functions");
+            }
+
+            let (self_arg, arg_tuple) = match &args[..] {
+                [arg_tuple] => (None, arg_tuple),
+                [self_arg, arg_tuple] => (Some(self_arg), arg_tuple),
                 _ => bug!("Expected `rust-call` to have 1 or 2 args"),
             };
 
+            let self_arg_ty =
+                self_arg.map(|self_arg| self_arg.ty(&caller_body.local_decls, self.tcx));
+
             let arg_tuple_ty = arg_tuple.ty(&caller_body.local_decls, self.tcx);
-            let ty::Tuple(arg_tuple_tys) = arg_tuple_ty.kind() else {
+            let ty::Tuple(arg_tuple_tys) = *arg_tuple_ty.kind() else {
                 bug!("Closure arguments are not passed as a tuple");
             };
 
             for (arg_ty, input) in
-                arg_tuple_tys.iter().zip(callee_body.args_iter().skip(skipped_args))
+                self_arg_ty.into_iter().chain(arg_tuple_tys).zip(callee_body.args_iter())
             {
                 let input_type = callee_body.local_decls[input].ty;
-                if !util::is_subtype(self.tcx, self.param_env, input_type, arg_ty) {
+                if !util::relate_types(
+                    self.tcx,
+                    self.param_env,
+                    ty::Variance::Covariant,
+                    input_type,
+                    arg_ty,
+                ) {
                     trace!(?arg_ty, ?input_type);
                     return Err("failed to normalize tuple argument type");
                 }
@@ -223,7 +265,13 @@ impl<'tcx> Inliner<'tcx> {
             for (arg, input) in args.iter().zip(callee_body.args_iter()) {
                 let input_type = callee_body.local_decls[input].ty;
                 let arg_ty = arg.ty(&caller_body.local_decls, self.tcx);
-                if !util::is_subtype(self.tcx, self.param_env, input_type, arg_ty) {
+                if !util::relate_types(
+                    self.tcx,
+                    self.param_env,
+                    ty::Variance::Covariant,
+                    input_type,
+                    arg_ty,
+                ) {
                     trace!(?arg_ty, ?input_type);
                     return Err("failed to normalize argument type");
                 }
@@ -231,7 +279,7 @@ impl<'tcx> Inliner<'tcx> {
         }
 
         let old_blocks = caller_body.basic_blocks.next_index();
-        self.inline_call(caller_body, &callsite, callee_body);
+        self.inline_call(caller_body, callsite, callee_body);
         let new_blocks = old_blocks..caller_body.basic_blocks.next_index();
 
         Ok(new_blocks)
@@ -270,7 +318,9 @@ impl<'tcx> Inliner<'tcx> {
             | InstanceDef::FnPtrShim(..)
             | InstanceDef::ClosureOnceShim { .. }
             | InstanceDef::DropGlue(..)
-            | InstanceDef::CloneShim(..) => return Ok(()),
+            | InstanceDef::CloneShim(..)
+            | InstanceDef::ThreadLocalShim(..)
+            | InstanceDef::FnPtrAddrShim(..) => return Ok(()),
         }
 
         if self.tcx.is_constructor(callee_def_id) {
@@ -315,13 +365,13 @@ impl<'tcx> Inliner<'tcx> {
     ) -> Option<CallSite<'tcx>> {
         // Only consider direct calls to functions
         let terminator = bb_data.terminator();
-        if let TerminatorKind::Call { ref func, target, fn_span, .. } = terminator.kind {
+        if let TerminatorKind::Call { ref func, fn_span, .. } = terminator.kind {
             let func_ty = func.ty(caller_body, self.tcx);
-            if let ty::FnDef(def_id, substs) = *func_ty.kind() {
-                // To resolve an instance its substs have to be fully normalized.
-                let substs = self.tcx.try_normalize_erasing_regions(self.param_env, substs).ok()?;
+            if let ty::FnDef(def_id, args) = *func_ty.kind() {
+                // To resolve an instance its args have to be fully normalized.
+                let args = self.tcx.try_normalize_erasing_regions(self.param_env, args).ok()?;
                 let callee =
-                    Instance::resolve(self.tcx, self.param_env, def_id, substs).ok().flatten()?;
+                    Instance::resolve(self.tcx, self.param_env, def_id, args).ok().flatten()?;
 
                 if let InstanceDef::Virtual(..) | InstanceDef::Intrinsic(_) = callee.def {
                     return None;
@@ -331,10 +381,10 @@ impl<'tcx> Inliner<'tcx> {
                     return None;
                 }
 
-                let fn_sig = self.tcx.fn_sig(def_id).subst(self.tcx, substs);
+                let fn_sig = self.tcx.fn_sig(def_id).instantiate(self.tcx, args);
                 let source_info = SourceInfo { span: fn_span, ..terminator.source_info };
 
-                return Some(CallSite { callee, fn_sig, block: bb, target, source_info });
+                return Some(CallSite { callee, fn_sig, block: bb, source_info });
             }
         }
 
@@ -347,25 +397,22 @@ impl<'tcx> Inliner<'tcx> {
         &self,
         callsite: &CallSite<'tcx>,
         callee_attrs: &CodegenFnAttrs,
+        cross_crate_inlinable: bool,
     ) -> Result<(), &'static str> {
-        match callee_attrs.inline {
-            InlineAttr::Never => return Err("never inline hint"),
-            InlineAttr::Always | InlineAttr::Hint => {}
-            InlineAttr::None => {
-                if self.tcx.sess.mir_opt_level() <= 2 {
-                    return Err("at mir-opt-level=2, only #[inline] is inlined");
-                }
-            }
+        if let InlineAttr::Never = callee_attrs.inline {
+            return Err("never inline hint");
         }
 
-        // Only inline local functions if they would be eligible for cross-crate
-        // inlining. This is to ensure that the final crate doesn't have MIR that
-        // reference unexported symbols
-        if callsite.callee.def_id().is_local() {
-            let is_generic = callsite.callee.substs.non_erasable_generics().next().is_some();
-            if !is_generic && !callee_attrs.requests_inline() {
-                return Err("not exported");
-            }
+        // Reachability pass defines which functions are eligible for inlining. Generally inlining
+        // other functions is incorrect because they could reference symbols that aren't exported.
+        let is_generic = callsite
+            .callee
+            .args
+            .non_erasable_generics(self.tcx, callsite.callee.def_id())
+            .next()
+            .is_some();
+        if !is_generic && !cross_crate_inlinable {
+            return Err("not exported");
         }
 
         if callsite.fn_sig.c_variadic() {
@@ -389,10 +436,13 @@ impl<'tcx> Inliner<'tcx> {
             return Err("incompatible instruction set");
         }
 
-        for feature in &callee_attrs.target_features {
-            if !self.codegen_fn_attrs.target_features.contains(feature) {
-                return Err("incompatible target feature");
-            }
+        if callee_attrs.target_features != self.codegen_fn_attrs.target_features {
+            // In general it is not correct to inline a callee with target features that are a
+            // subset of the caller. This is because the callee might contain calls, and the ABI of
+            // those calls depends on the target features of the surrounding function. By moving a
+            // `Call` terminator from one MIR body to another with more target features, we might
+            // change the ABI of that call!
+            return Err("incompatible target features");
         }
 
         Ok(())
@@ -406,10 +456,11 @@ impl<'tcx> Inliner<'tcx> {
         callsite: &CallSite<'tcx>,
         callee_body: &Body<'tcx>,
         callee_attrs: &CodegenFnAttrs,
+        cross_crate_inlinable: bool,
     ) -> Result<(), &'static str> {
         let tcx = self.tcx;
 
-        let mut threshold = if callee_attrs.requests_inline() {
+        let mut threshold = if cross_crate_inlinable {
             self.tcx.sess.opts.unstable_opts.inline_mir_hint_threshold.unwrap_or(100)
         } else {
             self.tcx.sess.opts.unstable_opts.inline_mir_threshold.unwrap_or(50)
@@ -424,22 +475,9 @@ impl<'tcx> Inliner<'tcx> {
         debug!("    final inline threshold = {}", threshold);
 
         // FIXME: Give a bonus to functions with only a single caller
-        let diverges = matches!(
-            callee_body.basic_blocks[START_BLOCK].terminator().kind,
-            TerminatorKind::Unreachable | TerminatorKind::Call { target: None, .. }
-        );
-        if diverges && !matches!(callee_attrs.inline, InlineAttr::Always) {
-            return Err("callee diverges unconditionally");
-        }
 
-        let mut checker = CostChecker {
-            tcx: self.tcx,
-            param_env: self.param_env,
-            instance: callsite.callee,
-            callee_body,
-            cost: 0,
-            validation: Ok(()),
-        };
+        let mut checker =
+            CostChecker::new(self.tcx, self.param_env, Some(callsite.callee), callee_body);
 
         // Traverse the MIR manually so we can account for the effects of inlining on the CFG.
         let mut work_list = vec![START_BLOCK];
@@ -453,16 +491,19 @@ impl<'tcx> Inliner<'tcx> {
             checker.visit_basic_block_data(bb, blk);
 
             let term = blk.terminator();
-            if let TerminatorKind::Drop { ref place, target, unwind }
-            | TerminatorKind::DropAndReplace { ref place, target, unwind, .. } = term.kind
-            {
+            if let TerminatorKind::Drop { ref place, target, unwind, replace: _ } = term.kind {
                 work_list.push(target);
 
                 // If the place doesn't actually need dropping, treat it like a regular goto.
-                let ty = callsite.callee.subst_mir(self.tcx, &place.ty(callee_body, tcx).ty);
-                if ty.needs_drop(tcx, self.param_env) && let Some(unwind) = unwind {
-                        work_list.push(unwind);
-                    }
+                let ty = callsite.callee.instantiate_mir(
+                    self.tcx,
+                    ty::EarlyBinder::bind(&place.ty(callee_body, tcx).ty),
+                );
+                if ty.needs_drop(tcx, self.param_env)
+                    && let UnwindAction::Cleanup(unwind) = unwind
+                {
+                    work_list.push(unwind);
+                }
             } else if callee_attrs.instruction_set != self.codegen_fn_attrs.instruction_set
                 && matches!(term.kind, TerminatorKind::InlineAsm { .. })
             {
@@ -477,20 +518,12 @@ impl<'tcx> Inliner<'tcx> {
             }
         }
 
-        // Count up the cost of local variables and temps, if we know the size
-        // use that, otherwise we use a moderately-large dummy cost.
-        for v in callee_body.vars_and_temps_iter() {
-            checker.visit_local_decl(v, &callee_body.local_decls[v]);
-        }
-
-        // Abort if type validation found anything fishy.
-        checker.validation?;
-
-        let cost = checker.cost;
-        if let InlineAttr::Always = callee_attrs.inline {
-            debug!("INLINING {:?} because inline(always) [cost={}]", callsite, cost);
-            Ok(())
-        } else if cost <= threshold {
+        // N.B. We still apply our cost threshold to #[inline(always)] functions.
+        // That attribute is often applied to very large functions that exceed LLVM's (very
+        // generous) inlining threshold. Such functions are very poor MIR inlining candidates.
+        // Always inlining #[inline(always)] functions in MIR, on net, slows down the compiler.
+        let cost = checker.cost();
+        if cost <= threshold {
             debug!("INLINING {:?} [cost={} <= threshold={}]", callsite, cost, threshold);
             Ok(())
         } else {
@@ -506,157 +539,158 @@ impl<'tcx> Inliner<'tcx> {
         mut callee_body: Body<'tcx>,
     ) {
         let terminator = caller_body[callsite.block].terminator.take().unwrap();
-        match terminator.kind {
-            TerminatorKind::Call { args, destination, cleanup, .. } => {
-                // If the call is something like `a[*i] = f(i)`, where
-                // `i : &mut usize`, then just duplicating the `a[*i]`
-                // Place could result in two different locations if `f`
-                // writes to `i`. To prevent this we need to create a temporary
-                // borrow of the place and pass the destination as `*temp` instead.
-                fn dest_needs_borrow(place: Place<'_>) -> bool {
-                    for elem in place.projection.iter() {
-                        match elem {
-                            ProjectionElem::Deref | ProjectionElem::Index(_) => return true,
-                            _ => {}
-                        }
-                    }
+        let TerminatorKind::Call { args, destination, unwind, target, .. } = terminator.kind else {
+            bug!("unexpected terminator kind {:?}", terminator.kind);
+        };
 
-                    false
+        let return_block = if let Some(block) = target {
+            // Prepare a new block for code that should execute when call returns. We don't use
+            // target block directly since it might have other predecessors.
+            let mut data = BasicBlockData::new(Some(Terminator {
+                source_info: terminator.source_info,
+                kind: TerminatorKind::Goto { target: block },
+            }));
+            data.is_cleanup = caller_body[block].is_cleanup;
+            Some(caller_body.basic_blocks_mut().push(data))
+        } else {
+            None
+        };
+
+        // If the call is something like `a[*i] = f(i)`, where
+        // `i : &mut usize`, then just duplicating the `a[*i]`
+        // Place could result in two different locations if `f`
+        // writes to `i`. To prevent this we need to create a temporary
+        // borrow of the place and pass the destination as `*temp` instead.
+        fn dest_needs_borrow(place: Place<'_>) -> bool {
+            for elem in place.projection.iter() {
+                match elem {
+                    ProjectionElem::Deref | ProjectionElem::Index(_) => return true,
+                    _ => {}
                 }
-
-                let dest = if dest_needs_borrow(destination) {
-                    trace!("creating temp for return destination");
-                    let dest = Rvalue::Ref(
-                        self.tcx.lifetimes.re_erased,
-                        BorrowKind::Mut { allow_two_phase_borrow: false },
-                        destination,
-                    );
-                    let dest_ty = dest.ty(caller_body, self.tcx);
-                    let temp = Place::from(self.new_call_temp(caller_body, &callsite, dest_ty));
-                    caller_body[callsite.block].statements.push(Statement {
-                        source_info: callsite.source_info,
-                        kind: StatementKind::Assign(Box::new((temp, dest))),
-                    });
-                    self.tcx.mk_place_deref(temp)
-                } else {
-                    destination
-                };
-
-                // Always create a local to hold the destination, as `RETURN_PLACE` may appear
-                // where a full `Place` is not allowed.
-                let (remap_destination, destination_local) = if let Some(d) = dest.as_local() {
-                    (false, d)
-                } else {
-                    (
-                        true,
-                        self.new_call_temp(
-                            caller_body,
-                            &callsite,
-                            destination.ty(caller_body, self.tcx).ty,
-                        ),
-                    )
-                };
-
-                // Copy the arguments if needed.
-                let args: Vec<_> = self.make_call_args(args, &callsite, caller_body, &callee_body);
-
-                let mut expn_data = ExpnData::default(
-                    ExpnKind::Inlined,
-                    callsite.source_info.span,
-                    self.tcx.sess.edition(),
-                    None,
-                    None,
-                );
-                expn_data.def_site = callee_body.span;
-                let expn_data =
-                    self.tcx.with_stable_hashing_context(|hcx| LocalExpnId::fresh(expn_data, hcx));
-                let mut integrator = Integrator {
-                    args: &args,
-                    new_locals: Local::new(caller_body.local_decls.len())..,
-                    new_scopes: SourceScope::new(caller_body.source_scopes.len())..,
-                    new_blocks: BasicBlock::new(caller_body.basic_blocks.len())..,
-                    destination: destination_local,
-                    callsite_scope: caller_body.source_scopes[callsite.source_info.scope].clone(),
-                    callsite,
-                    cleanup_block: cleanup,
-                    in_cleanup_block: false,
-                    tcx: self.tcx,
-                    expn_data,
-                    always_live_locals: BitSet::new_filled(callee_body.local_decls.len()),
-                };
-
-                // Map all `Local`s, `SourceScope`s and `BasicBlock`s to new ones
-                // (or existing ones, in a few special cases) in the caller.
-                integrator.visit_body(&mut callee_body);
-
-                // If there are any locals without storage markers, give them storage only for the
-                // duration of the call.
-                for local in callee_body.vars_and_temps_iter() {
-                    if !callee_body.local_decls[local].internal
-                        && integrator.always_live_locals.contains(local)
-                    {
-                        let new_local = integrator.map_local(local);
-                        caller_body[callsite.block].statements.push(Statement {
-                            source_info: callsite.source_info,
-                            kind: StatementKind::StorageLive(new_local),
-                        });
-                    }
-                }
-                if let Some(block) = callsite.target {
-                    // To avoid repeated O(n) insert, push any new statements to the end and rotate
-                    // the slice once.
-                    let mut n = 0;
-                    if remap_destination {
-                        caller_body[block].statements.push(Statement {
-                            source_info: callsite.source_info,
-                            kind: StatementKind::Assign(Box::new((
-                                dest,
-                                Rvalue::Use(Operand::Move(destination_local.into())),
-                            ))),
-                        });
-                        n += 1;
-                    }
-                    for local in callee_body.vars_and_temps_iter().rev() {
-                        if !callee_body.local_decls[local].internal
-                            && integrator.always_live_locals.contains(local)
-                        {
-                            let new_local = integrator.map_local(local);
-                            caller_body[block].statements.push(Statement {
-                                source_info: callsite.source_info,
-                                kind: StatementKind::StorageDead(new_local),
-                            });
-                            n += 1;
-                        }
-                    }
-                    caller_body[block].statements.rotate_right(n);
-                }
-
-                // Insert all of the (mapped) parts of the callee body into the caller.
-                caller_body.local_decls.extend(callee_body.drain_vars_and_temps());
-                caller_body.source_scopes.extend(&mut callee_body.source_scopes.drain(..));
-                caller_body.var_debug_info.append(&mut callee_body.var_debug_info);
-                caller_body.basic_blocks_mut().extend(callee_body.basic_blocks_mut().drain(..));
-
-                caller_body[callsite.block].terminator = Some(Terminator {
-                    source_info: callsite.source_info,
-                    kind: TerminatorKind::Goto { target: integrator.map_block(START_BLOCK) },
-                });
-
-                // Copy only unevaluated constants from the callee_body into the caller_body.
-                // Although we are only pushing `ConstKind::Unevaluated` consts to
-                // `required_consts`, here we may not only have `ConstKind::Unevaluated`
-                // because we are calling `subst_and_normalize_erasing_regions`.
-                caller_body.required_consts.extend(
-                    callee_body.required_consts.iter().copied().filter(|&ct| match ct.literal {
-                        ConstantKind::Ty(_) => {
-                            bug!("should never encounter ty::UnevaluatedConst in `required_consts`")
-                        }
-                        ConstantKind::Val(..) | ConstantKind::Unevaluated(..) => true,
-                    }),
-                );
             }
-            kind => bug!("unexpected terminator kind {:?}", kind),
+
+            false
         }
+
+        let dest = if dest_needs_borrow(destination) {
+            trace!("creating temp for return destination");
+            let dest = Rvalue::Ref(
+                self.tcx.lifetimes.re_erased,
+                BorrowKind::Mut { kind: MutBorrowKind::Default },
+                destination,
+            );
+            let dest_ty = dest.ty(caller_body, self.tcx);
+            let temp =
+                Place::from(self.new_call_temp(caller_body, &callsite, dest_ty, return_block));
+            caller_body[callsite.block].statements.push(Statement {
+                source_info: callsite.source_info,
+                kind: StatementKind::Assign(Box::new((temp, dest))),
+            });
+            self.tcx.mk_place_deref(temp)
+        } else {
+            destination
+        };
+
+        // Always create a local to hold the destination, as `RETURN_PLACE` may appear
+        // where a full `Place` is not allowed.
+        let (remap_destination, destination_local) = if let Some(d) = dest.as_local() {
+            (false, d)
+        } else {
+            (
+                true,
+                self.new_call_temp(
+                    caller_body,
+                    &callsite,
+                    destination.ty(caller_body, self.tcx).ty,
+                    return_block,
+                ),
+            )
+        };
+
+        // Copy the arguments if needed.
+        let args: Vec<_> =
+            self.make_call_args(args, &callsite, caller_body, &callee_body, return_block);
+
+        let mut integrator = Integrator {
+            args: &args,
+            new_locals: Local::new(caller_body.local_decls.len())..,
+            new_scopes: SourceScope::new(caller_body.source_scopes.len())..,
+            new_blocks: BasicBlock::new(caller_body.basic_blocks.len())..,
+            destination: destination_local,
+            callsite_scope: caller_body.source_scopes[callsite.source_info.scope].clone(),
+            callsite,
+            cleanup_block: unwind,
+            in_cleanup_block: false,
+            return_block,
+            tcx: self.tcx,
+            always_live_locals: BitSet::new_filled(callee_body.local_decls.len()),
+        };
+
+        // Map all `Local`s, `SourceScope`s and `BasicBlock`s to new ones
+        // (or existing ones, in a few special cases) in the caller.
+        integrator.visit_body(&mut callee_body);
+
+        // If there are any locals without storage markers, give them storage only for the
+        // duration of the call.
+        for local in callee_body.vars_and_temps_iter() {
+            if integrator.always_live_locals.contains(local) {
+                let new_local = integrator.map_local(local);
+                caller_body[callsite.block].statements.push(Statement {
+                    source_info: callsite.source_info,
+                    kind: StatementKind::StorageLive(new_local),
+                });
+            }
+        }
+        if let Some(block) = return_block {
+            // To avoid repeated O(n) insert, push any new statements to the end and rotate
+            // the slice once.
+            let mut n = 0;
+            if remap_destination {
+                caller_body[block].statements.push(Statement {
+                    source_info: callsite.source_info,
+                    kind: StatementKind::Assign(Box::new((
+                        dest,
+                        Rvalue::Use(Operand::Move(destination_local.into())),
+                    ))),
+                });
+                n += 1;
+            }
+            for local in callee_body.vars_and_temps_iter().rev() {
+                if integrator.always_live_locals.contains(local) {
+                    let new_local = integrator.map_local(local);
+                    caller_body[block].statements.push(Statement {
+                        source_info: callsite.source_info,
+                        kind: StatementKind::StorageDead(new_local),
+                    });
+                    n += 1;
+                }
+            }
+            caller_body[block].statements.rotate_right(n);
+        }
+
+        // Insert all of the (mapped) parts of the callee body into the caller.
+        caller_body.local_decls.extend(callee_body.drain_vars_and_temps());
+        caller_body.source_scopes.extend(&mut callee_body.source_scopes.drain(..));
+        caller_body.var_debug_info.append(&mut callee_body.var_debug_info);
+        caller_body.basic_blocks_mut().extend(callee_body.basic_blocks_mut().drain(..));
+
+        caller_body[callsite.block].terminator = Some(Terminator {
+            source_info: callsite.source_info,
+            kind: TerminatorKind::Goto { target: integrator.map_block(START_BLOCK) },
+        });
+
+        // Copy only unevaluated constants from the callee_body into the caller_body.
+        // Although we are only pushing `ConstKind::Unevaluated` consts to
+        // `required_consts`, here we may not only have `ConstKind::Unevaluated`
+        // because we are calling `instantiate_and_normalize_erasing_regions`.
+        caller_body.required_consts.extend(callee_body.required_consts.iter().copied().filter(
+            |&ct| match ct.const_ {
+                Const::Ty(_) => {
+                    bug!("should never encounter ty::UnevaluatedConst in `required_consts`")
+                }
+                Const::Val(..) | Const::Unevaluated(..) => true,
+            },
+        ));
     }
 
     fn make_call_args(
@@ -665,6 +699,7 @@ impl<'tcx> Inliner<'tcx> {
         callsite: &CallSite<'tcx>,
         caller_body: &mut Body<'tcx>,
         callee_body: &Body<'tcx>,
+        return_block: Option<BasicBlock>,
     ) -> Vec<Local> {
         let tcx = self.tcx;
 
@@ -693,8 +728,18 @@ impl<'tcx> Inliner<'tcx> {
         // and the vector is `[closure_ref, tmp0, tmp1, tmp2]`.
         if callsite.fn_sig.abi() == Abi::RustCall && callee_body.spread_arg.is_none() {
             let mut args = args.into_iter();
-            let self_ = self.create_temp_if_necessary(args.next().unwrap(), callsite, caller_body);
-            let tuple = self.create_temp_if_necessary(args.next().unwrap(), callsite, caller_body);
+            let self_ = self.create_temp_if_necessary(
+                args.next().unwrap(),
+                callsite,
+                caller_body,
+                return_block,
+            );
+            let tuple = self.create_temp_if_necessary(
+                args.next().unwrap(),
+                callsite,
+                caller_body,
+                return_block,
+            );
             assert!(args.next().is_none());
 
             let tuple = Place::from(tuple);
@@ -708,16 +753,16 @@ impl<'tcx> Inliner<'tcx> {
             // The `tmp0`, `tmp1`, and `tmp2` in our example above.
             let tuple_tmp_args = tuple_tys.iter().enumerate().map(|(i, ty)| {
                 // This is e.g., `tuple_tmp.0` in our example above.
-                let tuple_field = Operand::Move(tcx.mk_place_field(tuple, Field::new(i), ty));
+                let tuple_field = Operand::Move(tcx.mk_place_field(tuple, FieldIdx::new(i), ty));
 
                 // Spill to a local to make e.g., `tmp0`.
-                self.create_temp_if_necessary(tuple_field, callsite, caller_body)
+                self.create_temp_if_necessary(tuple_field, callsite, caller_body, return_block)
             });
 
             closure_ref_arg.chain(tuple_tmp_args).collect()
         } else {
             args.into_iter()
-                .map(|a| self.create_temp_if_necessary(a, callsite, caller_body))
+                .map(|a| self.create_temp_if_necessary(a, callsite, caller_body, return_block))
                 .collect()
         }
     }
@@ -729,6 +774,7 @@ impl<'tcx> Inliner<'tcx> {
         arg: Operand<'tcx>,
         callsite: &CallSite<'tcx>,
         caller_body: &mut Body<'tcx>,
+        return_block: Option<BasicBlock>,
     ) -> Local {
         // Reuse the operand if it is a moved temporary.
         if let Operand::Move(place) = &arg
@@ -741,7 +787,7 @@ impl<'tcx> Inliner<'tcx> {
         // Otherwise, create a temporary for the argument.
         trace!("creating temp for argument {:?}", arg);
         let arg_ty = arg.ty(caller_body, self.tcx);
-        let local = self.new_call_temp(caller_body, callsite, arg_ty);
+        let local = self.new_call_temp(caller_body, callsite, arg_ty, return_block);
         caller_body[callsite.block].statements.push(Statement {
             source_info: callsite.source_info,
             kind: StatementKind::Assign(Box::new((Place::from(local), Rvalue::Use(arg)))),
@@ -755,6 +801,7 @@ impl<'tcx> Inliner<'tcx> {
         caller_body: &mut Body<'tcx>,
         callsite: &CallSite<'tcx>,
         ty: Ty<'tcx>,
+        return_block: Option<BasicBlock>,
     ) -> Local {
         let local = caller_body.local_decls.push(LocalDecl::new(ty, callsite.source_info.span));
 
@@ -763,7 +810,7 @@ impl<'tcx> Inliner<'tcx> {
             kind: StatementKind::StorageLive(local),
         });
 
-        if let Some(block) = callsite.target {
+        if let Some(block) = return_block {
             caller_body[block].statements.insert(
                 0,
                 Statement {
@@ -774,201 +821,6 @@ impl<'tcx> Inliner<'tcx> {
         }
 
         local
-    }
-}
-
-fn type_size_of<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    ty: Ty<'tcx>,
-) -> Option<u64> {
-    tcx.layout_of(param_env.and(ty)).ok().map(|layout| layout.size.bytes())
-}
-
-/// Verify that the callee body is compatible with the caller.
-///
-/// This visitor mostly computes the inlining cost,
-/// but also needs to verify that types match because of normalization failure.
-struct CostChecker<'b, 'tcx> {
-    tcx: TyCtxt<'tcx>,
-    param_env: ParamEnv<'tcx>,
-    cost: usize,
-    callee_body: &'b Body<'tcx>,
-    instance: ty::Instance<'tcx>,
-    validation: Result<(), &'static str>,
-}
-
-impl<'tcx> Visitor<'tcx> for CostChecker<'_, 'tcx> {
-    fn visit_statement(&mut self, statement: &Statement<'tcx>, location: Location) {
-        // Don't count StorageLive/StorageDead in the inlining cost.
-        match statement.kind {
-            StatementKind::StorageLive(_)
-            | StatementKind::StorageDead(_)
-            | StatementKind::Deinit(_)
-            | StatementKind::Nop => {}
-            _ => self.cost += INSTR_COST,
-        }
-
-        self.super_statement(statement, location);
-    }
-
-    fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
-        let tcx = self.tcx;
-        match terminator.kind {
-            TerminatorKind::Drop { ref place, unwind, .. }
-            | TerminatorKind::DropAndReplace { ref place, unwind, .. } => {
-                // If the place doesn't actually need dropping, treat it like a regular goto.
-                let ty = self.instance.subst_mir(tcx, &place.ty(self.callee_body, tcx).ty);
-                if ty.needs_drop(tcx, self.param_env) {
-                    self.cost += CALL_PENALTY;
-                    if unwind.is_some() {
-                        self.cost += LANDINGPAD_PENALTY;
-                    }
-                } else {
-                    self.cost += INSTR_COST;
-                }
-            }
-            TerminatorKind::Call { func: Operand::Constant(ref f), cleanup, .. } => {
-                let fn_ty = self.instance.subst_mir(tcx, &f.literal.ty());
-                self.cost += if let ty::FnDef(def_id, _) = *fn_ty.kind() && tcx.is_intrinsic(def_id) {
-                    // Don't give intrinsics the extra penalty for calls
-                    INSTR_COST
-                } else {
-                    CALL_PENALTY
-                };
-                if cleanup.is_some() {
-                    self.cost += LANDINGPAD_PENALTY;
-                }
-            }
-            TerminatorKind::Assert { cleanup, .. } => {
-                self.cost += CALL_PENALTY;
-                if cleanup.is_some() {
-                    self.cost += LANDINGPAD_PENALTY;
-                }
-            }
-            TerminatorKind::Resume => self.cost += RESUME_PENALTY,
-            TerminatorKind::InlineAsm { cleanup, .. } => {
-                self.cost += INSTR_COST;
-                if cleanup.is_some() {
-                    self.cost += LANDINGPAD_PENALTY;
-                }
-            }
-            _ => self.cost += INSTR_COST,
-        }
-
-        self.super_terminator(terminator, location);
-    }
-
-    /// Count up the cost of local variables and temps, if we know the size
-    /// use that, otherwise we use a moderately-large dummy cost.
-    fn visit_local_decl(&mut self, local: Local, local_decl: &LocalDecl<'tcx>) {
-        let tcx = self.tcx;
-        let ptr_size = tcx.data_layout.pointer_size.bytes();
-
-        let ty = self.instance.subst_mir(tcx, &local_decl.ty);
-        // Cost of the var is the size in machine-words, if we know
-        // it.
-        if let Some(size) = type_size_of(tcx, self.param_env, ty) {
-            self.cost += ((size + ptr_size - 1) / ptr_size) as usize;
-        } else {
-            self.cost += UNKNOWN_SIZE_COST;
-        }
-
-        self.super_local_decl(local, local_decl)
-    }
-
-    /// This method duplicates code from MIR validation in an attempt to detect type mismatches due
-    /// to normalization failure.
-    fn visit_projection_elem(
-        &mut self,
-        local: Local,
-        proj_base: &[PlaceElem<'tcx>],
-        elem: PlaceElem<'tcx>,
-        context: PlaceContext,
-        location: Location,
-    ) {
-        if let ProjectionElem::Field(f, ty) = elem {
-            let parent = Place { local, projection: self.tcx.mk_place_elems(proj_base) };
-            let parent_ty = parent.ty(&self.callee_body.local_decls, self.tcx);
-            let check_equal = |this: &mut Self, f_ty| {
-                if !util::is_equal_up_to_subtyping(this.tcx, this.param_env, ty, f_ty) {
-                    trace!(?ty, ?f_ty);
-                    this.validation = Err("failed to normalize projection type");
-                    return;
-                }
-            };
-
-            let kind = match parent_ty.ty.kind() {
-                &ty::Alias(ty::Opaque, ty::AliasTy { def_id, substs, .. }) => {
-                    self.tcx.type_of(def_id).subst(self.tcx, substs).kind()
-                }
-                kind => kind,
-            };
-
-            match kind {
-                ty::Tuple(fields) => {
-                    let Some(f_ty) = fields.get(f.as_usize()) else {
-                        self.validation = Err("malformed MIR");
-                        return;
-                    };
-                    check_equal(self, *f_ty);
-                }
-                ty::Adt(adt_def, substs) => {
-                    let var = parent_ty.variant_index.unwrap_or(VariantIdx::from_u32(0));
-                    let Some(field) = adt_def.variant(var).fields.get(f.as_usize()) else {
-                        self.validation = Err("malformed MIR");
-                        return;
-                    };
-                    check_equal(self, field.ty(self.tcx, substs));
-                }
-                ty::Closure(_, substs) => {
-                    let substs = substs.as_closure();
-                    let Some(f_ty) = substs.upvar_tys().nth(f.as_usize()) else {
-                        self.validation = Err("malformed MIR");
-                        return;
-                    };
-                    check_equal(self, f_ty);
-                }
-                &ty::Generator(def_id, substs, _) => {
-                    let f_ty = if let Some(var) = parent_ty.variant_index {
-                        let gen_body = if def_id == self.callee_body.source.def_id() {
-                            self.callee_body
-                        } else {
-                            self.tcx.optimized_mir(def_id)
-                        };
-
-                        let Some(layout) = gen_body.generator_layout() else {
-                            self.validation = Err("malformed MIR");
-                            return;
-                        };
-
-                        let Some(&local) = layout.variant_fields[var].get(f) else {
-                            self.validation = Err("malformed MIR");
-                            return;
-                        };
-
-                        let Some(f_ty) = layout.field_tys.get(local) else {
-                            self.validation = Err("malformed MIR");
-                            return;
-                        };
-
-                        f_ty.ty
-                    } else {
-                        let Some(f_ty) = substs.as_generator().prefix_tys().nth(f.index()) else {
-                            self.validation = Err("malformed MIR");
-                            return;
-                        };
-
-                        f_ty
-                    };
-
-                    check_equal(self, f_ty);
-                }
-                _ => self.validation = Err("malformed MIR"),
-            }
-        }
-
-        self.super_projection_elem(local, proj_base, elem, context, location);
     }
 }
 
@@ -987,10 +839,10 @@ struct Integrator<'a, 'tcx> {
     destination: Local,
     callsite_scope: SourceScopeData<'tcx>,
     callsite: &'a CallSite<'tcx>,
-    cleanup_block: Option<BasicBlock>,
+    cleanup_block: UnwindAction,
     in_cleanup_block: bool,
+    return_block: Option<BasicBlock>,
     tcx: TyCtxt<'tcx>,
-    expn_data: LocalExpnId,
     always_live_locals: BitSet<Local>,
 }
 
@@ -1022,18 +874,21 @@ impl Integrator<'_, '_> {
         new
     }
 
-    fn map_unwind(&self, unwind: Option<BasicBlock>) -> Option<BasicBlock> {
+    fn map_unwind(&self, unwind: UnwindAction) -> UnwindAction {
         if self.in_cleanup_block {
-            if unwind.is_some() {
-                bug!("cleanup on cleanup block");
+            match unwind {
+                UnwindAction::Cleanup(_) | UnwindAction::Continue => {
+                    bug!("cleanup on cleanup block");
+                }
+                UnwindAction::Unreachable | UnwindAction::Terminate(_) => return unwind,
             }
-            return unwind;
         }
 
         match unwind {
-            Some(target) => Some(self.map_block(target)),
+            UnwindAction::Unreachable | UnwindAction::Terminate(_) => unwind,
+            UnwindAction::Cleanup(target) => UnwindAction::Cleanup(self.map_block(target)),
             // Add an unwind edge to the original call's cleanup block
-            None => self.cleanup_block,
+            UnwindAction::Continue => self.cleanup_block,
         }
     }
 }
@@ -1073,11 +928,6 @@ impl<'tcx> MutVisitor<'tcx> for Integrator<'_, 'tcx> {
         *scope = self.map_scope(*scope);
     }
 
-    fn visit_span(&mut self, span: &mut Span) {
-        // Make sure that all spans track the fact that they were inlined.
-        *span = span.fresh_expansion(self.expn_data);
-    }
-
     fn visit_basic_block_data(&mut self, block: BasicBlock, data: &mut BasicBlockData<'tcx>) {
         self.in_cleanup_block = data.is_cleanup;
         self.super_basic_block_data(block, data);
@@ -1111,7 +961,7 @@ impl<'tcx> MutVisitor<'tcx> for Integrator<'_, 'tcx> {
         }
 
         match terminator.kind {
-            TerminatorKind::GeneratorDrop | TerminatorKind::Yield { .. } => bug!(),
+            TerminatorKind::CoroutineDrop | TerminatorKind::Yield { .. } => bug!(),
             TerminatorKind::Goto { ref mut target } => {
                 *target = self.map_block(*target);
             }
@@ -1120,34 +970,36 @@ impl<'tcx> MutVisitor<'tcx> for Integrator<'_, 'tcx> {
                     *tgt = self.map_block(*tgt);
                 }
             }
-            TerminatorKind::Drop { ref mut target, ref mut unwind, .. }
-            | TerminatorKind::DropAndReplace { ref mut target, ref mut unwind, .. } => {
+            TerminatorKind::Drop { ref mut target, ref mut unwind, .. } => {
                 *target = self.map_block(*target);
                 *unwind = self.map_unwind(*unwind);
             }
-            TerminatorKind::Call { ref mut target, ref mut cleanup, .. } => {
+            TerminatorKind::Call { ref mut target, ref mut unwind, .. } => {
                 if let Some(ref mut tgt) = *target {
                     *tgt = self.map_block(*tgt);
                 }
-                *cleanup = self.map_unwind(*cleanup);
+                *unwind = self.map_unwind(*unwind);
             }
-            TerminatorKind::Assert { ref mut target, ref mut cleanup, .. } => {
+            TerminatorKind::Assert { ref mut target, ref mut unwind, .. } => {
                 *target = self.map_block(*target);
-                *cleanup = self.map_unwind(*cleanup);
+                *unwind = self.map_unwind(*unwind);
             }
             TerminatorKind::Return => {
-                terminator.kind = if let Some(tgt) = self.callsite.target {
+                terminator.kind = if let Some(tgt) = self.return_block {
                     TerminatorKind::Goto { target: tgt }
                 } else {
                     TerminatorKind::Unreachable
                 }
             }
-            TerminatorKind::Resume => {
-                if let Some(tgt) = self.cleanup_block {
-                    terminator.kind = TerminatorKind::Goto { target: tgt }
-                }
+            TerminatorKind::UnwindResume => {
+                terminator.kind = match self.cleanup_block {
+                    UnwindAction::Cleanup(tgt) => TerminatorKind::Goto { target: tgt },
+                    UnwindAction::Continue => TerminatorKind::UnwindResume,
+                    UnwindAction::Unreachable => TerminatorKind::Unreachable,
+                    UnwindAction::Terminate(reason) => TerminatorKind::UnwindTerminate(reason),
+                };
             }
-            TerminatorKind::Abort => {}
+            TerminatorKind::UnwindTerminate(_) => {}
             TerminatorKind::Unreachable => {}
             TerminatorKind::FalseEdge { ref mut real_target, ref mut imaginary_target } => {
                 *real_target = self.map_block(*real_target);
@@ -1158,12 +1010,36 @@ impl<'tcx> MutVisitor<'tcx> for Integrator<'_, 'tcx> {
             {
                 bug!("False unwinds should have been removed before inlining")
             }
-            TerminatorKind::InlineAsm { ref mut destination, ref mut cleanup, .. } => {
+            TerminatorKind::InlineAsm { ref mut destination, ref mut unwind, .. } => {
                 if let Some(ref mut tgt) = *destination {
                     *tgt = self.map_block(*tgt);
                 }
-                *cleanup = self.map_unwind(*cleanup);
+                *unwind = self.map_unwind(*unwind);
             }
         }
+    }
+}
+
+#[instrument(skip(tcx), level = "debug")]
+fn try_instance_mir<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: InstanceDef<'tcx>,
+) -> Result<&'tcx Body<'tcx>, &'static str> {
+    match instance {
+        ty::InstanceDef::DropGlue(_, Some(ty)) => match ty.kind() {
+            ty::Adt(def, args) => {
+                let fields = def.all_fields();
+                for field in fields {
+                    let field_ty = field.ty(tcx, args);
+                    if field_ty.has_param() && field_ty.has_projections() {
+                        return Err("cannot build drop shim for polymorphic type");
+                    }
+                }
+
+                Ok(tcx.instance_mir(instance))
+            }
+            _ => Ok(tcx.instance_mir(instance)),
+        },
+        _ => Ok(tcx.instance_mir(instance)),
     }
 }

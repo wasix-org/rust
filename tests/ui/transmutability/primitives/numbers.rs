@@ -1,3 +1,6 @@
+// revisions: current next
+//[next] compile-flags: -Znext-solver
+
 #![crate_type = "lib"]
 #![feature(transmutability)]
 #![allow(dead_code)]

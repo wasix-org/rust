@@ -1,7 +1,7 @@
 //! This pass removes jumps to basic blocks containing only a return, and replaces them with a
 //! return instead.
 
-use crate::{simplify, MirPass};
+use crate::simplify;
 use rustc_index::bit_set::BitSet;
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
@@ -27,7 +27,7 @@ impl<'tcx> MirPass<'tcx> for MultipleReturnTerminators {
         }
 
         for bb in bbs {
-            if !tcx.consider_optimizing(|| format!("MultipleReturnTerminators {:?} ", def_id)) {
+            if !tcx.consider_optimizing(|| format!("MultipleReturnTerminators {def_id:?} ")) {
                 break;
             }
 
@@ -38,6 +38,6 @@ impl<'tcx> MirPass<'tcx> for MultipleReturnTerminators {
             }
         }
 
-        simplify::remove_dead_blocks(tcx, body)
+        simplify::remove_dead_blocks(body)
     }
 }

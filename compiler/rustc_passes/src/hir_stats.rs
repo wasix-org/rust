@@ -121,17 +121,19 @@ impl<'k> StatCollector<'k> {
     }
 
     fn print(&self, title: &str, prefix: &str) {
+        // We will soon sort, so the initial order does not matter.
+        #[allow(rustc::potential_query_instability)]
         let mut nodes: Vec<_> = self.nodes.iter().collect();
         nodes.sort_by_key(|(_, node)| node.stats.count * node.stats.size);
 
         let total_size = nodes.iter().map(|(_, node)| node.stats.count * node.stats.size).sum();
 
-        eprintln!("{} {}", prefix, title);
+        eprintln!("{prefix} {title}");
         eprintln!(
             "{} {:<18}{:>18}{:>14}{:>14}",
             prefix, "Name", "Accumulated Size", "Count", "Item Size"
         );
-        eprintln!("{} ----------------------------------------------------------------", prefix);
+        eprintln!("{prefix} ----------------------------------------------------------------");
 
         let percent = |m, n| (m * 100) as f64 / n as f64;
 
@@ -147,6 +149,8 @@ impl<'k> StatCollector<'k> {
                 to_readable_str(node.stats.size)
             );
             if !node.subnodes.is_empty() {
+                // We will soon sort, so the initial order does not matter.
+                #[allow(rustc::potential_query_instability)]
                 let mut subnodes: Vec<_> = node.subnodes.iter().collect();
                 subnodes.sort_by_key(|(_, subnode)| subnode.count * subnode.size);
 
@@ -163,9 +167,9 @@ impl<'k> StatCollector<'k> {
                 }
             }
         }
-        eprintln!("{} ----------------------------------------------------------------", prefix);
+        eprintln!("{prefix} ----------------------------------------------------------------");
         eprintln!("{} {:<18}{:>10}", prefix, "Total", to_readable_str(total_size));
-        eprintln!("{}", prefix);
+        eprintln!("{prefix}");
     }
 }
 
@@ -286,7 +290,21 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
     fn visit_pat(&mut self, p: &'v hir::Pat<'v>) {
         record_variants!(
             (self, p, p.kind, Id::Node(p.hir_id), hir, Pat, PatKind),
-            [Wild, Binding, Struct, TupleStruct, Or, Path, Tuple, Box, Ref, Lit, Range, Slice]
+            [
+                Wild,
+                Binding,
+                Struct,
+                TupleStruct,
+                Or,
+                Never,
+                Path,
+                Tuple,
+                Box,
+                Ref,
+                Lit,
+                Range,
+                Slice
+            ]
         );
         hir_visit::walk_pat(self, p)
     }
@@ -300,9 +318,10 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
         record_variants!(
             (self, e, e.kind, Id::Node(e.hir_id), hir, Expr, ExprKind),
             [
-                Box, ConstBlock, Array, Call, MethodCall, Tup, Binary, Unary, Lit, Cast, Type,
+                ConstBlock, Array, Call, MethodCall, Tup, Binary, Unary, Lit, Cast, Type,
                 DropTemps, Let, If, Loop, Match, Closure, Block, Assign, AssignOp, Field, Index,
-                Path, AddrOf, Break, Continue, Ret, InlineAsm, Struct, Repeat, Yield, Err
+                Path, AddrOf, Break, Continue, Ret, Become, InlineAsm, OffsetOf, Struct, Repeat,
+                Yield, Err
             ]
         );
         hir_visit::walk_expr(self, e)
@@ -410,7 +429,7 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
     fn visit_param_bound(&mut self, b: &'v hir::GenericBound<'v>) {
         record_variants!(
             (self, b, b, Id::None, hir, GenericBound, GenericBound),
-            [Trait, LangItemTrait, Outlives]
+            [Trait, Outlives]
         );
         hir_visit::walk_param_bound(self, b)
     }
@@ -553,6 +572,7 @@ impl<'v> ast_visit::Visitor<'v> for StatCollector<'v> {
                 Range,
                 Slice,
                 Rest,
+                Never,
                 Paren,
                 MacCall
             ]
@@ -565,10 +585,11 @@ impl<'v> ast_visit::Visitor<'v> for StatCollector<'v> {
         record_variants!(
             (self, e, e.kind, Id::None, ast, Expr, ExprKind),
             [
-                Box, Array, ConstBlock, Call, MethodCall, Tup, Binary, Unary, Lit, Cast, Type, Let,
-                If, While, ForLoop, Loop, Match, Closure, Block, Async, Await, TryBlock, Assign,
+                Array, ConstBlock, Call, MethodCall, Tup, Binary, Unary, Lit, Cast, Type, Let,
+                If, While, ForLoop, Loop, Match, Closure, Block, Await, TryBlock, Assign,
                 AssignOp, Field, Index, Range, Underscore, Path, AddrOf, Break, Continue, Ret,
-                InlineAsm, FormatArgs, MacCall, Struct, Repeat, Paren, Try, Yield, Yeet, IncludedBytes, Err
+                InlineAsm, FormatArgs, OffsetOf, MacCall, Struct, Repeat, Paren, Try, Yield, Yeet,
+                Become, IncludedBytes, Gen, Err
             ]
         );
         ast_visit::walk_expr(self, e)
@@ -585,6 +606,8 @@ impl<'v> ast_visit::Visitor<'v> for StatCollector<'v> {
                 BareFn,
                 Never,
                 Tup,
+                AnonStruct,
+                AnonUnion,
                 Path,
                 TraitObject,
                 ImplTrait,

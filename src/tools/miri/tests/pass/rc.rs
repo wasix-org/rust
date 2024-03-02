@@ -1,6 +1,9 @@
+//@revisions: stack tree
+//@[tree]compile-flags: -Zmiri-tree-borrows
 //@compile-flags: -Zmiri-strict-provenance
 #![feature(new_uninit)]
 #![feature(get_mut_unchecked)]
+#![allow(ambiguous_wide_pointer_comparisons)]
 
 use std::cell::{Cell, RefCell};
 use std::fmt::Debug;

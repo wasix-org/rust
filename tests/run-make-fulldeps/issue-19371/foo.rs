@@ -6,8 +6,8 @@ extern crate rustc_session;
 extern crate rustc_span;
 
 use rustc_interface::interface;
-use rustc_session::config::{Input, Options, OutputType, OutputTypes};
-use rustc_span::source_map::FileName;
+use rustc_session::config::{Input, Options, OutFileName, OutputType, OutputTypes};
+use rustc_span::FileName;
 
 use std::path::PathBuf;
 
@@ -50,23 +50,27 @@ fn compile(code: String, output: PathBuf, sysroot: PathBuf) {
         crate_cfg: Default::default(),
         crate_check_cfg: Default::default(),
         input,
-        output_file: Some(output),
+        output_file: Some(OutFileName::Real(output)),
         output_dir: None,
+        ice_file: None,
         file_loader: None,
         locale_resources: &[],
         lint_caps: Default::default(),
         parse_sess_created: None,
+        hash_untracked_state: None,
         register_lints: None,
         override_queries: None,
         make_codegen_backend: None,
         registry: rustc_driver::diagnostics_registry(),
+        using_internal_features: std::sync::Arc::default(),
+        expanded_args: Default::default(),
     };
 
     interface::run_compiler(config, |compiler| {
-        // This runs all the passes prior to linking, too.
-        let linker = compiler.enter(|queries| queries.linker());
-        if let Ok(linker) = linker {
-            linker.link();
-        }
+        let linker = compiler.enter(|queries| {
+            queries.global_ctxt()?.enter(|tcx| tcx.analysis(()))?;
+            queries.codegen_and_build_linker()
+        });
+        linker.unwrap().link(&compiler.sess, &*compiler.codegen_backend).unwrap();
     });
 }

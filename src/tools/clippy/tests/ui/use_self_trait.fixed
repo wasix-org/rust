@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![warn(clippy::use_self)]
 #![allow(dead_code)]
 #![allow(clippy::should_implement_trait, clippy::boxed_local)]
@@ -33,7 +31,7 @@ impl SelfTrait for Bad {
     fn nested(_p1: Box<Self>, _p2: (&u8, &Self)) {}
 
     fn vals(_: Self) -> Self {
-        Self::default()
+        Self
     }
 }
 
@@ -70,7 +68,7 @@ impl SelfTrait for Good {
     fn nested(_p1: Box<Self>, _p2: (&u8, &Self)) {}
 
     fn vals(_: Self) -> Self {
-        Self::default()
+        Self
     }
 }
 

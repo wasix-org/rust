@@ -15,7 +15,7 @@ standard library in the [Standard library developers Guide][std-dev-guide], comm
 ## About the [rustc-dev-guide]
 
 The [rustc-dev-guide] is meant to help document how rustc –the Rust compiler– works,
-as well as to help new contributors get involved in rustc development. It is recommend
+as well as to help new contributors get involved in rustc development. It is recommended
 to read and understand the [rustc-dev-guide] before making a contribution. This guide
 talks about the different bots in the Rust ecosystem, the Rust development tools,
 bootstrapping, the compiler architecture, source code representation, and more.
@@ -33,7 +33,6 @@ find a mentor! You can learn more about asking questions and getting help in the
 Did a compiler error message tell you to come here? If you want to create an ICE report,
 refer to [this section][contributing-bug-reports] and [open an issue][issue template].
 
-[Contributing to Rust]: https://rustc-dev-guide.rust-lang.org/contributing.html#contributing-to-rust
 [rustc-dev-guide]: https://rustc-dev-guide.rust-lang.org/
 [std-dev-guide]: https://std-dev-guide.rust-lang.org/
 [contributing-bug-reports]: https://rustc-dev-guide.rust-lang.org/contributing.html#bug-reports

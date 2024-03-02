@@ -1,21 +1,24 @@
-#![cfg_attr(feature = "nightly", feature(step_trait, rustc_attrs, min_specialization))]
+#![cfg_attr(feature = "nightly", feature(step_trait))]
+#![cfg_attr(feature = "nightly", allow(internal_features))]
+#![cfg_attr(feature = "nightly", doc(rust_logo))]
+#![cfg_attr(feature = "nightly", feature(rustdoc_internals))]
 
 use std::fmt;
-#[cfg(feature = "nightly")]
-use std::iter::Step;
 use std::num::{NonZeroUsize, ParseIntError};
 use std::ops::{Add, AddAssign, Mul, RangeInclusive, Sub};
 use std::str::FromStr;
 
 use bitflags::bitflags;
-use rustc_data_structures::intern::Interned;
+use rustc_index::{Idx, IndexSlice, IndexVec};
+
 #[cfg(feature = "nightly")]
 use rustc_data_structures::stable_hasher::StableOrd;
-use rustc_index::vec::{Idx, IndexVec};
 #[cfg(feature = "nightly")]
 use rustc_macros::HashStable_Generic;
 #[cfg(feature = "nightly")]
 use rustc_macros::{Decodable, Encodable};
+#[cfg(feature = "nightly")]
+use std::iter::Step;
 
 mod layout;
 
@@ -25,9 +28,6 @@ pub use layout::LayoutCalculator;
 /// This is a hack to allow using the `HashStable_Generic` derive macro
 /// instead of implementing everything in `rustc_middle`.
 pub trait HashStableContext {}
-
-use Integer::*;
-use Primitive::*;
 
 bitflags! {
     #[derive(Default)]
@@ -51,10 +51,11 @@ bitflags! {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_Generic))]
 pub enum IntegerType {
-    /// Pointer sized integer type, i.e. isize and usize. The field shows signedness, that
-    /// is, `Pointer(true)` is isize.
+    /// Pointer-sized integer type, i.e. `isize` and `usize`. The field shows signedness, e.g.
+    /// `Pointer(true)` means `isize`.
     Pointer(bool),
-    /// Fix sized integer type, e.g. i8, u32, i128 The bool field shows signedness, `Fixed(I8, false)` means `u8`
+    /// Fixed-sized integer type, e.g. `i8`, `u32`, `i128`. The bool field shows signedness, e.g.
+    /// `Fixed(I8, false)` means `u8`.
     Fixed(Integer, bool),
 }
 
@@ -67,7 +68,7 @@ impl IntegerType {
     }
 }
 
-/// Represents the repr options provided by the user,
+/// Represents the repr options provided by the user.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 #[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_Generic))]
 pub struct ReprOptions {
@@ -77,10 +78,10 @@ pub struct ReprOptions {
     pub flags: ReprFlags,
     /// The seed to be used for randomizing a type's layout
     ///
-    /// Note: This could technically be a `[u8; 16]` (a `u128`) which would
+    /// Note: This could technically be a `u128` which would
     /// be the "most accurate" hash as it'd encompass the item and crate
     /// hash without loss, but it does pay the price of being larger.
-    /// Everything's a tradeoff, a `u64` seed should be sufficient for our
+    /// Everything's a tradeoff, a 64-bit seed should be sufficient for our
     /// purposes (primarily `-Z randomize-layout`)
     pub field_shuffle_seed: u64,
 }
@@ -137,7 +138,7 @@ impl ReprOptions {
     }
 
     /// Returns `true` if this type is valid for reordering and `-Z randomize-layout`
-    /// was enabled for its declaration crate
+    /// was enabled for its declaration crate.
     pub fn can_randomize_type_layout(&self) -> bool {
         !self.inhibit_struct_field_reordering_opt()
             && self.flags.contains(ReprFlags::RANDOMIZE_LAYOUT)
@@ -208,14 +209,15 @@ pub enum TargetDataLayoutErrors<'a> {
     InvalidAddressSpace { addr_space: &'a str, cause: &'a str, err: ParseIntError },
     InvalidBits { kind: &'a str, bit: &'a str, cause: &'a str, err: ParseIntError },
     MissingAlignment { cause: &'a str },
-    InvalidAlignment { cause: &'a str, err: String },
+    InvalidAlignment { cause: &'a str, err: AlignFromBytesError },
     InconsistentTargetArchitecture { dl: &'a str, target: &'a str },
     InconsistentTargetPointerWidth { pointer_size: u64, target: u32 },
     InvalidBitsSize { err: String },
 }
 
 impl TargetDataLayout {
-    /// Parse data layout from an [llvm data layout string](https://llvm.org/docs/LangRef.html#data-layout)
+    /// Parse data layout from an
+    /// [llvm data layout string](https://llvm.org/docs/LangRef.html#data-layout)
     ///
     /// This function doesn't fill `c_enum_min_size` and it will always be `I32` since it can not be
     /// determined from llvm string.
@@ -240,10 +242,11 @@ impl TargetDataLayout {
         };
 
         // Parse a size string.
-        let size = |s: &'a str, cause: &'a str| parse_bits(s, "size", cause).map(Size::from_bits);
+        let parse_size =
+            |s: &'a str, cause: &'a str| parse_bits(s, "size", cause).map(Size::from_bits);
 
         // Parse an alignment string.
-        let align = |s: &[&'a str], cause: &'a str| {
+        let parse_align = |s: &[&'a str], cause: &'a str| {
             if s.is_empty() {
                 return Err(TargetDataLayoutErrors::MissingAlignment { cause });
             }
@@ -267,22 +270,22 @@ impl TargetDataLayout {
                 [p] if p.starts_with('P') => {
                     dl.instruction_address_space = parse_address_space(&p[1..], "P")?
                 }
-                ["a", ref a @ ..] => dl.aggregate_align = align(a, "a")?,
-                ["f32", ref a @ ..] => dl.f32_align = align(a, "f32")?,
-                ["f64", ref a @ ..] => dl.f64_align = align(a, "f64")?,
+                ["a", ref a @ ..] => dl.aggregate_align = parse_align(a, "a")?,
+                ["f32", ref a @ ..] => dl.f32_align = parse_align(a, "f32")?,
+                ["f64", ref a @ ..] => dl.f64_align = parse_align(a, "f64")?,
                 // FIXME(erikdesjardins): we should be parsing nonzero address spaces
                 // this will require replacing TargetDataLayout::{pointer_size,pointer_align}
                 // with e.g. `fn pointer_size_in(AddressSpace)`
                 [p @ "p", s, ref a @ ..] | [p @ "p0", s, ref a @ ..] => {
-                    dl.pointer_size = size(s, p)?;
-                    dl.pointer_align = align(a, p)?;
+                    dl.pointer_size = parse_size(s, p)?;
+                    dl.pointer_align = parse_align(a, p)?;
                 }
                 [s, ref a @ ..] if s.starts_with('i') => {
                     let Ok(bits) = s[1..].parse::<u64>() else {
-                        size(&s[1..], "i")?; // For the user error.
+                        parse_size(&s[1..], "i")?; // For the user error.
                         continue;
                     };
-                    let a = align(a, s)?;
+                    let a = parse_align(a, s)?;
                     match bits {
                         1 => dl.i1_align = a,
                         8 => dl.i8_align = a,
@@ -299,8 +302,8 @@ impl TargetDataLayout {
                     }
                 }
                 [s, ref a @ ..] if s.starts_with('v') => {
-                    let v_size = size(&s[1..], "v")?;
-                    let a = align(a, s)?;
+                    let v_size = parse_size(&s[1..], "v")?;
+                    let a = parse_align(a, s)?;
                     if let Some(v) = dl.vector_align.iter_mut().find(|v| v.0 == v_size) {
                         v.1 = a;
                         continue;
@@ -331,17 +334,18 @@ impl TargetDataLayout {
             16 => 1 << 15,
             32 => 1 << 31,
             64 => 1 << 47,
-            bits => panic!("obj_size_bound: unknown pointer bit size {}", bits),
+            bits => panic!("obj_size_bound: unknown pointer bit size {bits}"),
         }
     }
 
     #[inline]
     pub fn ptr_sized_integer(&self) -> Integer {
+        use Integer::*;
         match self.pointer_size.bits() {
             16 => I16,
             32 => I32,
             64 => I64,
-            bits => panic!("ptr_sized_integer: unknown pointer bit size {}", bits),
+            bits => panic!("ptr_sized_integer: unknown pointer bit size {bits}"),
         }
     }
 
@@ -398,7 +402,7 @@ impl FromStr for Endian {
         match s {
             "little" => Ok(Self::Little),
             "big" => Ok(Self::Big),
-            _ => Err(format!(r#"unknown endian: "{}""#, s)),
+            _ => Err(format!(r#"unknown endian: "{s}""#)),
         }
     }
 }
@@ -413,7 +417,9 @@ pub struct Size {
 // Safety: Ord is implement as just comparing numerical values and numerical values
 // are not changed by (de-)serialization.
 #[cfg(feature = "nightly")]
-unsafe impl StableOrd for Size {}
+unsafe impl StableOrd for Size {
+    const CAN_USE_UNSTABLE_SORT: bool = true;
+}
 
 // This is debug-printed a lot in larger structs, don't waste too much space there
 impl fmt::Debug for Size {
@@ -453,7 +459,7 @@ impl Size {
     pub fn bits(self) -> u64 {
         #[cold]
         fn overflow(bytes: u64) -> ! {
-            panic!("Size::bits: {} bytes in bits doesn't fit in u64", bytes)
+            panic!("Size::bits: {bytes} bytes in bits doesn't fit in u64")
         }
 
         self.bytes().checked_mul(8).unwrap_or_else(|| overflow(self.bytes()))
@@ -639,41 +645,74 @@ impl fmt::Debug for Align {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum AlignFromBytesError {
+    NotPowerOfTwo(u64),
+    TooLarge(u64),
+}
+
+impl AlignFromBytesError {
+    pub fn diag_ident(self) -> &'static str {
+        match self {
+            Self::NotPowerOfTwo(_) => "not_power_of_two",
+            Self::TooLarge(_) => "too_large",
+        }
+    }
+
+    pub fn align(self) -> u64 {
+        let (Self::NotPowerOfTwo(align) | Self::TooLarge(align)) = self;
+        align
+    }
+}
+
+impl fmt::Debug for AlignFromBytesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for AlignFromBytesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AlignFromBytesError::NotPowerOfTwo(align) => write!(f, "`{align}` is not a power of 2"),
+            AlignFromBytesError::TooLarge(align) => write!(f, "`{align}` is too large"),
+        }
+    }
+}
+
 impl Align {
     pub const ONE: Align = Align { pow2: 0 };
+    // LLVM has a maximal supported alignment of 2^29, we inherit that.
     pub const MAX: Align = Align { pow2: 29 };
 
     #[inline]
-    pub fn from_bits(bits: u64) -> Result<Align, String> {
+    pub fn from_bits(bits: u64) -> Result<Align, AlignFromBytesError> {
         Align::from_bytes(Size::from_bits(bits).bytes())
     }
 
     #[inline]
-    pub fn from_bytes(align: u64) -> Result<Align, String> {
+    pub fn from_bytes(align: u64) -> Result<Align, AlignFromBytesError> {
         // Treat an alignment of 0 bytes like 1-byte alignment.
         if align == 0 {
             return Ok(Align::ONE);
         }
 
         #[cold]
-        fn not_power_of_2(align: u64) -> String {
-            format!("`{}` is not a power of 2", align)
+        fn not_power_of_2(align: u64) -> AlignFromBytesError {
+            AlignFromBytesError::NotPowerOfTwo(align)
         }
 
         #[cold]
-        fn too_large(align: u64) -> String {
-            format!("`{}` is too large", align)
+        fn too_large(align: u64) -> AlignFromBytesError {
+            AlignFromBytesError::TooLarge(align)
         }
 
-        let mut bytes = align;
-        let mut pow2: u8 = 0;
-        while (bytes & 1) == 0 {
-            pow2 += 1;
-            bytes >>= 1;
-        }
-        if bytes != 1 {
+        let tz = align.trailing_zeros();
+        if align != (1 << tz) {
             return Err(not_power_of_2(align));
         }
+
+        let pow2 = tz as u8;
         if pow2 > Self::MAX.pow2 {
             return Err(too_large(align));
         }
@@ -711,7 +750,6 @@ impl Align {
 /// A pair of alignments, ABI-mandated and preferred.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
-
 pub struct AbiAndPrefAlign {
     pub abi: Align,
     pub pref: Align,
@@ -737,7 +775,6 @@ impl AbiAndPrefAlign {
 /// Integers, also used for enum discriminants.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_Generic))]
-
 pub enum Integer {
     I8,
     I16,
@@ -749,6 +786,7 @@ pub enum Integer {
 impl Integer {
     #[inline]
     pub fn size(self) -> Size {
+        use Integer::*;
         match self {
             I8 => Size::from_bytes(1),
             I16 => Size::from_bytes(2),
@@ -769,6 +807,7 @@ impl Integer {
     }
 
     pub fn align<C: HasDataLayout>(self, cx: &C) -> AbiAndPrefAlign {
+        use Integer::*;
         let dl = cx.data_layout();
 
         match self {
@@ -783,6 +822,7 @@ impl Integer {
     /// Returns the largest signed value that can be represented by this Integer.
     #[inline]
     pub fn signed_max(self) -> i128 {
+        use Integer::*;
         match self {
             I8 => i8::MAX as i128,
             I16 => i16::MAX as i128,
@@ -795,6 +835,7 @@ impl Integer {
     /// Finds the smallest Integer type which can represent the signed value.
     #[inline]
     pub fn fit_signed(x: i128) -> Integer {
+        use Integer::*;
         match x {
             -0x0000_0000_0000_0080..=0x0000_0000_0000_007f => I8,
             -0x0000_0000_0000_8000..=0x0000_0000_0000_7fff => I16,
@@ -807,6 +848,7 @@ impl Integer {
     /// Finds the smallest Integer type which can represent the unsigned value.
     #[inline]
     pub fn fit_unsigned(x: u128) -> Integer {
+        use Integer::*;
         match x {
             0..=0x0000_0000_0000_00ff => I8,
             0..=0x0000_0000_0000_ffff => I16,
@@ -818,6 +860,7 @@ impl Integer {
 
     /// Finds the smallest integer with the given alignment.
     pub fn for_align<C: HasDataLayout>(cx: &C, wanted: Align) -> Option<Integer> {
+        use Integer::*;
         let dl = cx.data_layout();
 
         [I8, I16, I32, I64, I128].into_iter().find(|&candidate| {
@@ -827,6 +870,7 @@ impl Integer {
 
     /// Find the largest integer with the given alignment or less.
     pub fn approximate_align<C: HasDataLayout>(cx: &C, wanted: Align) -> Integer {
+        use Integer::*;
         let dl = cx.data_layout();
 
         // FIXME(eddyb) maybe include I128 in the future, when it works everywhere.
@@ -872,6 +916,7 @@ pub enum Primitive {
 
 impl Primitive {
     pub fn size<C: HasDataLayout>(self, cx: &C) -> Size {
+        use Primitive::*;
         let dl = cx.data_layout();
 
         match self {
@@ -886,6 +931,7 @@ impl Primitive {
     }
 
     pub fn align<C: HasDataLayout>(self, cx: &C) -> AbiAndPrefAlign {
+        use Primitive::*;
         let dl = cx.data_layout();
 
         match self {
@@ -901,8 +947,7 @@ impl Primitive {
 }
 
 /// Inclusive wrap-around range of valid values, that is, if
-/// start > end, it represents `start..=MAX`,
-/// followed by `0..=end`.
+/// start > end, it represents `start..=MAX`, followed by `0..=end`.
 ///
 /// That is, for an i8 primitive, a range of `254..=2` means following
 /// sequence:
@@ -934,21 +979,21 @@ impl WrappingRange {
 
     /// Returns `self` with replaced `start`
     #[inline(always)]
-    pub fn with_start(mut self, start: u128) -> Self {
+    fn with_start(mut self, start: u128) -> Self {
         self.start = start;
         self
     }
 
     /// Returns `self` with replaced `end`
     #[inline(always)]
-    pub fn with_end(mut self, end: u128) -> Self {
+    fn with_end(mut self, end: u128) -> Self {
         self.end = end;
         self
     }
 
     /// Returns `true` if `size` completely fills the range.
     #[inline]
-    pub fn is_full_for(&self, size: Size) -> bool {
+    fn is_full_for(&self, size: Size) -> bool {
         let max_value = size.unsigned_int_max();
         debug_assert!(self.start <= max_value && self.end <= max_value);
         self.start == (self.end.wrapping_add(1) & max_value)
@@ -991,10 +1036,11 @@ pub enum Scalar {
 impl Scalar {
     #[inline]
     pub fn is_bool(&self) -> bool {
+        use Integer::*;
         matches!(
             self,
             Scalar::Initialized {
-                value: Int(I8, false),
+                value: Primitive::Int(I8, false),
                 valid_range: WrappingRange { start: 0, end: 1 }
             }
         )
@@ -1030,7 +1076,8 @@ impl Scalar {
     }
 
     #[inline]
-    /// Allows the caller to mutate the valid range. This operation will panic if attempted on a union.
+    /// Allows the caller to mutate the valid range. This operation will panic if attempted on a
+    /// union.
     pub fn valid_range_mut(&mut self) -> &mut WrappingRange {
         match self {
             Scalar::Initialized { valid_range, .. } => valid_range,
@@ -1038,7 +1085,8 @@ impl Scalar {
         }
     }
 
-    /// Returns `true` if all possible numbers are valid, i.e `valid_range` covers the whole layout
+    /// Returns `true` if all possible numbers are valid, i.e `valid_range` covers the whole
+    /// layout.
     #[inline]
     pub fn is_always_valid<C: HasDataLayout>(&self, cx: &C) -> bool {
         match *self {
@@ -1057,10 +1105,11 @@ impl Scalar {
     }
 }
 
+// NOTE: This struct is generic over the FieldIdx for rust-analyzer usage.
 /// Describes how the fields of a type are located in memory.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
-pub enum FieldsShape {
+pub enum FieldsShape<FieldIdx: Idx> {
     /// Scalar primitives and `!`, which never have fields.
     Primitive,
 
@@ -1082,7 +1131,7 @@ pub enum FieldsShape {
         /// ordered to match the source definition order.
         /// This vector does not go in increasing order.
         // FIXME(eddyb) use small vector optimization for the common case.
-        offsets: Vec<Size>,
+        offsets: IndexVec<FieldIdx, Size>,
 
         /// Maps source order field indices to memory order indices,
         /// depending on how the fields were reordered (if at all).
@@ -1096,11 +1145,11 @@ pub enum FieldsShape {
         ///
         // FIXME(eddyb) build a better abstraction for permutations, if possible.
         // FIXME(camlorn) also consider small vector optimization here.
-        memory_index: Vec<u32>,
+        memory_index: IndexVec<FieldIdx, u32>,
     },
 }
 
-impl FieldsShape {
+impl<FieldIdx: Idx> FieldsShape<FieldIdx> {
     #[inline]
     pub fn count(&self) -> usize {
         match *self {
@@ -1118,20 +1167,15 @@ impl FieldsShape {
                 unreachable!("FieldsShape::offset: `Primitive`s have no fields")
             }
             FieldsShape::Union(count) => {
-                assert!(
-                    i < count.get(),
-                    "tried to access field {} of union with {} fields",
-                    i,
-                    count
-                );
+                assert!(i < count.get(), "tried to access field {i} of union with {count} fields");
                 Size::ZERO
             }
             FieldsShape::Array { stride, count } => {
                 let i = u64::try_from(i).unwrap();
-                assert!(i < count);
+                assert!(i < count, "tried to access field {i} of array with {count} fields");
                 stride * i
             }
-            FieldsShape::Arbitrary { ref offsets, .. } => offsets[i],
+            FieldsShape::Arbitrary { ref offsets, .. } => offsets[FieldIdx::new(i)],
         }
     }
 
@@ -1142,28 +1186,27 @@ impl FieldsShape {
                 unreachable!("FieldsShape::memory_index: `Primitive`s have no fields")
             }
             FieldsShape::Union(_) | FieldsShape::Array { .. } => i,
-            FieldsShape::Arbitrary { ref memory_index, .. } => memory_index[i].try_into().unwrap(),
+            FieldsShape::Arbitrary { ref memory_index, .. } => {
+                memory_index[FieldIdx::new(i)].try_into().unwrap()
+            }
         }
     }
 
     /// Gets source indices of the fields by increasing offsets.
     #[inline]
-    pub fn index_by_increasing_offset<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
+    pub fn index_by_increasing_offset(&self) -> impl Iterator<Item = usize> + '_ {
         let mut inverse_small = [0u8; 64];
-        let mut inverse_big = vec![];
+        let mut inverse_big = IndexVec::new();
         let use_small = self.count() <= inverse_small.len();
 
         // We have to write this logic twice in order to keep the array small.
         if let FieldsShape::Arbitrary { ref memory_index, .. } = *self {
             if use_small {
-                for i in 0..self.count() {
-                    inverse_small[memory_index[i] as usize] = i as u8;
+                for (field_idx, &mem_idx) in memory_index.iter_enumerated() {
+                    inverse_small[mem_idx as usize] = field_idx.index() as u8;
                 }
             } else {
-                inverse_big = vec![0; self.count()];
-                for i in 0..self.count() {
-                    inverse_big[memory_index[i] as usize] = i as u32;
-                }
+                inverse_big = memory_index.invert_bijective_mapping();
             }
         }
 
@@ -1173,7 +1216,7 @@ impl FieldsShape {
                 if use_small {
                     inverse_small[i] as usize
                 } else {
-                    inverse_big[i] as usize
+                    inverse_big[i as u32].index()
                 }
             }
         })
@@ -1196,7 +1239,6 @@ impl AddressSpace {
 /// in terms of categories of C types there are ABI rules for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
-
 pub enum Abi {
     Uninhabited,
     Scalar(Scalar),
@@ -1234,7 +1276,7 @@ impl Abi {
                 Primitive::Int(_, signed) => signed,
                 _ => false,
             },
-            _ => panic!("`is_signed` on non-scalar ABI {:?}", self),
+            _ => panic!("`is_signed` on non-scalar ABI {self:?}"),
         }
     }
 
@@ -1244,16 +1286,83 @@ impl Abi {
         matches!(*self, Abi::Uninhabited)
     }
 
-    /// Returns `true` is this is a scalar type
+    /// Returns `true` if this is a scalar type
     #[inline]
     pub fn is_scalar(&self) -> bool {
         matches!(*self, Abi::Scalar(_))
     }
+
+    /// Returns `true` if this is a bool
+    #[inline]
+    pub fn is_bool(&self) -> bool {
+        matches!(*self, Abi::Scalar(s) if s.is_bool())
+    }
+
+    /// Returns the fixed alignment of this ABI, if any is mandated.
+    pub fn inherent_align<C: HasDataLayout>(&self, cx: &C) -> Option<AbiAndPrefAlign> {
+        Some(match *self {
+            Abi::Scalar(s) => s.align(cx),
+            Abi::ScalarPair(s1, s2) => s1.align(cx).max(s2.align(cx)),
+            Abi::Vector { element, count } => {
+                cx.data_layout().vector_align(element.size(cx) * count)
+            }
+            Abi::Uninhabited | Abi::Aggregate { .. } => return None,
+        })
+    }
+
+    /// Returns the fixed size of this ABI, if any is mandated.
+    pub fn inherent_size<C: HasDataLayout>(&self, cx: &C) -> Option<Size> {
+        Some(match *self {
+            Abi::Scalar(s) => {
+                // No padding in scalars.
+                s.size(cx)
+            }
+            Abi::ScalarPair(s1, s2) => {
+                // May have some padding between the pair.
+                let field2_offset = s1.size(cx).align_to(s2.align(cx).abi);
+                (field2_offset + s2.size(cx)).align_to(self.inherent_align(cx)?.abi)
+            }
+            Abi::Vector { element, count } => {
+                // No padding in vectors, except possibly for trailing padding
+                // to make the size a multiple of align (e.g. for vectors of size 3).
+                (element.size(cx) * count).align_to(self.inherent_align(cx)?.abi)
+            }
+            Abi::Uninhabited | Abi::Aggregate { .. } => return None,
+        })
+    }
+
+    /// Discard validity range information and allow undef.
+    pub fn to_union(&self) -> Self {
+        match *self {
+            Abi::Scalar(s) => Abi::Scalar(s.to_union()),
+            Abi::ScalarPair(s1, s2) => Abi::ScalarPair(s1.to_union(), s2.to_union()),
+            Abi::Vector { element, count } => Abi::Vector { element: element.to_union(), count },
+            Abi::Uninhabited | Abi::Aggregate { .. } => Abi::Aggregate { sized: true },
+        }
+    }
+
+    pub fn eq_up_to_validity(&self, other: &Self) -> bool {
+        match (self, other) {
+            // Scalar, Vector, ScalarPair have `Scalar` in them where we ignore validity ranges.
+            // We do *not* ignore the sign since it matters for some ABIs (e.g. s390x).
+            (Abi::Scalar(l), Abi::Scalar(r)) => l.primitive() == r.primitive(),
+            (
+                Abi::Vector { element: element_l, count: count_l },
+                Abi::Vector { element: element_r, count: count_r },
+            ) => element_l.primitive() == element_r.primitive() && count_l == count_r,
+            (Abi::ScalarPair(l1, l2), Abi::ScalarPair(r1, r2)) => {
+                l1.primitive() == r1.primitive() && l2.primitive() == r2.primitive()
+            }
+            // Everything else must be strictly identical.
+            _ => self == other,
+        }
+    }
 }
 
+// NOTE: This struct is generic over the FieldIdx and VariantIdx for rust-analyzer usage.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
-pub enum Variants {
+pub enum Variants<FieldIdx: Idx, VariantIdx: Idx> {
     /// Single enum variants, structs/tuples, unions, and all non-ADTs.
     Single { index: VariantIdx },
 
@@ -1265,15 +1374,16 @@ pub enum Variants {
     /// For enums, the tag is the sole field of the layout.
     Multiple {
         tag: Scalar,
-        tag_encoding: TagEncoding,
+        tag_encoding: TagEncoding<VariantIdx>,
         tag_field: usize,
-        variants: IndexVec<VariantIdx, LayoutS>,
+        variants: IndexVec<VariantIdx, LayoutS<FieldIdx, VariantIdx>>,
     },
 }
 
+// NOTE: This struct is generic over the VariantIdx for rust-analyzer usage.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
-pub enum TagEncoding {
+pub enum TagEncoding<VariantIdx: Idx> {
     /// The tag directly stores the discriminant, but possibly with a smaller layout
     /// (so converting the tag to the discriminant can require sign extension).
     Direct,
@@ -1335,17 +1445,19 @@ impl Niche {
             return None;
         }
 
-        // Extend the range of valid values being reserved by moving either `v.start` or `v.end` bound.
-        // Given an eventual `Option<T>`, we try to maximize the chance for `None` to occupy the niche of zero.
-        // This is accomplished by preferring enums with 2 variants(`count==1`) and always taking the shortest path to niche zero.
-        // Having `None` in niche zero can enable some special optimizations.
+        // Extend the range of valid values being reserved by moving either `v.start` or `v.end`
+        // bound. Given an eventual `Option<T>`, we try to maximize the chance for `None` to occupy
+        // the niche of zero. This is accomplished by preferring enums with 2 variants(`count==1`)
+        // and always taking the shortest path to niche zero. Having `None` in niche zero can
+        // enable some special optimizations.
         //
         // Bound selection criteria:
         // 1. Select closest to zero given wrapping semantics.
         // 2. Avoid moving past zero if possible.
         //
-        // In practice this means that enums with `count > 1` are unlikely to claim niche zero, since they have to fit perfectly.
-        // If niche zero is already reserved, the selection of bounds are of little interest.
+        // In practice this means that enums with `count > 1` are unlikely to claim niche zero,
+        // since they have to fit perfectly. If niche zero is already reserved, the selection of
+        // bounds are of little interest.
         let move_start = |v: WrappingRange| {
             let start = v.start.wrapping_sub(count) & max_value;
             Some((start, Scalar::Initialized { value, valid_range: v.with_start(start) }))
@@ -1379,25 +1491,21 @@ impl Niche {
     }
 }
 
-rustc_index::newtype_index! {
-    #[derive(HashStable_Generic)]
-    pub struct VariantIdx {}
-}
-
+// NOTE: This struct is generic over the FieldIdx and VariantIdx for rust-analyzer usage.
 #[derive(PartialEq, Eq, Hash, Clone)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
-pub struct LayoutS {
+pub struct LayoutS<FieldIdx: Idx, VariantIdx: Idx> {
     /// Says where the fields are located within the layout.
-    pub fields: FieldsShape,
+    pub fields: FieldsShape<FieldIdx>,
 
     /// Encodes information about multi-variant layouts.
     /// Even with `Multiple` variants, a layout still has its own fields! Those are then
     /// shared between all variants. One of them will be the discriminant,
-    /// but e.g. generators can have more.
+    /// but e.g. coroutines can have more.
     ///
     /// To access all fields of this layout, both `fields` and the fields of the active variant
     /// must be taken into account.
-    pub variants: Variants,
+    pub variants: Variants<FieldIdx, VariantIdx>,
 
     /// The `abi` defines how this data is passed between functions, and it defines
     /// value restrictions via `valid_range`.
@@ -1414,9 +1522,19 @@ pub struct LayoutS {
 
     pub align: AbiAndPrefAlign,
     pub size: Size,
+
+    /// The largest alignment explicitly requested with `repr(align)` on this type or any field.
+    /// Only used on i686-windows, where the argument passing ABI is different when alignment is
+    /// requested, even if the requested alignment is equal to the natural alignment.
+    pub max_repr_align: Option<Align>,
+
+    /// The alignment the type would have, ignoring any `repr(align)` but including `repr(packed)`.
+    /// Only used on aarch64-linux, where the argument passing ABI ignores the requested alignment
+    /// in some cases.
+    pub unadjusted_abi_align: Align,
 }
 
-impl LayoutS {
+impl<FieldIdx: Idx, VariantIdx: Idx> LayoutS<FieldIdx, VariantIdx> {
     pub fn scalar<C: HasDataLayout>(cx: &C, scalar: Scalar) -> Self {
         let largest_niche = Niche::from_scalar(cx, Size::ZERO, scalar);
         let size = scalar.size(cx);
@@ -1428,16 +1546,31 @@ impl LayoutS {
             largest_niche,
             size,
             align,
+            max_repr_align: None,
+            unadjusted_abi_align: align.abi,
         }
     }
 }
 
-impl fmt::Debug for LayoutS {
+impl<FieldIdx: Idx, VariantIdx: Idx> fmt::Debug for LayoutS<FieldIdx, VariantIdx>
+where
+    FieldsShape<FieldIdx>: fmt::Debug,
+    Variants<FieldIdx, VariantIdx>: fmt::Debug,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // This is how `Layout` used to print before it become
         // `Interned<LayoutS>`. We print it like this to avoid having to update
         // expected output in a lot of tests.
-        let LayoutS { size, align, abi, fields, largest_niche, variants } = self;
+        let LayoutS {
+            size,
+            align,
+            abi,
+            fields,
+            largest_niche,
+            variants,
+            max_repr_align,
+            unadjusted_abi_align,
+        } = self;
         f.debug_struct("Layout")
             .field("size", size)
             .field("align", align)
@@ -1445,44 +1578,9 @@ impl fmt::Debug for LayoutS {
             .field("fields", fields)
             .field("largest_niche", largest_niche)
             .field("variants", variants)
+            .field("max_repr_align", max_repr_align)
+            .field("unadjusted_abi_align", unadjusted_abi_align)
             .finish()
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, HashStable_Generic)]
-#[rustc_pass_by_value]
-pub struct Layout<'a>(pub Interned<'a, LayoutS>);
-
-impl<'a> fmt::Debug for Layout<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // See comment on `<LayoutS as Debug>::fmt` above.
-        self.0.0.fmt(f)
-    }
-}
-
-impl<'a> Layout<'a> {
-    pub fn fields(self) -> &'a FieldsShape {
-        &self.0.0.fields
-    }
-
-    pub fn variants(self) -> &'a Variants {
-        &self.0.0.variants
-    }
-
-    pub fn abi(self) -> Abi {
-        self.0.0.abi
-    }
-
-    pub fn largest_niche(self) -> Option<Niche> {
-        self.0.0.largest_niche
-    }
-
-    pub fn align(self) -> AbiAndPrefAlign {
-        self.0.0.align
-    }
-
-    pub fn size(self) -> Size {
-        self.0.0.size
     }
 }
 
@@ -1505,23 +1603,49 @@ pub struct PointeeInfo {
     pub safe: Option<PointerKind>,
 }
 
-impl LayoutS {
+impl<FieldIdx: Idx, VariantIdx: Idx> LayoutS<FieldIdx, VariantIdx> {
     /// Returns `true` if the layout corresponds to an unsized type.
+    #[inline]
     pub fn is_unsized(&self) -> bool {
         self.abi.is_unsized()
     }
 
+    #[inline]
     pub fn is_sized(&self) -> bool {
         self.abi.is_sized()
     }
 
+    /// Returns `true` if the type is sized and a 1-ZST (meaning it has size 0 and alignment 1).
+    pub fn is_1zst(&self) -> bool {
+        self.is_sized() && self.size.bytes() == 0 && self.align.abi.bytes() == 1
+    }
+
     /// Returns `true` if the type is a ZST and not unsized.
+    ///
+    /// Note that this does *not* imply that the type is irrelevant for layout! It can still have
+    /// non-trivial alignment constraints. You probably want to use `is_1zst` instead.
     pub fn is_zst(&self) -> bool {
         match self.abi {
             Abi::Scalar(_) | Abi::ScalarPair(..) | Abi::Vector { .. } => false,
             Abi::Uninhabited => self.size.bytes() == 0,
             Abi::Aggregate { sized } => sized && self.size.bytes() == 0,
         }
+    }
+
+    /// Checks if these two `Layout` are equal enough to be considered "the same for all function
+    /// call ABIs". Note however that real ABIs depend on more details that are not reflected in the
+    /// `Layout`; the `PassMode` need to be compared as well.
+    pub fn eq_abi(&self, other: &Self) -> bool {
+        // The one thing that we are not capturing here is that for unsized types, the metadata must
+        // also have the same ABI, and moreover that the same metadata leads to the same size. The
+        // 2nd point is quite hard to check though.
+        self.size == other.size
+            && self.is_sized() == other.is_sized()
+            && self.abi.eq_up_to_validity(&other.abi)
+            && self.abi.is_bool() == other.abi.is_bool()
+            && self.align.abi == other.align.abi
+            && self.max_repr_align == other.max_repr_align
+            && self.unadjusted_abi_align == other.unadjusted_abi_align
     }
 }
 

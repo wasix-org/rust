@@ -2,15 +2,19 @@ import * as vscode from "vscode";
 import * as lc from "vscode-languageclient/node";
 
 import * as commands from "./commands";
-import { CommandFactory, Ctx, fetchWorkspace } from "./ctx";
+import { type CommandFactory, Ctx, fetchWorkspace } from "./ctx";
 import * as diagnostics from "./diagnostics";
 import { activateTaskProvider } from "./tasks";
 import { setContextValue } from "./util";
 
 const RUST_PROJECT_CONTEXT_NAME = "inRustProject";
 
+// This API is not stable and may break in between minor releases.
 export interface RustAnalyzerExtensionApi {
     readonly client?: lc.LanguageClient;
+
+    setWorkspaces(workspaces: JsonProject[]): void;
+    notifyRustAnalyzer(): Promise<void>;
 }
 
 export async function deactivate() {
@@ -18,7 +22,7 @@ export async function deactivate() {
 }
 
 export async function activate(
-    context: vscode.ExtensionContext
+    context: vscode.ExtensionContext,
 ): Promise<RustAnalyzerExtensionApi> {
     if (vscode.extensions.getExtension("rust-lang.rust")) {
         vscode.window
@@ -26,7 +30,7 @@ export async function activate(
                 `You have both the rust-analyzer (rust-lang.rust-analyzer) and Rust (rust-lang.rust) ` +
                     "plugins enabled. These are known to conflict and cause various functions of " +
                     "both plugins to not work correctly. You should disable one of them.",
-                "Got it"
+                "Got it",
             )
             .then(() => {}, console.error);
     }
@@ -36,7 +40,7 @@ export async function activate(
     // so we do it ourselves.
     const api = await activateServer(ctx).catch((err) => {
         void vscode.window.showErrorMessage(
-            `Cannot activate rust-analyzer extension: ${err.message}`
+            `Cannot activate rust-analyzer extension: ${err.message}`,
         );
         throw err;
     });
@@ -53,8 +57,8 @@ async function activateServer(ctx: Ctx): Promise<RustAnalyzerExtensionApi> {
     ctx.pushExtCleanup(
         vscode.workspace.registerTextDocumentContentProvider(
             diagnostics.URI_SCHEME,
-            diagnosticProvider
-        )
+            diagnosticProvider,
+        ),
     );
 
     const decorationProvider = new diagnostics.AnsiDecorationProvider(ctx);
@@ -71,7 +75,7 @@ async function activateServer(ctx: Ctx): Promise<RustAnalyzerExtensionApi> {
     vscode.workspace.onDidChangeTextDocument(
         async (event) => await decorateVisibleEditors(event.document),
         null,
-        ctx.subscriptions
+        ctx.subscriptions,
     );
     vscode.workspace.onDidOpenTextDocument(decorateVisibleEditors, null, ctx.subscriptions);
     vscode.window.onDidChangeActiveTextEditor(
@@ -82,7 +86,7 @@ async function activateServer(ctx: Ctx): Promise<RustAnalyzerExtensionApi> {
             }
         },
         null,
-        ctx.subscriptions
+        ctx.subscriptions,
     );
     vscode.window.onDidChangeVisibleTextEditors(
         async (visibleEditors) => {
@@ -92,13 +96,13 @@ async function activateServer(ctx: Ctx): Promise<RustAnalyzerExtensionApi> {
             }
         },
         null,
-        ctx.subscriptions
+        ctx.subscriptions,
     );
 
     vscode.workspace.onDidChangeWorkspaceFolders(
         async (_) => ctx.onWorkspaceFolderChanges(),
         null,
-        ctx.subscriptions
+        ctx.subscriptions,
     );
     vscode.workspace.onDidChangeConfiguration(
         async (_) => {
@@ -107,7 +111,7 @@ async function activateServer(ctx: Ctx): Promise<RustAnalyzerExtensionApi> {
             });
         },
         null,
-        ctx.subscriptions
+        ctx.subscriptions,
     );
 
     await ctx.start();
@@ -120,13 +124,11 @@ function createCommands(): Record<string, CommandFactory> {
             enabled: commands.onEnter,
             disabled: (_) => () => vscode.commands.executeCommand("default:type", { text: "\n" }),
         },
-        reload: {
+        restartServer: {
             enabled: (ctx) => async () => {
-                void vscode.window.showInformationMessage("Reloading rust-analyzer...");
                 await ctx.restart();
             },
             disabled: (ctx) => async () => {
-                void vscode.window.showInformationMessage("Reloading rust-analyzer...");
                 await ctx.start();
             },
         },
@@ -153,11 +155,14 @@ function createCommands(): Record<string, CommandFactory> {
         memoryUsage: { enabled: commands.memoryUsage },
         shuffleCrateGraph: { enabled: commands.shuffleCrateGraph },
         reloadWorkspace: { enabled: commands.reloadWorkspace },
+        rebuildProcMacros: { enabled: commands.rebuildProcMacros },
         matchingBrace: { enabled: commands.matchingBrace },
         joinLines: { enabled: commands.joinLines },
         parentModule: { enabled: commands.parentModule },
         syntaxTree: { enabled: commands.syntaxTree },
         viewHir: { enabled: commands.viewHir },
+        viewMir: { enabled: commands.viewMir },
+        interpretFunction: { enabled: commands.interpretFunction },
         viewFileText: { enabled: commands.viewFileText },
         viewItemTree: { enabled: commands.viewItemTree },
         viewCrateGraph: { enabled: commands.viewCrateGraph },
@@ -168,6 +173,7 @@ function createCommands(): Record<string, CommandFactory> {
         debug: { enabled: commands.debug },
         newDebugConfig: { enabled: commands.newDebugConfig },
         openDocs: { enabled: commands.openDocs },
+        openExternalDocs: { enabled: commands.openExternalDocs },
         openCargoToml: { enabled: commands.openCargoToml },
         peekTests: { enabled: commands.peekTests },
         moveItemUp: { enabled: commands.moveItemUp },
@@ -177,6 +183,8 @@ function createCommands(): Record<string, CommandFactory> {
         runFlycheck: { enabled: commands.runFlycheck },
         ssr: { enabled: commands.ssr },
         serverVersion: { enabled: commands.serverVersion },
+        viewMemoryLayout: { enabled: commands.viewMemoryLayout },
+        toggleCheckOnSave: { enabled: commands.toggleCheckOnSave },
         // Internal commands which are invoked by the server.
         applyActionGroup: { enabled: commands.applyActionGroup },
         applySnippetWorkspaceEdit: { enabled: commands.applySnippetWorkspaceEditCommand },
@@ -187,5 +195,7 @@ function createCommands(): Record<string, CommandFactory> {
         runSingle: { enabled: commands.runSingle },
         showReferences: { enabled: commands.showReferences },
         triggerParameterHints: { enabled: commands.triggerParameterHints },
+        openLogs: { enabled: commands.openLogs },
+        revealDependency: { enabled: commands.revealDependency },
     };
 }

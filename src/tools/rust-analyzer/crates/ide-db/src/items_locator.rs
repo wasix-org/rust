@@ -3,40 +3,22 @@
 //! The main reason for this module to exist is the fact that project's items and dependencies' items
 //! are located in different caches, with different APIs.
 use either::Either;
-use hir::{
-    import_map::{self, ImportKind},
-    symbols::FileSymbol,
-    AsAssocItem, Crate, ItemInNs, Semantics,
-};
+use hir::{import_map, Crate, ItemInNs, Semantics};
 use limit::Limit;
-use syntax::{ast, AstNode, SyntaxKind::NAME};
 
-use crate::{
-    defs::{Definition, NameClass},
-    imports::import_assets::NameToImport,
-    symbol_index, RootDatabase,
-};
+use crate::{imports::import_assets::NameToImport, symbol_index, RootDatabase};
 
 /// A value to use, when uncertain which limit to pick.
-pub static DEFAULT_QUERY_SEARCH_LIMIT: Limit = Limit::new(40);
+pub static DEFAULT_QUERY_SEARCH_LIMIT: Limit = Limit::new(100);
 
-/// Three possible ways to search for the name in associated and/or other items.
-#[derive(Debug, Clone, Copy)]
-pub enum AssocItemSearch {
-    /// Search for the name in both associated and other items.
-    Include,
-    /// Search for the name in other items only.
-    Exclude,
-    /// Search for the name in the associated items only.
-    AssocItemsOnly,
-}
+pub use import_map::AssocSearchMode;
 
 /// Searches for importable items with the given name in the crate and its dependencies.
 pub fn items_with_name<'a>(
     sema: &'a Semantics<'_, RootDatabase>,
     krate: Crate,
     name: NameToImport,
-    assoc_item_search: AssocItemSearch,
+    assoc_item_search: AssocSearchMode,
     limit: Option<usize>,
 ) -> impl Iterator<Item = ItemInNs> + 'a {
     let _p = profile::span("items_with_name").detail(|| {
@@ -49,37 +31,36 @@ pub fn items_with_name<'a>(
         )
     });
 
+    let prefix = matches!(name, NameToImport::Prefix(..));
     let (mut local_query, mut external_query) = match name {
-        NameToImport::Exact(exact_name, case_sensitive) => {
+        NameToImport::Prefix(exact_name, case_sensitive)
+        | NameToImport::Exact(exact_name, case_sensitive) => {
             let mut local_query = symbol_index::Query::new(exact_name.clone());
-            local_query.exact();
-
-            let external_query = import_map::Query::new(exact_name)
-                .name_only()
-                .search_mode(import_map::SearchMode::Equals);
-
-            (
-                local_query,
-                if case_sensitive { external_query.case_sensitive() } else { external_query },
-            )
+            let mut external_query =
+                // import_map::Query::new(exact_name).assoc_search_mode(assoc_item_search);
+                import_map::Query::new(exact_name);
+            if prefix {
+                local_query.prefix();
+                external_query = external_query.prefix();
+            } else {
+                local_query.exact();
+                external_query = external_query.exact();
+            }
+            if case_sensitive {
+                local_query.case_sensitive();
+                external_query = external_query.case_sensitive();
+            }
+            (local_query, external_query)
         }
-        NameToImport::Fuzzy(fuzzy_search_string) => {
+        NameToImport::Fuzzy(fuzzy_search_string, case_sensitive) => {
             let mut local_query = symbol_index::Query::new(fuzzy_search_string.clone());
+            local_query.fuzzy();
 
             let mut external_query = import_map::Query::new(fuzzy_search_string.clone())
-                .search_mode(import_map::SearchMode::Fuzzy)
-                .name_only();
-            match assoc_item_search {
-                AssocItemSearch::Include => {}
-                AssocItemSearch::Exclude => {
-                    external_query = external_query.exclude_import_kind(ImportKind::AssociatedItem);
-                }
-                AssocItemSearch::AssocItemsOnly => {
-                    external_query = external_query.assoc_items_only();
-                }
-            }
+                .fuzzy()
+                .assoc_search_mode(assoc_item_search);
 
-            if fuzzy_search_string.to_lowercase() != fuzzy_search_string {
+            if case_sensitive {
                 local_query.case_sensitive();
                 external_query = external_query.case_sensitive();
             }
@@ -99,13 +80,15 @@ pub fn items_with_name<'a>(
 fn find_items<'a>(
     sema: &'a Semantics<'_, RootDatabase>,
     krate: Crate,
-    assoc_item_search: AssocItemSearch,
+    assoc_item_search: AssocSearchMode,
     local_query: symbol_index::Query,
     external_query: import_map::Query,
 ) -> impl Iterator<Item = ItemInNs> + 'a {
     let _p = profile::span("find_items");
     let db = sema.db;
 
+    // NOTE: `external_query` includes `assoc_item_search`, so we don't need to
+    // filter on our own.
     let external_importables =
         krate.query_external_importables(db, external_query).map(|external_importable| {
             match external_importable {
@@ -115,37 +98,18 @@ fn find_items<'a>(
         });
 
     // Query the local crate using the symbol index.
-    let local_results = symbol_index::crate_symbols(db, krate, local_query)
+    let local_results = local_query
+        .search(&symbol_index::crate_symbols(db, krate))
         .into_iter()
-        .filter_map(move |local_candidate| get_name_definition(sema, &local_candidate))
-        .filter_map(|name_definition_to_import| match name_definition_to_import {
-            Definition::Macro(macro_def) => Some(ItemInNs::from(macro_def)),
-            def => <Option<_>>::from(def),
+        .filter(move |candidate| match assoc_item_search {
+            AssocSearchMode::Include => true,
+            AssocSearchMode::Exclude => !candidate.is_assoc,
+            AssocSearchMode::AssocItemsOnly => candidate.is_assoc,
+        })
+        .map(|local_candidate| match local_candidate.def {
+            hir::ModuleDef::Macro(macro_def) => ItemInNs::Macros(macro_def),
+            def => ItemInNs::from(def),
         });
 
-    external_importables.chain(local_results).filter(move |&item| match assoc_item_search {
-        AssocItemSearch::Include => true,
-        AssocItemSearch::Exclude => !is_assoc_item(item, sema.db),
-        AssocItemSearch::AssocItemsOnly => is_assoc_item(item, sema.db),
-    })
-}
-
-fn get_name_definition(
-    sema: &Semantics<'_, RootDatabase>,
-    import_candidate: &FileSymbol,
-) -> Option<Definition> {
-    let _p = profile::span("get_name_definition");
-
-    let candidate_node = import_candidate.loc.syntax(sema)?;
-    let candidate_name_node = if candidate_node.kind() != NAME {
-        candidate_node.children().find(|it| it.kind() == NAME)?
-    } else {
-        candidate_node
-    };
-    let name = ast::Name::cast(candidate_name_node)?;
-    NameClass::classify(sema, &name)?.defined()
-}
-
-fn is_assoc_item(item: ItemInNs, db: &RootDatabase) -> bool {
-    item.as_module_def().and_then(|module_def| module_def.as_assoc_item(db)).is_some()
+    external_importables.chain(local_results)
 }

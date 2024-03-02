@@ -5,10 +5,11 @@ use expect_test::Expect;
 use ide_db::{
     assists::AssistResolveStrategy,
     base_db::{fixture::WithFixture, SourceDatabaseExt},
-    RootDatabase,
+    LineIndexDatabase, RootDatabase,
 };
+use itertools::Itertools;
 use stdx::trim_indent;
-use test_utils::{assert_eq_text, extract_annotations};
+use test_utils::{assert_eq_text, extract_annotations, MiniCore};
 
 use crate::{DiagnosticsConfig, ExprFillDefaultMode, Severity};
 
@@ -43,14 +44,18 @@ fn check_nth_fix(nth: usize, ra_fixture_before: &str, ra_fixture_after: &str) {
         super::diagnostics(&db, &conf, &AssistResolveStrategy::All, file_position.file_id)
             .pop()
             .expect("no diagnostics");
-    let fix = &diagnostic.fixes.expect("diagnostic misses fixes")[nth];
+    let fix =
+        &diagnostic.fixes.expect(&format!("{:?} diagnostic misses fixes", diagnostic.code))[nth];
     let actual = {
         let source_change = fix.source_change.as_ref().unwrap();
         let file_id = *source_change.source_file_edits.keys().next().unwrap();
         let mut actual = db.file_text(file_id).to_string();
 
-        for edit in source_change.source_file_edits.values() {
+        for (edit, snippet_edit) in source_change.source_file_edits.values() {
             edit.apply(&mut actual);
+            if let Some(snippet_edit) = snippet_edit {
+                snippet_edit.apply(&mut actual);
+            }
         }
         actual
     };
@@ -99,36 +104,67 @@ pub(crate) fn check_diagnostics(ra_fixture: &str) {
 #[track_caller]
 pub(crate) fn check_diagnostics_with_config(config: DiagnosticsConfig, ra_fixture: &str) {
     let (db, files) = RootDatabase::with_many_files(ra_fixture);
+    let mut annotations = files
+        .iter()
+        .copied()
+        .flat_map(|file_id| {
+            super::diagnostics(&db, &config, &AssistResolveStrategy::All, file_id).into_iter().map(
+                |d| {
+                    let mut annotation = String::new();
+                    if let Some(fixes) = &d.fixes {
+                        assert!(!fixes.is_empty());
+                        annotation.push_str("💡 ")
+                    }
+                    annotation.push_str(match d.severity {
+                        Severity::Error => "error",
+                        Severity::WeakWarning => "weak",
+                        Severity::Warning => "warn",
+                        Severity::Allow => "allow",
+                    });
+                    annotation.push_str(": ");
+                    annotation.push_str(&d.message);
+                    (d.range, annotation)
+                },
+            )
+        })
+        .map(|(diagnostic, annotation)| (diagnostic.file_id, (diagnostic.range, annotation)))
+        .into_group_map();
     for file_id in files {
-        let diagnostics = super::diagnostics(&db, &config, &AssistResolveStrategy::All, file_id);
+        let line_index = db.line_index(file_id);
 
+        let mut actual = annotations.remove(&file_id).unwrap_or_default();
         let expected = extract_annotations(&db.file_text(file_id));
-        let mut actual = diagnostics
-            .into_iter()
-            .map(|d| {
-                let mut annotation = String::new();
-                if let Some(fixes) = &d.fixes {
-                    assert!(!fixes.is_empty());
-                    annotation.push_str("💡 ")
-                }
-                annotation.push_str(match d.severity {
-                    Severity::Error => "error",
-                    Severity::WeakWarning => "weak",
-                });
-                annotation.push_str(": ");
-                annotation.push_str(&d.message);
-                (d.range, annotation)
-            })
-            .collect::<Vec<_>>();
         actual.sort_by_key(|(range, _)| range.start());
-        assert_eq!(expected, actual);
+        if expected.is_empty() {
+            // makes minicore smoke test debuggable
+            for (e, _) in &actual {
+                eprintln!(
+                    "Code in range {e:?} = {}",
+                    &db.file_text(file_id)[usize::from(e.start())..usize::from(e.end())]
+                )
+            }
+        }
+        if expected != actual {
+            let fneg = expected
+                .iter()
+                .filter(|x| !actual.contains(x))
+                .map(|(range, s)| (line_index.line_col(range.start()), range, s))
+                .collect::<Vec<_>>();
+            let fpos = actual
+                .iter()
+                .filter(|x| !expected.contains(x))
+                .map(|(range, s)| (line_index.line_col(range.start()), range, s))
+                .collect::<Vec<_>>();
+
+            panic!("Diagnostic test failed.\nFalse negatives: {fneg:?}\nFalse positives: {fpos:?}");
+        }
     }
 }
 
 #[test]
 fn test_disabled_diagnostics() {
     let mut config = DiagnosticsConfig::test_sample();
-    config.disabled.insert("unresolved-module".into());
+    config.disabled.insert("E0583".into());
 
     let (db, file_id) = RootDatabase::with_single_file(r#"mod foo;"#);
 
@@ -142,4 +178,29 @@ fn test_disabled_diagnostics() {
         file_id,
     );
     assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn minicore_smoke_test() {
+    fn check(minicore: MiniCore) {
+        let source = minicore.source_code();
+        let mut config = DiagnosticsConfig::test_sample();
+        // This should be ignored since we conditionaly remove code which creates single item use with braces
+        config.disabled.insert("unused_braces".to_string());
+        check_diagnostics_with_config(config, &source);
+    }
+
+    // Checks that there is no diagnostic in minicore for each flag.
+    for flag in MiniCore::available_flags() {
+        if flag == "clone" {
+            // Clone without copy has `moved-out-of-ref`, so ignoring.
+            // FIXME: Maybe we should merge copy and clone in a single flag?
+            continue;
+        }
+        eprintln!("Checking minicore flag {flag}");
+        check(MiniCore::from_flags([flag]));
+    }
+    // And one time for all flags, to check codes which are behind multiple flags + prevent name collisions
+    eprintln!("Checking all minicore flags");
+    check(MiniCore::from_flags(MiniCore::available_flags()))
 }

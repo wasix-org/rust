@@ -72,24 +72,30 @@ pub fn expand_deriving_partial_eq(
         BlockOrExpr::new_expr(expr)
     }
 
-    super::inject_impl_of_structural_trait(
-        cx,
+    let structural_trait_def = TraitDef {
         span,
-        item,
-        path_std!(marker::StructuralPartialEq),
-        push,
-    );
+        path: path_std!(marker::StructuralPartialEq),
+        skip_path_as_bound: true, // crucial!
+        needs_copy_as_bound_if_packed: false,
+        additional_bounds: Vec::new(),
+        // We really don't support unions, but that's already checked by the impl generated below;
+        // a second check here would lead to redundant error messages.
+        supports_unions: true,
+        methods: Vec::new(),
+        associated_types: Vec::new(),
+        is_const: false,
+    };
+    structural_trait_def.expand(cx, mitem, item, push);
 
     // No need to generate `ne`, the default suffices, and not generating it is
     // faster.
-    let attrs = thin_vec![cx.attr_word(sym::inline, span)];
     let methods = vec![MethodDef {
         name: sym::eq,
         generics: Bounds::empty(),
         explicit_self: true,
         nonself_args: vec![(self_ref(), sym::other)],
         ret_ty: Path(path_local!(bool)),
-        attributes: attrs,
+        attributes: thin_vec![cx.attr_word(sym::inline, span)],
         fieldless_variants_strategy: FieldlessVariantsStrategy::Unify,
         combine_substructure: combine_substructure(Box::new(|a, b, c| cs_eq(a, b, c))),
     }];

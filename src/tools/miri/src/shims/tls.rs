@@ -56,7 +56,7 @@ impl<'tcx> Default for TlsData<'tcx> {
 impl<'tcx> TlsData<'tcx> {
     /// Generate a new TLS key with the given destructor.
     /// `max_size` determines the integer size the key has to fit in.
-    #[allow(clippy::integer_arithmetic)]
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn create_tls_key(
         &mut self,
         dtor: Option<ty::Instance<'tcx>>,
@@ -79,7 +79,7 @@ impl<'tcx> TlsData<'tcx> {
                 trace!("TLS key {} removed", key);
                 Ok(())
             }
-            None => throw_ub_format!("removing a non-existig TLS key: {}", key),
+            None => throw_ub_format!("removing a nonexistent TLS key: {}", key),
         }
     }
 
@@ -175,7 +175,7 @@ impl<'tcx> TlsData<'tcx> {
             Some(key) => Excluded(key),
             None => Unbounded,
         };
-        // We interpret the documentaion above (taken from POSIX) as saying that we need to iterate
+        // We interpret the documentation above (taken from POSIX) as saying that we need to iterate
         // over all keys and run each destructor at least once before running any destructor a 2nd
         // time. That's why we have `key` to indicate how far we got in the current iteration. If we
         // return `None`, `schedule_next_pthread_tls_dtor` will re-try with `ket` set to `None` to
@@ -207,15 +207,15 @@ impl<'tcx> TlsData<'tcx> {
     }
 }
 
-impl VisitTags for TlsData<'_> {
-    fn visit_tags(&self, visit: &mut dyn FnMut(BorTag)) {
+impl VisitProvenance for TlsData<'_> {
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         let TlsData { keys, macos_thread_dtors, next_key: _ } = self;
 
         for scalar in keys.values().flat_map(|v| v.data.values()) {
-            scalar.visit_tags(visit);
+            scalar.visit_provenance(visit);
         }
         for (_, scalar) in macos_thread_dtors.values() {
-            scalar.visit_tags(visit);
+            scalar.visit_provenance(visit);
         }
     }
 }

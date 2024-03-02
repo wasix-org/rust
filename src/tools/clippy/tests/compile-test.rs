@@ -1,68 +1,49 @@
-#![feature(test)] // compiletest_rs requires this attribute
-#![feature(once_cell)]
+#![feature(lazy_cell)]
 #![feature(is_sorted)]
 #![cfg_attr(feature = "deny-warnings", deny(warnings))]
 #![warn(rust_2018_idioms, unused_lifetimes)]
+#![allow(unused_extern_crates)]
 
-use compiletest_rs as compiletest;
-use compiletest_rs::common::Mode as TestMode;
+use ui_test::{status_emitter, Args, CommandBuilder, Config, Match, Mode, OutputConflictHandling};
 
-use std::collections::HashMap;
-use std::env::{self, remove_var, set_var, var_os};
+use std::collections::BTreeMap;
+use std::env::{self, set_var, var_os};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use test_utils::IS_RUSTC_TEST_SUITE;
 
-mod test_utils;
+// Test dependencies may need an `extern crate` here to ensure that they show up
+// in the depinfo file (otherwise cargo thinks they are unused)
+extern crate clippy_lints;
+extern crate clippy_utils;
+extern crate futures;
+extern crate if_chain;
+extern crate itertools;
+extern crate parking_lot;
+extern crate quote;
+extern crate syn;
+extern crate tokio;
 
-// whether to run internal tests or not
-const RUN_INTERNAL_TESTS: bool = cfg!(feature = "internal");
+mod test_utils;
 
 /// All crates used in UI tests are listed here
 static TEST_DEPENDENCIES: &[&str] = &[
+    "clippy_config",
     "clippy_lints",
     "clippy_utils",
-    "derive_new",
     "futures",
     "if_chain",
     "itertools",
+    "parking_lot",
     "quote",
     "regex",
-    "serde",
     "serde_derive",
+    "serde",
     "syn",
     "tokio",
-    "parking_lot",
-    "rustc_semver",
 ];
-
-// Test dependencies may need an `extern crate` here to ensure that they show up
-// in the depinfo file (otherwise cargo thinks they are unused)
-#[allow(unused_extern_crates)]
-extern crate clippy_lints;
-#[allow(unused_extern_crates)]
-extern crate clippy_utils;
-#[allow(unused_extern_crates)]
-extern crate derive_new;
-#[allow(unused_extern_crates)]
-extern crate futures;
-#[allow(unused_extern_crates)]
-extern crate if_chain;
-#[allow(unused_extern_crates)]
-extern crate itertools;
-#[allow(unused_extern_crates)]
-extern crate parking_lot;
-#[allow(unused_extern_crates)]
-extern crate quote;
-#[allow(unused_extern_crates)]
-extern crate rustc_semver;
-#[allow(unused_extern_crates)]
-extern crate syn;
-#[allow(unused_extern_crates)]
-extern crate tokio;
 
 /// Produces a string with an `--extern` flag for all UI test crate
 /// dependencies.
@@ -72,13 +53,13 @@ extern crate tokio;
 /// dependencies must be added to Cargo.toml at the project root. Test
 /// dependencies that are not *directly* used by this test module require an
 /// `extern crate` declaration.
-static EXTERN_FLAGS: LazyLock<String> = LazyLock::new(|| {
+static EXTERN_FLAGS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let current_exe_depinfo = {
         let mut path = env::current_exe().unwrap();
         path.set_extension("d");
         fs::read_to_string(path).unwrap()
     };
-    let mut crates: HashMap<&str, &str> = HashMap::with_capacity(TEST_DEPENDENCIES.len());
+    let mut crates = BTreeMap::<&str, &str>::new();
     for line in current_exe_depinfo.lines() {
         // each dependency is expected to have a Makefile rule like `/path/to/crate-hash.rlib:`
         let parse_name_path = || {
@@ -118,68 +99,78 @@ static EXTERN_FLAGS: LazyLock<String> = LazyLock::new(|| {
     );
     crates
         .into_iter()
-        .map(|(name, path)| format!(" --extern {name}={path}"))
+        .map(|(name, path)| format!("--extern={name}={path}"))
         .collect()
 });
 
-fn base_config(test_dir: &str) -> compiletest::Config {
-    let mut config = compiletest::Config {
-        edition: Some("2021".into()),
-        mode: TestMode::Ui,
-        ..Default::default()
+// whether to run internal tests or not
+const RUN_INTERNAL_TESTS: bool = cfg!(feature = "internal");
+
+fn base_config(test_dir: &str) -> (Config, Args) {
+    let mut args = Args::test().unwrap();
+    args.bless |= var_os("RUSTC_BLESS").is_some_and(|v| v != "0");
+
+    let target_dir = PathBuf::from(var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()));
+    let mut config = Config {
+        mode: Mode::Yolo {
+            rustfix: ui_test::RustfixMode::Everything,
+        },
+        filter_files: env::var("TESTNAME")
+            .map(|filters| filters.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
+        target: None,
+        out_dir: target_dir.join("ui_test"),
+        ..Config::rustc(Path::new("tests").join(test_dir))
     };
-
-    if let Ok(filters) = env::var("TESTNAME") {
-        config.filters = filters.split(',').map(ToString::to_string).collect();
-    }
-
-    if let Some(path) = option_env!("RUSTC_LIB_PATH") {
-        let path = PathBuf::from(path);
-        config.run_lib_path = path.clone();
-        config.compile_lib_path = path;
+    config.with_args(&args, /* bless by default */ false);
+    if let OutputConflictHandling::Error(err) = &mut config.output_conflict_handling {
+        *err = "cargo uibless".into();
     }
     let current_exe_path = env::current_exe().unwrap();
     let deps_path = current_exe_path.parent().unwrap();
     let profile_path = deps_path.parent().unwrap();
 
-    // Using `-L dependency={}` enforces that external dependencies are added with `--extern`.
-    // This is valuable because a) it allows us to monitor what external dependencies are used
-    // and b) it ensures that conflicting rlibs are resolved properly.
-    let host_libs = option_env!("HOST_LIBS")
-        .map(|p| format!(" -L dependency={}", Path::new(p).join("deps").display()))
-        .unwrap_or_default();
-    config.target_rustcflags = Some(format!(
-        "--emit=metadata -Dwarnings -Zui-testing -L dependency={}{host_libs}{}",
-        deps_path.display(),
-        &*EXTERN_FLAGS,
-    ));
+    config.program.args.extend(
+        [
+            "--emit=metadata",
+            "-Aunused",
+            "-Ainternal_features",
+            "-Zui-testing",
+            "-Dwarnings",
+            &format!("-Ldependency={}", deps_path.display()),
+        ]
+        .map(OsString::from),
+    );
 
-    config.src_base = Path::new("tests").join(test_dir);
-    config.build_base = profile_path.join("test").join(test_dir);
-    config.rustc_path = profile_path.join(if cfg!(windows) {
+    config.program.args.extend(EXTERN_FLAGS.iter().map(OsString::from));
+
+    if let Some(host_libs) = option_env!("HOST_LIBS") {
+        let dep = format!("-Ldependency={}", Path::new(host_libs).join("deps").display());
+        config.program.args.push(dep.into());
+    }
+
+    config.program.program = profile_path.join(if cfg!(windows) {
         "clippy-driver.exe"
     } else {
         "clippy-driver"
     });
-    config
+    (config, args)
 }
 
 fn run_ui() {
-    let mut config = base_config("ui");
-    config.rustfix_coverage = true;
-    // use tests/clippy.toml
-    let _g = VarGuard::set("CARGO_MANIFEST_DIR", fs::canonicalize("tests").unwrap());
-    let _threads = VarGuard::set(
-        "RUST_TEST_THREADS",
-        // if RUST_TEST_THREADS is set, adhere to it, otherwise override it
-        env::var("RUST_TEST_THREADS").unwrap_or_else(|_| {
-            std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .to_string()
-        }),
-    );
-    compiletest::run_tests(&config);
-    check_rustfix_coverage();
+    let (mut config, args) = base_config("ui");
+    config
+        .program
+        .envs
+        .push(("CLIPPY_CONF_DIR".into(), Some("tests".into())));
+
+    ui_test::run_tests_generic(
+        vec![config],
+        ui_test::default_file_filter,
+        ui_test::default_per_file_config,
+        status_emitter::Text::from(args.format),
+    )
+    .unwrap();
 }
 
 fn run_internal_tests() {
@@ -187,269 +178,138 @@ fn run_internal_tests() {
     if !RUN_INTERNAL_TESTS {
         return;
     }
-    let config = base_config("ui-internal");
-    compiletest::run_tests(&config);
+    let (mut config, args) = base_config("ui-internal");
+    if let OutputConflictHandling::Error(err) = &mut config.output_conflict_handling {
+        *err = "cargo uitest --features internal -- -- --bless".into();
+    }
+
+    ui_test::run_tests_generic(
+        vec![config],
+        ui_test::default_file_filter,
+        ui_test::default_per_file_config,
+        status_emitter::Text::from(args.format),
+    )
+    .unwrap();
 }
 
 fn run_ui_toml() {
-    fn run_tests(config: &compiletest::Config, mut tests: Vec<tester::TestDescAndFn>) -> Result<bool, io::Error> {
-        let mut result = true;
-        let opts = compiletest::test_opts(config);
-        for dir in fs::read_dir(&config.src_base)? {
-            let dir = dir?;
-            if !dir.file_type()?.is_dir() {
-                continue;
-            }
-            let dir_path = dir.path();
-            let _g = VarGuard::set("CARGO_MANIFEST_DIR", &dir_path);
-            for file in fs::read_dir(&dir_path)? {
-                let file = file?;
-                let file_path = file.path();
-                if file.file_type()?.is_dir() {
-                    continue;
-                }
-                if file_path.extension() != Some(OsStr::new("rs")) {
-                    continue;
-                }
-                let paths = compiletest::common::TestPaths {
-                    file: file_path,
-                    base: config.src_base.clone(),
-                    relative_dir: dir_path.file_name().unwrap().into(),
-                };
-                let test_name = compiletest::make_test_name(config, &paths);
-                let index = tests
-                    .iter()
-                    .position(|test| test.desc.name == test_name)
-                    .expect("The test should be in there");
-                result &= tester::run_tests_console(&opts, vec![tests.swap_remove(index)])?;
-            }
-        }
-        Ok(result)
-    }
+    let (mut config, args) = base_config("ui-toml");
 
-    let mut config = base_config("ui-toml");
-    config.src_base = config.src_base.canonicalize().unwrap();
+    config
+        .stderr_filters
+        .push((Match::from(env::current_dir().unwrap().as_path()), b"$DIR"));
 
-    let tests = compiletest::make_tests(&config);
-
-    let res = run_tests(&config, tests);
-    match res {
-        Ok(true) => {},
-        Ok(false) => panic!("Some tests failed"),
-        Err(e) => {
-            panic!("I/O failure during tests: {e:?}");
+    ui_test::run_tests_generic(
+        vec![config],
+        ui_test::default_file_filter,
+        |config, path, _file_contents| {
+            config
+                .program
+                .envs
+                .push(("CLIPPY_CONF_DIR".into(), Some(path.parent().unwrap().into())));
         },
-    }
+        status_emitter::Text::from(args.format),
+    )
+    .unwrap();
 }
 
 fn run_ui_cargo() {
-    fn run_tests(
-        config: &compiletest::Config,
-        filters: &[String],
-        mut tests: Vec<tester::TestDescAndFn>,
-    ) -> Result<bool, io::Error> {
-        let mut result = true;
-        let opts = compiletest::test_opts(config);
-
-        for dir in fs::read_dir(&config.src_base)? {
-            let dir = dir?;
-            if !dir.file_type()?.is_dir() {
-                continue;
-            }
-
-            // Use the filter if provided
-            let dir_path = dir.path();
-            for filter in filters {
-                if !dir_path.ends_with(filter) {
-                    continue;
-                }
-            }
-
-            for case in fs::read_dir(&dir_path)? {
-                let case = case?;
-                if !case.file_type()?.is_dir() {
-                    continue;
-                }
-
-                let src_path = case.path().join("src");
-
-                // When switching between branches, if the previous branch had a test
-                // that the current branch does not have, the directory is not removed
-                // because an ignored Cargo.lock file exists.
-                if !src_path.exists() {
-                    continue;
-                }
-
-                env::set_current_dir(&src_path)?;
-
-                let cargo_toml_path = case.path().join("Cargo.toml");
-                let cargo_content = fs::read(cargo_toml_path)?;
-                let cargo_parsed: toml::Value = toml::from_str(
-                    std::str::from_utf8(&cargo_content).expect("`Cargo.toml` is not a valid utf-8 file!"),
-                )
-                .expect("Can't parse `Cargo.toml`");
-
-                let _g = VarGuard::set("CARGO_MANIFEST_DIR", case.path());
-                let _h = VarGuard::set(
-                    "CARGO_PKG_RUST_VERSION",
-                    cargo_parsed
-                        .get("package")
-                        .and_then(|p| p.get("rust-version"))
-                        .and_then(toml::Value::as_str)
-                        .unwrap_or(""),
-                );
-
-                for file in fs::read_dir(&src_path)? {
-                    let file = file?;
-                    if file.file_type()?.is_dir() {
-                        continue;
-                    }
-
-                    // Search for the main file to avoid running a test for each file in the project
-                    let file_path = file.path();
-                    match file_path.file_name().and_then(OsStr::to_str) {
-                        Some("main.rs") => {},
-                        _ => continue,
-                    }
-                    let _g = VarGuard::set("CLIPPY_CONF_DIR", case.path());
-                    let paths = compiletest::common::TestPaths {
-                        file: file_path,
-                        base: config.src_base.clone(),
-                        relative_dir: src_path.strip_prefix(&config.src_base).unwrap().into(),
-                    };
-                    let test_name = compiletest::make_test_name(config, &paths);
-                    let index = tests
-                        .iter()
-                        .position(|test| test.desc.name == test_name)
-                        .expect("The test should be in there");
-                    result &= tester::run_tests_console(&opts, vec![tests.swap_remove(index)])?;
-                }
-            }
-        }
-        Ok(result)
-    }
-
     if IS_RUSTC_TEST_SUITE {
         return;
     }
 
-    let mut config = base_config("ui-cargo");
-    config.src_base = config.src_base.canonicalize().unwrap();
-
-    let tests = compiletest::make_tests(&config);
-
-    let current_dir = env::current_dir().unwrap();
-    let res = run_tests(&config, &config.filters, tests);
-    env::set_current_dir(current_dir).unwrap();
-
-    match res {
-        Ok(true) => {},
-        Ok(false) => panic!("Some tests failed"),
-        Err(e) => {
-            panic!("I/O failure during tests: {e:?}");
-        },
-    }
-}
-
-#[test]
-fn compile_test() {
-    set_var("CLIPPY_DISABLE_DOCS_LINKS", "true");
-    run_ui();
-    run_ui_toml();
-    run_ui_cargo();
-    run_internal_tests();
-}
-
-const RUSTFIX_COVERAGE_KNOWN_EXCEPTIONS: &[&str] = &[
-    "assign_ops2.rs",
-    "borrow_deref_ref_unfixable.rs",
-    "cast_size_32bit.rs",
-    "char_lit_as_u8.rs",
-    "cmp_owned/without_suggestion.rs",
-    "dbg_macro.rs",
-    "deref_addrof_double_trigger.rs",
-    "doc/unbalanced_ticks.rs",
-    "eprint_with_newline.rs",
-    "explicit_counter_loop.rs",
-    "iter_skip_next_unfixable.rs",
-    "let_and_return.rs",
-    "literals.rs",
-    "map_flatten.rs",
-    "map_unwrap_or.rs",
-    "match_bool.rs",
-    "mem_replace_macro.rs",
-    "needless_arbitrary_self_type_unfixable.rs",
-    "needless_borrow_pat.rs",
-    "needless_for_each_unfixable.rs",
-    "nonminimal_bool.rs",
-    "print_literal.rs",
-    "print_with_newline.rs",
-    "redundant_static_lifetimes_multiple.rs",
-    "ref_binding_to_reference.rs",
-    "repl_uninit.rs",
-    "result_map_unit_fn_unfixable.rs",
-    "search_is_some.rs",
-    "single_component_path_imports_nested_first.rs",
-    "string_add.rs",
-    "suspicious_to_owned.rs",
-    "toplevel_ref_arg_non_rustfix.rs",
-    "unit_arg.rs",
-    "unnecessary_clone.rs",
-    "unnecessary_lazy_eval_unfixable.rs",
-    "write_literal.rs",
-    "write_literal_2.rs",
-    "write_with_newline.rs",
-];
-
-fn check_rustfix_coverage() {
-    let missing_coverage_path = Path::new("debug/test/ui/rustfix_missing_coverage.txt");
-    let missing_coverage_path = if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        PathBuf::from(target_dir).join(missing_coverage_path)
+    let (mut config, args) = base_config("ui-cargo");
+    config.program.input_file_flag = CommandBuilder::cargo().input_file_flag;
+    config.program.out_dir_flag = CommandBuilder::cargo().out_dir_flag;
+    config.program.args = vec!["clippy".into(), "--color".into(), "never".into(), "--quiet".into()];
+    config
+        .program
+        .envs
+        .push(("RUSTFLAGS".into(), Some("-Dwarnings".into())));
+    // We need to do this while we still have a rustc in the `program` field.
+    config.fill_host_and_target().unwrap();
+    config.dependencies_crate_manifest_path = None;
+    config.program.program.set_file_name(if cfg!(windows) {
+        "cargo-clippy.exe"
     } else {
-        missing_coverage_path.to_path_buf()
+        "cargo-clippy"
+    });
+    config.edition = None;
+
+    config
+        .stderr_filters
+        .push((Match::from(env::current_dir().unwrap().as_path()), b"$DIR"));
+
+    let ignored_32bit = |path: &Path| {
+        // FIXME: for some reason the modules are linted in a different order for this test
+        cfg!(target_pointer_width = "32") && path.ends_with("tests/ui-cargo/module_style/fail_mod/Cargo.toml")
     };
 
-    if let Ok(missing_coverage_contents) = std::fs::read_to_string(missing_coverage_path) {
-        assert!(RUSTFIX_COVERAGE_KNOWN_EXCEPTIONS.iter().is_sorted_by_key(Path::new));
+    ui_test::run_tests_generic(
+        vec![config],
+        |path, config| {
+            path.ends_with("Cargo.toml") && ui_test::default_any_file_filter(path, config) && !ignored_32bit(path)
+        },
+        |_config, _path, _file_contents| {},
+        status_emitter::Text::from(args.format),
+    )
+    .unwrap();
+}
 
-        for rs_file in missing_coverage_contents.lines() {
-            let rs_path = Path::new(rs_file);
-            if rs_path.starts_with("tests/ui/crashes") {
-                continue;
-            }
-            assert!(rs_path.starts_with("tests/ui/"), "{rs_file:?}");
-            let filename = rs_path.strip_prefix("tests/ui/").unwrap();
-            assert!(
-                RUSTFIX_COVERAGE_KNOWN_EXCEPTIONS
-                    .binary_search_by_key(&filename, Path::new)
-                    .is_ok(),
-                "`{rs_file}` runs `MachineApplicable` diagnostics but is missing a `run-rustfix` annotation. \
-                Please either add `// run-rustfix` at the top of the file or add the file to \
-                `RUSTFIX_COVERAGE_KNOWN_EXCEPTIONS` in `tests/compile-test.rs`.",
-            );
+fn main() {
+    // Support being run by cargo nextest - https://nexte.st/book/custom-test-harnesses.html
+    if env::args().any(|arg| arg == "--list") {
+        if !env::args().any(|arg| arg == "--ignored") {
+            println!("compile_test: test");
         }
+
+        return;
+    }
+
+    set_var("CLIPPY_DISABLE_DOCS_LINKS", "true");
+    // The SPEEDTEST_* env variables can be used to check Clippy's performance on your PR. It runs the
+    // affected test 1000 times and gets the average.
+    if let Ok(speedtest) = std::env::var("SPEEDTEST") {
+        println!("----------- STARTING SPEEDTEST -----------");
+        let f = match speedtest.as_str() {
+            "ui" => run_ui as fn(),
+            "cargo" => run_ui_cargo as fn(),
+            "toml" => run_ui_toml as fn(),
+            "internal" => run_internal_tests as fn(),
+            "ui-cargo-toml-metadata" => ui_cargo_toml_metadata as fn(),
+
+            _ => panic!("unknown speedtest: {speedtest} || accepted speedtests are: [ui, cargo, toml, internal]"),
+        };
+
+        let iterations;
+        if let Ok(iterations_str) = std::env::var("SPEEDTEST_ITERATIONS") {
+            iterations = iterations_str
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("Couldn't parse `{iterations_str}`, please use a valid u64"));
+        } else {
+            iterations = 1000;
+        }
+
+        let mut sum = 0;
+        for _ in 0..iterations {
+            let start = std::time::Instant::now();
+            f();
+            sum += start.elapsed().as_millis();
+        }
+        println!(
+            "average {} time: {} millis.",
+            speedtest.to_uppercase(),
+            sum / u128::from(iterations)
+        );
+    } else {
+        run_ui();
+        run_ui_toml();
+        run_ui_cargo();
+        run_internal_tests();
+        ui_cargo_toml_metadata();
     }
 }
 
-#[test]
-fn rustfix_coverage_known_exceptions_accuracy() {
-    for filename in RUSTFIX_COVERAGE_KNOWN_EXCEPTIONS {
-        let rs_path = Path::new("tests/ui").join(filename);
-        assert!(
-            rs_path.exists(),
-            "`{}` does not exist",
-            rs_path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().display()
-        );
-        let fixed_path = rs_path.with_extension("fixed");
-        assert!(
-            !fixed_path.exists(),
-            "`{}` exists",
-            fixed_path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().display()
-        );
-    }
-}
-
-#[test]
 fn ui_cargo_toml_metadata() {
     let ui_cargo_path = Path::new("tests/ui-cargo");
     let cargo_common_metadata_path = ui_cargo_path.join("cargo_common_metadata");
@@ -483,29 +343,5 @@ fn ui_cargo_toml_metadata() {
             !publish || publish_exceptions.contains(&path.parent().unwrap().to_path_buf()),
             "{path:?} lacks `publish = false`"
         );
-    }
-}
-
-/// Restores an env var on drop
-#[must_use]
-struct VarGuard {
-    key: &'static str,
-    value: Option<OsString>,
-}
-
-impl VarGuard {
-    fn set(key: &'static str, val: impl AsRef<OsStr>) -> Self {
-        let value = var_os(key);
-        set_var(key, val);
-        Self { key, value }
-    }
-}
-
-impl Drop for VarGuard {
-    fn drop(&mut self) {
-        match self.value.as_deref() {
-            None => remove_var(self.key),
-            Some(value) => set_var(self.key, value),
-        }
     }
 }

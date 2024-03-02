@@ -10,6 +10,8 @@ use rustc_infer::infer::RegionVariableOrigin;
 use rustc_infer::infer::{InferCtxt, RegionResolutionError, SubregionOrigin, TyCtxtInferExt as _};
 use rustc_infer::traits::ObligationCause;
 use rustc_middle::ty::error::TypeError;
+use rustc_middle::ty::RePlaceholder;
+use rustc_middle::ty::Region;
 use rustc_middle::ty::RegionVid;
 use rustc_middle::ty::UniverseIndex;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable};
@@ -128,7 +130,7 @@ impl<'tcx> ToUniverseInfo<'tcx>
     }
 }
 
-impl<'tcx, F, G> ToUniverseInfo<'tcx> for Canonical<'tcx, type_op::custom::CustomTypeOp<F, G>> {
+impl<'tcx, F> ToUniverseInfo<'tcx> for Canonical<'tcx, type_op::custom::CustomTypeOp<F>> {
     fn to_universe_info(self, _base_universe: ty::UniverseIndex) -> UniverseInfo<'tcx> {
         // We can't rerun custom type ops.
         UniverseInfo::other()
@@ -180,29 +182,32 @@ trait TypeOpInfo<'tcx> {
             return;
         };
 
-        let placeholder_region = tcx.mk_re_placeholder(ty::Placeholder {
-            name: placeholder.name,
-            universe: adjusted_universe.into(),
-        });
+        let placeholder_region = ty::Region::new_placeholder(
+            tcx,
+            ty::Placeholder { universe: adjusted_universe.into(), bound: placeholder.bound },
+        );
 
-        let error_region =
-            if let RegionElement::PlaceholderRegion(error_placeholder) = error_element {
-                let adjusted_universe =
-                    error_placeholder.universe.as_u32().checked_sub(base_universe.as_u32());
-                adjusted_universe.map(|adjusted| {
-                    tcx.mk_re_placeholder(ty::Placeholder {
-                        name: error_placeholder.name,
-                        universe: adjusted.into(),
-                    })
-                })
-            } else {
-                None
-            };
+        let error_region = if let RegionElement::PlaceholderRegion(error_placeholder) =
+            error_element
+        {
+            let adjusted_universe =
+                error_placeholder.universe.as_u32().checked_sub(base_universe.as_u32());
+            adjusted_universe.map(|adjusted| {
+                ty::Region::new_placeholder(
+                    tcx,
+                    ty::Placeholder { universe: adjusted.into(), bound: error_placeholder.bound },
+                )
+            })
+        } else {
+            None
+        };
 
         debug!(?placeholder_region);
 
         let span = cause.span;
         let nice_error = self.nice_error(mbcx, cause, placeholder_region, error_region);
+
+        debug!(?nice_error);
 
         if let Some(nice_error) = nice_error {
             mbcx.buffer_error(nice_error);
@@ -380,7 +385,7 @@ fn try_extract_error_from_fulfill_cx<'tcx>(
     error_region: Option<ty::Region<'tcx>>,
 ) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
     // We generally shouldn't have errors here because the query was
-    // already run, but there's no point using `delay_span_bug`
+    // already run, but there's no point using `span_delayed_bug`
     // when we're going to emit an error here anyway.
     let _errors = ocx.select_all_or_error();
     let region_constraints = ocx.infcx.with_region_constraints(|r| r.clone());
@@ -390,7 +395,7 @@ fn try_extract_error_from_fulfill_cx<'tcx>(
         error_region,
         &region_constraints,
         |vid| ocx.infcx.region_var_origin(vid),
-        |vid| ocx.infcx.universe_of_region(ocx.infcx.tcx.mk_re_var(vid)),
+        |vid| ocx.infcx.universe_of_region(ty::Region::new_var(ocx.infcx.tcx, vid)),
     )
 }
 
@@ -403,19 +408,41 @@ fn try_extract_error_from_region_constraints<'tcx>(
     mut region_var_origin: impl FnMut(RegionVid) -> RegionVariableOrigin,
     mut universe_of_region: impl FnMut(RegionVid) -> UniverseIndex,
 ) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
-    let (sub_region, cause) =
-        region_constraints.constraints.iter().find_map(|(constraint, cause)| {
-            match *constraint {
-                Constraint::RegSubReg(sub, sup) if sup == placeholder_region && sup != sub => {
-                    Some((sub, cause.clone()))
-                }
-                // FIXME: Should this check the universe of the var?
-                Constraint::VarSubReg(vid, sup) if sup == placeholder_region => {
-                    Some((infcx.tcx.mk_re_var(vid), cause.clone()))
-                }
-                _ => None,
+    let matches =
+        |a_region: Region<'tcx>, b_region: Region<'tcx>| match (a_region.kind(), b_region.kind()) {
+            (RePlaceholder(a_p), RePlaceholder(b_p)) => a_p.bound == b_p.bound,
+            _ => a_region == b_region,
+        };
+    let check = |constraint: &Constraint<'tcx>, cause: &SubregionOrigin<'tcx>, exact| {
+        match *constraint {
+            Constraint::RegSubReg(sub, sup)
+                if ((exact && sup == placeholder_region)
+                    || (!exact && matches(sup, placeholder_region)))
+                    && sup != sub =>
+            {
+                Some((sub, cause.clone()))
             }
-        })?;
+            // FIXME: Should this check the universe of the var?
+            Constraint::VarSubReg(vid, sup)
+                if ((exact && sup == placeholder_region)
+                    || (!exact && matches(sup, placeholder_region))) =>
+            {
+                Some((ty::Region::new_var(infcx.tcx, vid), cause.clone()))
+            }
+            _ => None,
+        }
+    };
+    let mut info = region_constraints
+        .constraints
+        .iter()
+        .find_map(|(constraint, cause)| check(constraint, cause, true));
+    if info.is_none() {
+        info = region_constraints
+            .constraints
+            .iter()
+            .find_map(|(constraint, cause)| check(constraint, cause, false));
+    }
+    let (sub_region, cause) = info?;
 
     debug!(?sub_region, "cause = {:#?}", cause);
     let error = match (error_region, *sub_region) {

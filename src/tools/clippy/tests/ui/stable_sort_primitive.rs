@@ -1,5 +1,5 @@
-// run-rustfix
 #![warn(clippy::stable_sort_primitive)]
+#![allow(clippy::useless_vec)]
 
 fn main() {
     // positive examples

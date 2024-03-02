@@ -2,14 +2,12 @@ use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::source::{snippet, snippet_with_applicability, snippet_with_context};
 use clippy_utils::ty::is_type_diagnostic_item;
 use clippy_utils::{iter_input_pats, method_chain_args};
-use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{self, Ty};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
-use rustc_span::sym;
+use rustc_session::declare_lint_pass;
+use rustc_span::{sym, Span};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -21,7 +19,7 @@ declare_clippy_lint! {
     /// an if let statement
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # fn do_stuff() -> Option<String> { Some(String::new()) }
     /// # fn log_err_msg(foo: String) -> Option<String> { Some(foo) }
     /// # fn format_msg(foo: String) -> String { String::new() }
@@ -33,7 +31,7 @@ declare_clippy_lint! {
     ///
     /// The correct use would be:
     ///
-    /// ```rust
+    /// ```no_run
     /// # fn do_stuff() -> Option<String> { Some(String::new()) }
     /// # fn log_err_msg(foo: String) -> Option<String> { Some(foo) }
     /// # fn format_msg(foo: String) -> String { String::new() }
@@ -63,7 +61,7 @@ declare_clippy_lint! {
     /// an if let statement
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # fn do_stuff() -> Result<String, String> { Ok(String::new()) }
     /// # fn log_err_msg(foo: String) -> Result<String, String> { Ok(foo) }
     /// # fn format_msg(foo: String) -> String { String::new() }
@@ -75,7 +73,7 @@ declare_clippy_lint! {
     ///
     /// The correct use would be:
     ///
-    /// ```rust
+    /// ```no_run
     /// # fn do_stuff() -> Result<String, String> { Ok(String::new()) }
     /// # fn log_err_msg(foo: String) -> Result<String, String> { Ok(foo) }
     /// # fn format_msg(foo: String) -> String { String::new() }
@@ -104,7 +102,7 @@ fn is_unit_function(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> bool {
     let ty = cx.typeck_results().expr_ty(expr);
 
     if let ty::FnDef(id, _) = *ty.kind() {
-        if let Some(fn_type) = cx.tcx.fn_sig(id).subst_identity().no_bound_vars() {
+        if let Some(fn_type) = cx.tcx.fn_sig(id).instantiate_identity().no_bound_vars() {
             return is_unit_type(fn_type.output());
         }
     }
@@ -164,16 +162,14 @@ fn unit_closure<'tcx>(
     cx: &LateContext<'tcx>,
     expr: &hir::Expr<'_>,
 ) -> Option<(&'tcx hir::Param<'tcx>, &'tcx hir::Expr<'tcx>)> {
-    if_chain! {
-        if let hir::ExprKind::Closure(&hir::Closure { fn_decl, body, .. }) = expr.kind;
-        let body = cx.tcx.hir().body(body);
-        let body_expr = &body.value;
-        if fn_decl.inputs.len() == 1;
-        if is_unit_expression(cx, body_expr);
-        if let Some(binding) = iter_input_pats(fn_decl, body).next();
-        then {
-            return Some((binding, body_expr));
-        }
+    if let hir::ExprKind::Closure(&hir::Closure { fn_decl, body, .. }) = expr.kind
+        && let body = cx.tcx.hir().body(body)
+        && let body_expr = &body.value
+        && fn_decl.inputs.len() == 1
+        && is_unit_expression(cx, body_expr)
+        && let Some(binding) = iter_input_pats(fn_decl, body).next()
+    {
+        return Some((binding, body_expr));
     }
     None
 }
@@ -226,7 +222,7 @@ fn lint_map_unit_fn(
         );
 
         span_lint_and_then(cx, lint, expr.span, &msg, |diag| {
-            diag.span_suggestion(stmt.span, "try this", suggestion, applicability);
+            diag.span_suggestion(stmt.span, "try", suggestion, applicability);
         });
     } else if let Some((binding, closure_expr)) = unit_closure(cx, fn_arg) {
         let msg = suggestion_msg("closure", map_type);
@@ -241,7 +237,7 @@ fn lint_map_unit_fn(
                     snippet_with_applicability(cx, var_arg.span, "_", &mut applicability),
                     snippet_with_context(cx, reduced_expr_span, var_arg.span.ctxt(), "_", &mut applicability).0,
                 );
-                diag.span_suggestion(stmt.span, "try this", suggestion, applicability);
+                diag.span_suggestion(stmt.span, "try", suggestion, applicability);
             } else {
                 let suggestion = format!(
                     "if let {0}({1}) = {2} {{ ... }}",
@@ -249,7 +245,7 @@ fn lint_map_unit_fn(
                     snippet(cx, binding.pat.span, "_"),
                     snippet(cx, var_arg.span, "_"),
                 );
-                diag.span_suggestion(stmt.span, "try this", suggestion, Applicability::HasPlaceholders);
+                diag.span_suggestion(stmt.span, "try", suggestion, Applicability::HasPlaceholders);
             }
         });
     }

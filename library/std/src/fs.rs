@@ -8,13 +8,15 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(all(test, not(any(target_os = "emscripten", target_env = "sgx"))))]
+#[cfg(all(test, not(any(target_os = "emscripten", target_env = "sgx", target_os = "xous"))))]
 mod tests;
 
 use crate::ffi::OsString;
 use crate::fmt;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write};
 use crate::path::{Path, PathBuf};
+use crate::sealed::Sealed;
+use crate::sync::Arc;
 use crate::sys::fs as fs_imp;
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 use crate::time::SystemTime;
@@ -182,11 +184,12 @@ pub struct DirEntry(fs_imp::DirEntry);
 /// ```
 #[derive(Clone, Debug)]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "FsOpenOptions")]
 pub struct OpenOptions(fs_imp::OpenOptions);
 
 /// Representation of the various timestamps on a file.
 #[derive(Copy, Clone, Debug, Default)]
-#[unstable(feature = "file_set_times", issue = "98245")]
+#[stable(feature = "file_set_times", since = "1.75.0")]
 pub struct FileTimes(fs_imp::FileTimes);
 
 /// Representation of the various permissions on a file.
@@ -199,6 +202,7 @@ pub struct FileTimes(fs_imp::FileTimes);
 /// [`PermissionsExt`]: crate::os::unix::fs::PermissionsExt
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "FsPermissions")]
 pub struct Permissions(fs_imp::FilePermissions);
 
 /// A structure representing a type of file with accessors for each file type.
@@ -231,8 +235,8 @@ pub struct DirBuilder {
 /// This function will return an error if `path` does not already exist.
 /// Other errors may also be returned according to [`OpenOptions::open`].
 ///
-/// It will also return an error if it encounters while reading an error
-/// of a kind other than [`io::ErrorKind::Interrupted`].
+/// While reading from the file, this function handles [`io::ErrorKind::Interrupted`]
+/// with automatic retries. See [io::Read] documentation for details.
 ///
 /// # Examples
 ///
@@ -249,9 +253,9 @@ pub struct DirBuilder {
 pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
     fn inner(path: &Path) -> io::Result<Vec<u8>> {
         let mut file = File::open(path)?;
-        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let mut bytes = Vec::with_capacity(size as usize);
-        io::default_read_to_end(&mut file, &mut bytes)?;
+        let size = file.metadata().map(|m| m.len() as usize).ok();
+        let mut bytes = Vec::with_capacity(size.unwrap_or(0));
+        io::default_read_to_end(&mut file, &mut bytes, size)?;
         Ok(bytes)
     }
     inner(path.as_ref())
@@ -269,9 +273,11 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
 /// This function will return an error if `path` does not already exist.
 /// Other errors may also be returned according to [`OpenOptions::open`].
 ///
-/// It will also return an error if it encounters while reading an error
-/// of a kind other than [`io::ErrorKind::Interrupted`],
-/// or if the contents of the file are not valid UTF-8.
+/// If the contents of the file are not valid UTF-8, then an error will also be
+/// returned.
+///
+/// While reading from the file, this function handles [`io::ErrorKind::Interrupted`]
+/// with automatic retries. See [io::Read] documentation for details.
 ///
 /// # Examples
 ///
@@ -289,9 +295,9 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
 pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
     fn inner(path: &Path) -> io::Result<String> {
         let mut file = File::open(path)?;
-        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let mut string = String::with_capacity(size as usize);
-        io::default_read_to_string(&mut file, &mut string)?;
+        let size = file.metadata().map(|m| m.len() as usize).ok();
+        let mut string = String::with_capacity(size.unwrap_or(0));
+        io::default_read_to_string(&mut file, &mut string, size)?;
         Ok(string)
     }
     inner(path.as_ref())
@@ -670,8 +676,6 @@ impl File {
     /// # Examples
     ///
     /// ```no_run
-    /// #![feature(file_set_times)]
-    ///
     /// fn main() -> std::io::Result<()> {
     ///     use std::fs::{self, File, FileTimes};
     ///
@@ -684,7 +688,7 @@ impl File {
     ///     Ok(())
     /// }
     /// ```
-    #[unstable(feature = "file_set_times", issue = "98245")]
+    #[stable(feature = "file_set_times", since = "1.75.0")]
     #[doc(alias = "futimens")]
     #[doc(alias = "futimes")]
     #[doc(alias = "SetFileTime")]
@@ -695,7 +699,7 @@ impl File {
     /// Changes the modification time of the underlying file.
     ///
     /// This is an alias for `set_times(FileTimes::new().set_modified(time))`.
-    #[unstable(feature = "file_set_times", issue = "98245")]
+    #[stable(feature = "file_set_times", since = "1.75.0")]
     #[inline]
     pub fn set_modified(&self, time: SystemTime) -> io::Result<()> {
         self.set_times(FileTimes::new().set_modified(time))
@@ -709,6 +713,7 @@ impl File {
 // `AsRawHandle`/`IntoRawHandle`/`FromRawHandle` on Windows.
 
 impl AsInner<fs_imp::File> for File {
+    #[inline]
     fn as_inner(&self) -> &fs_imp::File {
         &self.inner
     }
@@ -732,82 +737,29 @@ impl fmt::Debug for File {
 }
 
 /// Indicates how much extra capacity is needed to read the rest of the file.
-fn buffer_capacity_required(mut file: &File) -> usize {
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let pos = file.stream_position().unwrap_or(0);
+fn buffer_capacity_required(mut file: &File) -> Option<usize> {
+    let size = file.metadata().map(|m| m.len()).ok()?;
+    let pos = file.stream_position().ok()?;
     // Don't worry about `usize` overflow because reading will fail regardless
     // in that case.
-    size.saturating_sub(pos) as usize
+    Some(size.saturating_sub(pos) as usize)
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl Read for File {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.read(buf)
-    }
-
-    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
-        self.inner.read_vectored(bufs)
-    }
-
-    fn read_buf(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
-        self.inner.read_buf(cursor)
-    }
-
-    #[inline]
-    fn is_read_vectored(&self) -> bool {
-        self.inner.is_read_vectored()
-    }
-
-    // Reserves space in the buffer based on the file size when available.
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        buf.reserve(buffer_capacity_required(self));
-        io::default_read_to_end(self, buf)
-    }
-
-    // Reserves space in the buffer based on the file size when available.
-    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        buf.reserve(buffer_capacity_required(self));
-        io::default_read_to_string(self, buf)
-    }
-}
-#[stable(feature = "rust1", since = "1.0.0")]
-impl Write for File {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
-    }
-
-    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        self.inner.write_vectored(bufs)
-    }
-
-    #[inline]
-    fn is_write_vectored(&self) -> bool {
-        self.inner.is_write_vectored()
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
-#[stable(feature = "rust1", since = "1.0.0")]
-impl Seek for File {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.inner.seek(pos)
-    }
-}
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Read for &File {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
 
-    fn read_buf(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
-        self.inner.read_buf(cursor)
-    }
-
+    #[inline]
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         self.inner.read_vectored(bufs)
+    }
+
+    #[inline]
+    fn read_buf(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        self.inner.read_buf(cursor)
     }
 
     #[inline]
@@ -817,14 +769,16 @@ impl Read for &File {
 
     // Reserves space in the buffer based on the file size when available.
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        buf.reserve(buffer_capacity_required(self));
-        io::default_read_to_end(self, buf)
+        let size = buffer_capacity_required(self);
+        buf.reserve(size.unwrap_or(0));
+        io::default_read_to_end(self, buf, size)
     }
 
     // Reserves space in the buffer based on the file size when available.
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        buf.reserve(buffer_capacity_required(self));
-        io::default_read_to_string(self, buf)
+        let size = buffer_capacity_required(self);
+        buf.reserve(size.unwrap_or(0));
+        io::default_read_to_string(self, buf, size)
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -842,6 +796,7 @@ impl Write for &File {
         self.inner.is_write_vectored()
     }
 
+    #[inline]
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
@@ -850,6 +805,98 @@ impl Write for &File {
 impl Seek for &File {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.inner.seek(pos)
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Read for File {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self).read(buf)
+    }
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        (&*self).read_vectored(bufs)
+    }
+    fn read_buf(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        (&*self).read_buf(cursor)
+    }
+    #[inline]
+    fn is_read_vectored(&self) -> bool {
+        (&&*self).is_read_vectored()
+    }
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        (&*self).read_to_end(buf)
+    }
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        (&*self).read_to_string(buf)
+    }
+}
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Write for File {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self).write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        (&*self).write_vectored(bufs)
+    }
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        (&&*self).is_write_vectored()
+    }
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self).flush()
+    }
+}
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Seek for File {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        (&*self).seek(pos)
+    }
+}
+
+#[stable(feature = "io_traits_arc", since = "1.73.0")]
+impl Read for Arc<File> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&**self).read(buf)
+    }
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        (&**self).read_vectored(bufs)
+    }
+    fn read_buf(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        (&**self).read_buf(cursor)
+    }
+    #[inline]
+    fn is_read_vectored(&self) -> bool {
+        (&**self).is_read_vectored()
+    }
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        (&**self).read_to_end(buf)
+    }
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        (&**self).read_to_string(buf)
+    }
+}
+#[stable(feature = "io_traits_arc", since = "1.73.0")]
+impl Write for Arc<File> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&**self).write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        (&**self).write_vectored(bufs)
+    }
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        (&**self).is_write_vectored()
+    }
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        (&**self).flush()
+    }
+}
+#[stable(feature = "io_traits_arc", since = "1.73.0")]
+impl Seek for Arc<File> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        (&**self).seek(pos)
     }
 }
 
@@ -1083,12 +1130,14 @@ impl OpenOptions {
 }
 
 impl AsInner<fs_imp::OpenOptions> for OpenOptions {
+    #[inline]
     fn as_inner(&self) -> &fs_imp::OpenOptions {
         &self.0
     }
 }
 
 impl AsInnerMut<fs_imp::OpenOptions> for OpenOptions {
+    #[inline]
     fn as_inner_mut(&mut self) -> &mut fs_imp::OpenOptions {
         &mut self.0
     }
@@ -1348,6 +1397,7 @@ impl fmt::Debug for Metadata {
 }
 
 impl AsInner<fs_imp::FileAttr> for Metadata {
+    #[inline]
     fn as_inner(&self) -> &fs_imp::FileAttr {
         &self.0
     }
@@ -1363,25 +1413,35 @@ impl FileTimes {
     /// Create a new `FileTimes` with no times set.
     ///
     /// Using the resulting `FileTimes` in [`File::set_times`] will not modify any timestamps.
-    #[unstable(feature = "file_set_times", issue = "98245")]
+    #[stable(feature = "file_set_times", since = "1.75.0")]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Set the last access time of a file.
-    #[unstable(feature = "file_set_times", issue = "98245")]
+    #[stable(feature = "file_set_times", since = "1.75.0")]
     pub fn set_accessed(mut self, t: SystemTime) -> Self {
         self.0.set_accessed(t.into_inner());
         self
     }
 
     /// Set the last modified time of a file.
-    #[unstable(feature = "file_set_times", issue = "98245")]
+    #[stable(feature = "file_set_times", since = "1.75.0")]
     pub fn set_modified(mut self, t: SystemTime) -> Self {
         self.0.set_modified(t.into_inner());
         self
     }
 }
+
+impl AsInnerMut<fs_imp::FileTimes> for FileTimes {
+    fn as_inner_mut(&mut self) -> &mut fs_imp::FileTimes {
+        &mut self.0
+    }
+}
+
+// For implementing OS extension traits in `std::os`
+#[stable(feature = "file_set_times", since = "1.75.0")]
+impl Sealed for FileTimes {}
 
 impl Permissions {
     /// Returns `true` if these permissions describe a readonly (unwritable) file.
@@ -1600,6 +1660,7 @@ impl FileType {
 }
 
 impl AsInner<fs_imp::FileType> for FileType {
+    #[inline]
     fn as_inner(&self) -> &fs_imp::FileType {
         &self.0
     }
@@ -1612,6 +1673,7 @@ impl FromInner<fs_imp::FilePermissions> for Permissions {
 }
 
 impl AsInner<fs_imp::FilePermissions> for Permissions {
+    #[inline]
     fn as_inner(&self) -> &fs_imp::FilePermissions {
         &self.0
     }
@@ -1734,8 +1796,14 @@ impl DirEntry {
         self.0.file_type().map(FileType)
     }
 
-    /// Returns the bare file name of this directory entry without any other
-    /// leading path component.
+    /// Returns the file name of this directory entry without any
+    /// leading path component(s).
+    ///
+    /// As an example,
+    /// the output of the function will result in "foo" for all the following paths:
+    /// - "./foo"
+    /// - "/the/foo"
+    /// - "../../foo"
     ///
     /// # Examples
     ///
@@ -1766,6 +1834,7 @@ impl fmt::Debug for DirEntry {
 }
 
 impl AsInner<fs_imp::DirEntry> for DirEntry {
+    #[inline]
     fn as_inner(&self) -> &fs_imp::DirEntry {
         &self.0
     }
@@ -1935,7 +2004,7 @@ pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> 
 /// On success, the total number of bytes copied is returned and it is equal to
 /// the length of the `to` file as reported by `metadata`.
 ///
-/// If you’re wanting to copy the contents of one file to another and you’re
+/// If you want to copy the contents of one file to another and you’re
 /// working with [`File`]s, see the [`io::copy()`] function.
 ///
 /// # Platform-specific behavior
@@ -2172,6 +2241,7 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 /// ```
 #[doc(alias = "mkdir")]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "fs_create_dir")]
 pub fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     DirBuilder::new().create(path.as_ref())
 }
@@ -2279,6 +2349,11 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// # Errors
 ///
 /// See [`fs::remove_file`] and [`fs::remove_dir`].
+///
+/// `remove_dir_all` will fail if `remove_dir` or `remove_file` fail on any constituent paths, including the root path.
+/// As a result, the directory you are deleting must exist, meaning that this function is not idempotent.
+///
+/// Consider ignoring the error if validating the removal is not required for your use case.
 ///
 /// [`fs::remove_file`]: remove_file
 /// [`fs::remove_dir`]: remove_dir
@@ -2501,6 +2576,7 @@ impl DirBuilder {
 }
 
 impl AsInnerMut<fs_imp::DirBuilder> for DirBuilder {
+    #[inline]
     fn as_inner_mut(&mut self) -> &mut fs_imp::DirBuilder {
         &mut self.inner
     }
@@ -2511,9 +2587,10 @@ impl AsInnerMut<fs_imp::DirBuilder> for DirBuilder {
 /// This function will traverse symbolic links to query information about the
 /// destination file. In case of broken symbolic links this will return `Ok(false)`.
 ///
-/// As opposed to the [`Path::exists`] method, this one doesn't silently ignore errors
-/// unrelated to the path not existing. (E.g. it will return `Err(_)` in case of permission
-/// denied on some of the parent directories.)
+/// As opposed to the [`Path::exists`] method, this will only return `Ok(true)` or `Ok(false)`
+/// if the path was _verified_ to exist or not exist. If its existence can neither be confirmed
+/// nor denied, an `Err(_)` will be propagated instead. This can be the case if e.g. listing
+/// permission is denied on one of the parent directories.
 ///
 /// Note that while this avoids some pitfalls of the `exists()` method, it still can not
 /// prevent time-of-check to time-of-use (TOCTOU) bugs. You should only use it in scenarios

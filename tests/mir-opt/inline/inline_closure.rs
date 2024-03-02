@@ -9,5 +9,8 @@ fn main() {
 // EMIT_MIR inline_closure.foo.Inline.after.mir
 fn foo<T: Copy>(_t: T, q: i32) -> i32 {
     let x = |_t, _q| _t;
+
+    // CHECK-LABEL: fn foo(
+    // CHECK: (inlined foo::<T>::{closure#0})
     x(q, q)
 }

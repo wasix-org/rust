@@ -6,11 +6,11 @@ LL |     2_usize + (loop {});
    |
    = help: the trait `Add<()>` is not implemented for `usize`
    = help: the following other types implement trait `Add<Rhs>`:
+             <usize as Add>
+             <usize as Add<&usize>>
              <&'a usize as Add<usize>>
              <&usize as Add<&usize>>
-             <usize as Add<&usize>>
-             <usize as Add>
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0277`.

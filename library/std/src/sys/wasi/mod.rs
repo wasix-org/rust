@@ -29,11 +29,8 @@ pub mod fs;
 #[path = "../wasm/atomics/futex.rs"]
 pub mod futex;
 pub mod io;
-#[path = "../unsupported/locks/mod.rs"]
-pub mod locks;
+
 pub mod net;
-#[path = "../unsupported/once.rs"]
-pub mod once;
 pub mod os;
 #[path = "../unix/os_str.rs"]
 pub mod os_str;
@@ -50,38 +47,133 @@ pub mod thread_local_dtor;
 pub mod thread_local_key;
 pub mod time;
 
+cfg_if::cfg_if! {
+    if #[cfg(target_feature = "atomics")] {
+        #[path = "../unix/locks"]
+        pub mod locks {
+            #![allow(unsafe_op_in_unsafe_fn)]
+            mod futex_condvar;
+            mod futex_mutex;
+            mod futex_rwlock;
+            pub(crate) use futex_condvar::Condvar;
+            pub(crate) use futex_mutex::Mutex;
+            pub(crate) use futex_rwlock::RwLock;
+        }
+    } else {
+        #[path = "../unsupported/locks/mod.rs"]
+        pub mod locks;
+        #[path = "../unsupported/once.rs"]
+        pub mod once;
+        #[path = "../unsupported/thread_parking.rs"]
+        pub mod thread_parking;
+    }
+}
+
 #[path = "../unsupported/common.rs"]
 #[deny(unsafe_op_in_unsafe_fn)]
 #[allow(unused)]
 mod common;
 pub use common::*;
 
+#[inline]
+pub fn is_interrupted(errno: i32) -> bool {
+    errno == wasi::ERRNO_INTR.raw().into()
+}
+
 pub fn decode_error_kind(errno: i32) -> std_io::ErrorKind {
-    use std_io::ErrorKind::*;
-    if errno > u16::MAX as i32 || errno < 0 {
-        return Uncategorized;
+    use std_io::ErrorKind;
+
+    let Ok(errno) = u16::try_from(errno) else {
+        return ErrorKind::Uncategorized;
+    };
+
+    macro_rules! match_errno {
+        ($($($errno:ident)|+ => $errkind:ident),*, _ => $wildcard:ident $(,)?) => {
+            match errno {
+                $(e if $(e == ::wasi::$errno.raw())||+ => ErrorKind::$errkind),*,
+                _ => ErrorKind::$wildcard,
+            }
+        };
     }
 
-    match errno {
-        e if e == wasi::ERRNO_CONNREFUSED.raw().into() => ConnectionRefused,
-        e if e == wasi::ERRNO_CONNRESET.raw().into() => ConnectionReset,
-        e if e == wasi::ERRNO_PERM.raw().into() || e == wasi::ERRNO_ACCES.raw().into() => {
-            PermissionDenied
-        }
-        e if e == wasi::ERRNO_PIPE.raw().into() => BrokenPipe,
-        e if e == wasi::ERRNO_NOTCONN.raw().into() => NotConnected,
-        e if e == wasi::ERRNO_CONNABORTED.raw().into() => ConnectionAborted,
-        e if e == wasi::ERRNO_ADDRNOTAVAIL.raw().into() => AddrNotAvailable,
-        e if e == wasi::ERRNO_ADDRINUSE.raw().into() => AddrInUse,
-        e if e == wasi::ERRNO_NOENT.raw().into() => NotFound,
-        e if e == wasi::ERRNO_INTR.raw().into() => Interrupted,
-        e if e == wasi::ERRNO_INVAL.raw().into() => InvalidInput,
-        e if e == wasi::ERRNO_TIMEDOUT.raw().into() => TimedOut,
-        e if e == wasi::ERRNO_EXIST.raw().into() => AlreadyExists,
-        e if e == wasi::ERRNO_AGAIN.raw().into() => WouldBlock,
-        e if e == wasi::ERRNO_NOSYS.raw().into() => Unsupported,
-        e if e == wasi::ERRNO_NOMEM.raw().into() => OutOfMemory,
-        _ => Uncategorized,
+    match_errno! {
+        ERRNO_2BIG           => ArgumentListTooLong,
+        ERRNO_ACCES          => PermissionDenied,
+        ERRNO_ADDRINUSE      => AddrInUse,
+        ERRNO_ADDRNOTAVAIL   => AddrNotAvailable,
+        ERRNO_AFNOSUPPORT    => Unsupported,
+        ERRNO_AGAIN          => WouldBlock,
+        //    ALREADY        => "connection already in progress",
+        //    BADF           => "bad file descriptor",
+        //    BADMSG         => "bad message",
+        ERRNO_BUSY           => ResourceBusy,
+        //    CANCELED       => "operation canceled",
+        //    CHILD          => "no child processes",
+        ERRNO_CONNABORTED    => ConnectionAborted,
+        ERRNO_CONNREFUSED    => ConnectionRefused,
+        ERRNO_CONNRESET      => ConnectionReset,
+        ERRNO_DEADLK         => Deadlock,
+        //    DESTADDRREQ    => "destination address required",
+        ERRNO_DOM            => InvalidInput,
+        //    DQUOT          => /* reserved */,
+        ERRNO_EXIST          => AlreadyExists,
+        //    FAULT          => "bad address",
+        ERRNO_FBIG           => FileTooLarge,
+        ERRNO_HOSTUNREACH    => HostUnreachable,
+        //    IDRM           => "identifier removed",
+        //    ILSEQ          => "illegal byte sequence",
+        //    INPROGRESS     => "operation in progress",
+        ERRNO_INTR           => Interrupted,
+        ERRNO_INVAL          => InvalidInput,
+        ERRNO_IO             => Uncategorized,
+        //    ISCONN         => "socket is connected",
+        ERRNO_ISDIR          => IsADirectory,
+        ERRNO_LOOP           => FilesystemLoop,
+        //    MFILE          => "file descriptor value too large",
+        ERRNO_MLINK          => TooManyLinks,
+        //    MSGSIZE        => "message too large",
+        //    MULTIHOP       => /* reserved */,
+        ERRNO_NAMETOOLONG    => InvalidFilename,
+        ERRNO_NETDOWN        => NetworkDown,
+        //    NETRESET       => "connection aborted by network",
+        ERRNO_NETUNREACH     => NetworkUnreachable,
+        //    NFILE          => "too many files open in system",
+        //    NOBUFS         => "no buffer space available",
+        ERRNO_NODEV          => NotFound,
+        ERRNO_NOENT          => NotFound,
+        //    NOEXEC         => "executable file format error",
+        //    NOLCK          => "no locks available",
+        //    NOLINK         => /* reserved */,
+        ERRNO_NOMEM          => OutOfMemory,
+        //    NOMSG          => "no message of the desired type",
+        //    NOPROTOOPT     => "protocol not available",
+        ERRNO_NOSPC          => StorageFull,
+        ERRNO_NOSYS          => Unsupported,
+        ERRNO_NOTCONN        => NotConnected,
+        ERRNO_NOTDIR         => NotADirectory,
+        ERRNO_NOTEMPTY       => DirectoryNotEmpty,
+        //    NOTRECOVERABLE => "state not recoverable",
+        //    NOTSOCK        => "not a socket",
+        ERRNO_NOTSUP         => Unsupported,
+        //    NOTTY          => "inappropriate I/O control operation",
+        ERRNO_NXIO           => NotFound,
+        //    OVERFLOW       => "value too large to be stored in data type",
+        //    OWNERDEAD      => "previous owner died",
+        ERRNO_PERM           => PermissionDenied,
+        ERRNO_PIPE           => BrokenPipe,
+        //    PROTO          => "protocol error",
+        ERRNO_PROTONOSUPPORT => Unsupported,
+        //    PROTOTYPE      => "protocol wrong type for socket",
+        //    RANGE          => "result too large",
+        ERRNO_ROFS           => ReadOnlyFilesystem,
+        ERRNO_SPIPE          => NotSeekable,
+        ERRNO_SRCH           => NotFound,
+        //    STALE          => /* reserved */,
+        ERRNO_TIMEDOUT       => TimedOut,
+        ERRNO_TXTBSY         => ResourceBusy,
+        ERRNO_XDEV           => CrossesDevices,
+        ERRNO_NOTCAPABLE     => PermissionDenied,
+        _                    => Uncategorized,
     }
 }
 

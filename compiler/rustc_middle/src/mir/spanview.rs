@@ -1,9 +1,7 @@
-use rustc_hir::def_id::DefId;
 use rustc_middle::hir;
 use rustc_middle::mir::*;
-use rustc_middle::ty::TyCtxt;
 use rustc_session::config::MirSpanview;
-use rustc_span::{BytePos, Pos, Span, SyntaxContext};
+use rustc_span::{BytePos, Pos};
 
 use std::cmp;
 use std::io::{self, Write};
@@ -15,8 +13,9 @@ const ANNOTATION_LEFT_BRACKET: char = '\u{298a}'; // Unicode `Z NOTATION RIGHT B
 const ANNOTATION_RIGHT_BRACKET: char = '\u{2989}'; // Unicode `Z NOTATION LEFT BINDING BRACKET`
 const NEW_LINE_SPAN: &str = "</span>\n<span class=\"line\">";
 const HEADER: &str = r#"<!DOCTYPE html>
-<html>
-<head>"#;
+<html lang="en">
+<head>
+<meta charset="utf-8">"#;
 const START_BODY: &str = r#"</head>
 <body>"#;
 const FOOTER: &str = r#"</body>
@@ -158,10 +157,10 @@ where
         indent_to_initial_start_col,
         source_map.span_to_snippet(spanview_span).expect("function should have printable source")
     );
-    writeln!(w, "{}", HEADER)?;
-    writeln!(w, "<title>{}</title>", title)?;
-    writeln!(w, "{}", STYLE_SECTION)?;
-    writeln!(w, "{}", START_BODY)?;
+    writeln!(w, "{HEADER}")?;
+    writeln!(w, "<title>{title}</title>")?;
+    writeln!(w, "{STYLE_SECTION}")?;
+    writeln!(w, "{START_BODY}")?;
     write!(
         w,
         r#"<div class="code" style="counter-reset: line {}"><span class="line">{}"#,
@@ -225,7 +224,7 @@ where
         write_coverage_gap(tcx, from_pos, end_pos, w)?;
     }
     writeln!(w, r#"</span></div>"#)?;
-    writeln!(w, "{}", FOOTER)?;
+    writeln!(w, "{FOOTER}")?;
     Ok(())
 }
 
@@ -235,45 +234,6 @@ pub fn source_range_no_file(tcx: TyCtxt<'_>, span: Span) -> String {
     let start = source_map.lookup_char_pos(span.lo());
     let end = source_map.lookup_char_pos(span.hi());
     format!("{}:{}-{}:{}", start.line, start.col.to_usize() + 1, end.line, end.col.to_usize() + 1)
-}
-
-pub fn statement_kind_name(statement: &Statement<'_>) -> &'static str {
-    use StatementKind::*;
-    match statement.kind {
-        Assign(..) => "Assign",
-        FakeRead(..) => "FakeRead",
-        SetDiscriminant { .. } => "SetDiscriminant",
-        Deinit(..) => "Deinit",
-        StorageLive(..) => "StorageLive",
-        StorageDead(..) => "StorageDead",
-        Retag(..) => "Retag",
-        AscribeUserType(..) => "AscribeUserType",
-        Coverage(..) => "Coverage",
-        Intrinsic(..) => "Intrinsic",
-        ConstEvalCounter => "ConstEvalCounter",
-        Nop => "Nop",
-    }
-}
-
-pub fn terminator_kind_name(term: &Terminator<'_>) -> &'static str {
-    use TerminatorKind::*;
-    match term.kind {
-        Goto { .. } => "Goto",
-        SwitchInt { .. } => "SwitchInt",
-        Resume => "Resume",
-        Abort => "Abort",
-        Return => "Return",
-        Unreachable => "Unreachable",
-        Drop { .. } => "Drop",
-        DropAndReplace { .. } => "DropAndReplace",
-        Call { .. } => "Call",
-        Assert { .. } => "Assert",
-        Yield { .. } => "Yield",
-        GeneratorDrop => "GeneratorDrop",
-        FalseEdge { .. } => "FalseEdge",
-        FalseUnwind { .. } => "FalseUnwind",
-        InlineAsm { .. } => "InlineAsm",
-    }
 }
 
 fn statement_span_viewable<'tcx>(
@@ -303,7 +263,7 @@ fn terminator_span_viewable<'tcx>(
     if !body_span.contains(span) {
         return None;
     }
-    let id = format!("{}:{}", bb.index(), terminator_kind_name(term));
+    let id = format!("{}:{}", bb.index(), term.kind.name());
     let tooltip = tooltip(tcx, &id, span, vec![], &data.terminator);
     Some(SpanViewable { bb, span, id, tooltip })
 }
@@ -327,7 +287,7 @@ fn compute_block_span(data: &BasicBlockData<'_>, body_span: Span) -> Span {
     let mut span = data.terminator().source_info.span;
     for statement_span in data.statements.iter().map(|statement| statement.source_info.span) {
         // Only combine Spans from the root context, and within the function's body_span.
-        if statement_span.ctxt() == SyntaxContext::root() && body_span.contains(statement_span) {
+        if statement_span.ctxt().is_root() && body_span.contains(statement_span) {
             span = span.to(statement_span);
         }
     }
@@ -407,7 +367,7 @@ where
                 debug_indent, span, viewable.span
             );
             from_pos = span.hi();
-            make_html_snippet(tcx, span, Some(&viewable))
+            make_html_snippet(tcx, span, Some(viewable))
         } else {
             None
         };
@@ -477,7 +437,7 @@ where
             tcx,
             from_pos,
             to_pos,
-            &remaining_viewables,
+            remaining_viewables,
             subalt,
             layer + 1,
             w,
@@ -510,7 +470,7 @@ where
             "{}After overlaps, writing (end span?) {:?} of viewable.span {:?}",
             debug_indent, span, viewable.span
         );
-        if let Some(ref html_snippet) = make_html_snippet(tcx, span, Some(&viewable)) {
+        if let Some(ref html_snippet) = make_html_snippet(tcx, span, Some(viewable)) {
             from_pos = span.hi();
             write_span(html_snippet, &viewable.tooltip, alt, layer, w)?;
         }
@@ -545,11 +505,7 @@ fn write_span<W>(
 where
     W: Write,
 {
-    let maybe_alt_class = if layer > 0 {
-        if alt { " odd" } else { " even" }
-    } else {
-        ""
-    };
+    let maybe_alt_class = if layer > 0 { if alt { " odd" } else { " even" } } else { "" };
     let maybe_title_attr = if !tooltip.is_empty() {
         format!(" title=\"{}\"", escape_attr(tooltip))
     } else {
@@ -560,17 +516,16 @@ where
     }
     for (i, line) in html_snippet.lines().enumerate() {
         if i > 0 {
-            write!(w, "{}", NEW_LINE_SPAN)?;
+            write!(w, "{NEW_LINE_SPAN}")?;
         }
         write!(
             w,
-            r#"<span class="code{}" style="--layer: {}"{}>{}</span>"#,
-            maybe_alt_class, layer, maybe_title_attr, line
+            r#"<span class="code{maybe_alt_class}" style="--layer: {layer}"{maybe_title_attr}>{line}</span>"#
         )?;
     }
     // Check for and translate trailing newlines, because `str::lines()` ignores them
     if html_snippet.ends_with('\n') {
-        write!(w, "{}", NEW_LINE_SPAN)?;
+        write!(w, "{NEW_LINE_SPAN}")?;
     }
     if layer == 1 {
         write!(w, "</span>")?;
@@ -631,7 +586,7 @@ fn tooltip<'tcx>(
             "\n{}{}: {}: {:?}",
             TOOLTIP_INDENT,
             source_range,
-            statement_kind_name(&statement),
+            statement.kind.name(),
             statement
         ));
     }
@@ -641,7 +596,7 @@ fn tooltip<'tcx>(
             "\n{}{}: {}: {:?}",
             TOOLTIP_INDENT,
             source_range,
-            terminator_kind_name(term),
+            term.kind.name(),
             term.kind
         ));
     }

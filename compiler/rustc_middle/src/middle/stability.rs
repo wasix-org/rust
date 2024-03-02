@@ -5,7 +5,9 @@ pub use self::StabilityLevel::*;
 
 use crate::ty::{self, TyCtxt};
 use rustc_ast::NodeId;
-use rustc_attr::{self as attr, ConstStability, DefaultBodyStability, Deprecation, Stability};
+use rustc_attr::{
+    self as attr, ConstStability, DefaultBodyStability, DeprecatedSince, Deprecation, Stability,
+};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{Applicability, Diagnostic};
 use rustc_feature::GateIssue;
@@ -104,61 +106,23 @@ pub fn report_unstable(
     suggestion: Option<(Span, String, String, Applicability)>,
     is_soft: bool,
     span: Span,
-    soft_handler: impl FnOnce(&'static Lint, Span, &str),
+    soft_handler: impl FnOnce(&'static Lint, Span, String),
 ) {
     let msg = match reason {
-        Some(r) => format!("use of unstable library feature '{}': {}", feature, r),
+        Some(r) => format!("use of unstable library feature '{feature}': {r}"),
         None => format!("use of unstable library feature '{}'", &feature),
     };
 
     if is_soft {
-        soft_handler(SOFT_UNSTABLE, span, &msg)
+        soft_handler(SOFT_UNSTABLE, span, msg)
     } else {
         let mut err =
-            feature_err_issue(&sess.parse_sess, feature, span, GateIssue::Library(issue), &msg);
-        if let Some((inner_types, ref msg, sugg, applicability)) = suggestion {
+            feature_err_issue(&sess.parse_sess, feature, span, GateIssue::Library(issue), msg);
+        if let Some((inner_types, msg, sugg, applicability)) = suggestion {
             err.span_suggestion(inner_types, msg, sugg, applicability);
         }
         err.emit();
     }
-}
-
-/// Checks whether an item marked with `deprecated(since="X")` is currently
-/// deprecated (i.e., whether X is not greater than the current rustc version).
-pub fn deprecation_in_effect(depr: &Deprecation) -> bool {
-    let is_since_rustc_version = depr.is_since_rustc_version;
-    let since = depr.since.as_ref().map(Symbol::as_str);
-
-    fn parse_version(ver: &str) -> Vec<u32> {
-        // We ignore non-integer components of the version (e.g., "nightly").
-        ver.split(|c| c == '.' || c == '-').flat_map(|s| s.parse()).collect()
-    }
-
-    if !is_since_rustc_version {
-        // The `since` field doesn't have semantic purpose without `#![staged_api]`.
-        return true;
-    }
-
-    if let Some(since) = since {
-        if since == "TBD" {
-            return false;
-        }
-
-        if let Some(rustc) = option_env!("CFG_RELEASE") {
-            let since: Vec<u32> = parse_version(&since);
-            let rustc: Vec<u32> = parse_version(rustc);
-            // We simply treat invalid `since` attributes as relating to a previous
-            // Rust version, thus always displaying the warning.
-            if since.len() != 3 {
-                return true;
-            }
-            return since <= rustc;
-        }
-    };
-
-    // Assume deprecation is in effect if "since" field is missing
-    // or if we can't determine the current Rust version.
-    true
 }
 
 pub fn deprecation_suggestion(
@@ -170,7 +134,7 @@ pub fn deprecation_suggestion(
     if let Some(suggestion) = suggestion {
         diag.span_suggestion_verbose(
             span,
-            &format!("replace the use of the deprecated {}", kind),
+            format!("replace the use of the deprecated {kind}"),
             suggestion,
             Applicability::MachineApplicable,
         );
@@ -183,30 +147,31 @@ fn deprecation_lint(is_in_effect: bool) -> &'static Lint {
 
 fn deprecation_message(
     is_in_effect: bool,
-    since: Option<Symbol>,
+    since: DeprecatedSince,
     note: Option<Symbol>,
     kind: &str,
     path: &str,
 ) -> String {
     let message = if is_in_effect {
-        format!("use of deprecated {} `{}`", kind, path)
+        format!("use of deprecated {kind} `{path}`")
     } else {
-        let since = since.as_ref().map(Symbol::as_str);
-
-        if since == Some("TBD") {
-            format!("use of {} `{}` that will be deprecated in a future Rust version", kind, path)
-        } else {
-            format!(
-                "use of {} `{}` that will be deprecated in future version {}",
-                kind,
-                path,
-                since.unwrap()
-            )
+        match since {
+            DeprecatedSince::RustcVersion(version) => format!(
+                "use of {kind} `{path}` that will be deprecated in future version {version}"
+            ),
+            DeprecatedSince::Future => {
+                format!("use of {kind} `{path}` that will be deprecated in a future Rust version")
+            }
+            DeprecatedSince::NonStandard(_)
+            | DeprecatedSince::Unspecified
+            | DeprecatedSince::Err => {
+                unreachable!("this deprecation is always in effect; {since:?}")
+            }
         }
     };
 
     match note {
-        Some(reason) => format!("{}: {}", message, reason),
+        Some(reason) => format!("{message}: {reason}"),
         None => message,
     }
 }
@@ -216,7 +181,7 @@ pub fn deprecation_message_and_lint(
     kind: &str,
     path: &str,
 ) -> (String, &'static Lint) {
-    let is_in_effect = deprecation_in_effect(depr);
+    let is_in_effect = depr.is_in_effect();
     (
         deprecation_message(is_in_effect, depr.since, depr.note, kind, path),
         deprecation_lint(is_in_effect),
@@ -225,7 +190,7 @@ pub fn deprecation_message_and_lint(
 
 pub fn early_report_deprecation(
     lint_buffer: &mut LintBuffer,
-    message: &str,
+    message: String,
     suggestion: Option<Symbol>,
     lint: &'static Lint,
     span: Span,
@@ -241,7 +206,7 @@ pub fn early_report_deprecation(
 
 fn late_report_deprecation(
     tcx: TyCtxt<'_>,
-    message: &str,
+    message: String,
     suggestion: Option<Symbol>,
     lint: &'static Lint,
     span: Span,
@@ -254,11 +219,10 @@ fn late_report_deprecation(
     }
     let method_span = method_span.unwrap_or(span);
     tcx.struct_span_lint_hir(lint, hir_id, method_span, message, |diag| {
-        if let hir::Node::Expr(_) = tcx.hir().get(hir_id) {
+        if let hir::Node::Expr(_) = tcx.hir_node(hir_id) {
             let kind = tcx.def_descr(def_id);
             deprecation_suggestion(diag, kind, suggestion, method_span);
         }
-        diag
     });
 }
 
@@ -312,7 +276,7 @@ fn suggestion_for_allocator_api(
                     return Some((
                         inner_types,
                         "consider wrapping the inner types in tuple".to_string(),
-                        format!("({})", snippet),
+                        format!("({snippet})"),
                         Applicability::MaybeIncorrect,
                     ));
                 }
@@ -375,7 +339,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 let parent_def_id = self.hir().get_parent_item(id);
                 let skip = self
                     .lookup_deprecation_entry(parent_def_id.to_def_id())
-                    .map_or(false, |parent_depr| parent_depr.same_origin(&depr_entry));
+                    .is_some_and(|parent_depr| parent_depr.same_origin(&depr_entry));
 
                 // #[deprecated] doesn't emit a notice if we're not on the
                 // topmost deprecation. For example, if a struct is deprecated,
@@ -384,11 +348,11 @@ impl<'tcx> TyCtxt<'tcx> {
                 // With #![staged_api], we want to emit down the whole
                 // hierarchy.
                 let depr_attr = &depr_entry.attr;
-                if !skip || depr_attr.is_since_rustc_version {
+                if !skip || depr_attr.is_since_rustc_version() {
                     // Calculating message for lint involves calling `self.def_path_str`.
                     // Which by default to calculate visible path will invoke expensive `visible_parent_map` query.
                     // So we skip message calculation altogether, if lint is allowed.
-                    let is_in_effect = deprecation_in_effect(depr_attr);
+                    let is_in_effect = depr_attr.is_in_effect();
                     let lint = deprecation_lint(is_in_effect);
                     if self.lint_level_at_node(lint, id).0 != Level::Allow {
                         let def_path = with_no_trimmed_paths!(self.def_path_str(def_id));
@@ -396,7 +360,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
                         late_report_deprecation(
                             self,
-                            &deprecation_message(
+                            deprecation_message(
                                 is_in_effect,
                                 depr_attr.since,
                                 depr_attr.note,
@@ -448,14 +412,16 @@ impl<'tcx> TyCtxt<'tcx> {
                     debug!("stability: skipping span={:?} since it is internal", span);
                     return EvalResult::Allow;
                 }
-                if self.features().active(feature) {
+                if self.features().declared(feature) {
                     return EvalResult::Allow;
                 }
 
                 // If this item was previously part of a now-stabilized feature which is still
                 // active (i.e. the user hasn't removed the attribute for the stabilized feature
                 // yet) then allow use of this item.
-                if let Some(implied_by) = implied_by && self.features().active(implied_by) {
+                if let Some(implied_by) = implied_by
+                    && self.features().declared(implied_by)
+                {
                     return EvalResult::Allow;
                 }
 
@@ -532,7 +498,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     debug!("body stability: skipping span={:?} since it is internal", span);
                     return EvalResult::Allow;
                 }
-                if self.features().active(feature) {
+                if self.features().declared(feature) {
                     return EvalResult::Allow;
                 }
 
@@ -599,7 +565,7 @@ impl<'tcx> TyCtxt<'tcx> {
             |span, def_id| {
                 // The API could be uncallable for other reasons, for example when a private module
                 // was referenced.
-                self.sess.delay_span_bug(span, &format!("encountered unmarked API: {:?}", def_id));
+                self.sess.span_delayed_bug(span, format!("encountered unmarked API: {def_id:?}"));
             },
         )
     }
@@ -619,8 +585,8 @@ impl<'tcx> TyCtxt<'tcx> {
         allow_unstable: AllowUnstable,
         unmarked: impl FnOnce(Span, DefId),
     ) -> bool {
-        let soft_handler = |lint, span, msg: &_| {
-            self.struct_span_lint_hir(lint, id.unwrap_or(hir::CRATE_HIR_ID), span, msg, |lint| lint)
+        let soft_handler = |lint, span, msg: String| {
+            self.struct_span_lint_hir(lint, id.unwrap_or(hir::CRATE_HIR_ID), span, msg, |_| {})
         };
         let eval_result =
             self.eval_stability_allow_unstable(def_id, id, span, method_span, allow_unstable);

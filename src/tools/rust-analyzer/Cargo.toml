@@ -1,9 +1,10 @@
 [workspace]
 members = ["xtask/", "lib/*", "crates/*"]
 exclude = ["crates/proc-macro-test/imp"]
+resolver = "2"
 
 [workspace.package]
-rust-version = "1.66"
+rust-version = "1.70"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["rust-analyzer team"]
@@ -34,10 +35,14 @@ debug = 0
 # chalk-ir = { path = "../chalk/chalk-ir" }
 # chalk-recursive = { path = "../chalk/chalk-recursive" }
 # chalk-derive = { path = "../chalk/chalk-derive" }
+# line-index = { path = "lib/line-index" }
+# la-arena = { path = "lib/la-arena" }
+# lsp-server = { path = "lib/lsp-server" }
+
 
 # ungrammar = { path = "../ungrammar" }
 
-# salsa = { path = "../salsa" }
+# rust-analyzer-salsa = { path = "../salsa" }
 
 [workspace.dependencies]
 # local crates
@@ -56,13 +61,13 @@ ide-diagnostics = { path = "./crates/ide-diagnostics", version = "0.0.0" }
 ide-ssr = { path = "./crates/ide-ssr", version = "0.0.0" }
 intern = { path = "./crates/intern", version = "0.0.0" }
 limit = { path = "./crates/limit", version = "0.0.0" }
+load-cargo = { path = "./crates/load-cargo", version = "0.0.0" }
 mbe = { path = "./crates/mbe", version = "0.0.0" }
 parser = { path = "./crates/parser", version = "0.0.0" }
 paths = { path = "./crates/paths", version = "0.0.0" }
 proc-macro-api = { path = "./crates/proc-macro-api", version = "0.0.0" }
 proc-macro-srv = { path = "./crates/proc-macro-srv", version = "0.0.0" }
 proc-macro-srv-cli = { path = "./crates/proc-macro-srv-cli", version = "0.0.0" }
-proc-macro-test = { path = "./crates/proc-macro-test", version = "0.0.0" }
 profile = { path = "./crates/profile", version = "0.0.0" }
 project-model = { path = "./crates/project-model", version = "0.0.0" }
 sourcegen = { path = "./crates/sourcegen", version = "0.0.0" }
@@ -74,5 +79,50 @@ toolchain = { path = "./crates/toolchain", version = "0.0.0" }
 tt = { path = "./crates/tt", version = "0.0.0" }
 vfs-notify = { path = "./crates/vfs-notify", version = "0.0.0" }
 vfs = { path = "./crates/vfs", version = "0.0.0" }
+rustc-dependencies = { path = "./crates/rustc-dependencies", version = "0.0.0" }
+
+# local crates that aren't published to crates.io. These should not have versions.
+proc-macro-test = { path = "./crates/proc-macro-test" }
+
+# In-tree crates that are published separately and follow semver. See lib/README.md
+line-index = { version = "0.1.1" }
+la-arena = { version = "0.3.1" }
+lsp-server = { version = "0.7.4" }
+
 # non-local crates
-smallvec = { version = "1.10.0", features = ["const_new", "union", "const_generics"] }
+anyhow = "1.0.75"
+bitflags = "2.4.1"
+cargo_metadata = "0.18.1"
+dissimilar = "1.0.7"
+either = "1.9.0"
+hashbrown = { version = "0.14", features = [
+  "inline-more",
+], default-features = false }
+indexmap = "2.1.0"
+itertools = "0.12.0"
+libc = "0.2.150"
+nohash-hasher = "0.2.0"
+rayon = "1.8.0"
+rust-analyzer-salsa = "0.17.0-pre.4"
+rustc-hash = "1.1.0"
+serde = { version = "1.0.192", features = ["derive"] }
+serde_json = "1.0.108"
+smallvec = { version = "1.10.0", features = [
+  "const_new",
+  "union",
+  "const_generics",
+] }
+smol_str = "0.2.0"
+text-size = "1.1.1"
+tracing = "0.1.40"
+tracing-tree = "0.3.0"
+tracing-subscriber = { version = "0.3.18", default-features = false, features = [
+    "registry",
+    "fmt",
+    "tracing-log",
+] }
+triomphe = { version = "0.1.10", default-features = false, features = ["std"] }
+xshell = "0.2.5"
+
+# We need to freeze the version of the crate, as the raw-api feature is considered unstable
+dashmap = { version = "=5.5.3", features = ["raw-api"] }

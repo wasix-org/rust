@@ -1,6 +1,4 @@
-// run-rustfix
-
-#![allow(clippy::stable_sort_primitive)]
+#![allow(clippy::stable_sort_primitive, clippy::useless_vec)]
 
 use std::cell::Ref;
 

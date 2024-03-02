@@ -27,6 +27,8 @@ pub struct StdioPipes {
     pub stderr: Option<AnonPipe>,
 }
 
+// FIXME: This should be a unit struct, so we can always construct it
+// The value here should be never used, since we cannot spawn processes.
 pub enum Stdio {
     Inherit,
     Null,
@@ -87,8 +89,26 @@ impl From<AnonPipe> for Stdio {
     }
 }
 
+impl From<io::Stdout> for Stdio {
+    fn from(_: io::Stdout) -> Stdio {
+        // FIXME: This is wrong.
+        // Instead, the Stdio we have here should be a unit struct.
+        panic!("unsupported")
+    }
+}
+
+impl From<io::Stderr> for Stdio {
+    fn from(_: io::Stderr) -> Stdio {
+        // FIXME: This is wrong.
+        // Instead, the Stdio we have here should be a unit struct.
+        panic!("unsupported")
+    }
+}
+
 impl From<File> for Stdio {
     fn from(_file: File) -> Stdio {
+        // FIXME: This is wrong.
+        // Instead, the Stdio we have here should be a unit struct.
         panic!("unsupported")
     }
 }
@@ -99,58 +119,59 @@ impl fmt::Debug for Command {
     }
 }
 
-pub struct ExitStatus(!);
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+#[non_exhaustive]
+pub struct ExitStatus();
 
 impl ExitStatus {
     pub fn exit_ok(&self) -> Result<(), ExitStatusError> {
-        self.0
+        Ok(())
     }
 
     pub fn code(&self) -> Option<i32> {
-        self.0
-    }
-}
-
-impl Clone for ExitStatus {
-    fn clone(&self) -> ExitStatus {
-        self.0
-    }
-}
-
-impl Copy for ExitStatus {}
-
-impl PartialEq for ExitStatus {
-    fn eq(&self, _other: &ExitStatus) -> bool {
-        self.0
-    }
-}
-
-impl Eq for ExitStatus {}
-
-impl fmt::Debug for ExitStatus {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
+        Some(0)
     }
 }
 
 impl fmt::Display for ExitStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<dummy exit status>")
+    }
+}
+
+pub struct ExitStatusError(!);
+
+impl Clone for ExitStatusError {
+    fn clone(&self) -> ExitStatusError {
+        self.0
+    }
+}
+
+impl Copy for ExitStatusError {}
+
+impl PartialEq for ExitStatusError {
+    fn eq(&self, _other: &ExitStatusError) -> bool {
+        self.0
+    }
+}
+
+impl Eq for ExitStatusError {}
+
+impl fmt::Debug for ExitStatusError {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct ExitStatusError(ExitStatus);
-
 impl Into<ExitStatus> for ExitStatusError {
     fn into(self) -> ExitStatus {
-        self.0.0
+        self.0
     }
 }
 
 impl ExitStatusError {
     pub fn code(self) -> Option<NonZeroI32> {
-        self.0.0
+        self.0
     }
 }
 

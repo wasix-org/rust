@@ -1,4 +1,5 @@
 #![feature(stmt_expr_attributes)]
+#![feature(round_ties_even)]
 #![allow(arithmetic_overflow)]
 use std::fmt::Debug;
 use std::hint::black_box;
@@ -9,6 +10,7 @@ fn main() {
     more_casts();
     ops();
     nan_casts();
+    rounding();
 }
 
 // Helper function to avoid promotion so that this tests "run-time" casts, not CTFE.
@@ -166,6 +168,16 @@ fn basic() {
     let x: u32 = unsafe { std::mem::transmute(42.0_f32) };
     let y: f32 = unsafe { std::mem::transmute(x) };
     assert_eq(y, 42.0_f32);
+
+    // `%` sign behavior, some of this used to be buggy
+    assert!((black_box(1.0f32) % 1.0).is_sign_positive());
+    assert!((black_box(1.0f32) % -1.0).is_sign_positive());
+    assert!((black_box(-1.0f32) % 1.0).is_sign_negative());
+    assert!((black_box(-1.0f32) % -1.0).is_sign_negative());
+    assert!((black_box(1.0f64) % 1.0).is_sign_positive());
+    assert!((black_box(1.0f64) % -1.0).is_sign_positive());
+    assert!((black_box(-1.0f64) % 1.0).is_sign_negative());
+    assert!((black_box(-1.0f64) % -1.0).is_sign_negative());
 }
 
 /// Many of these test values are taken from
@@ -552,4 +564,32 @@ fn nan_casts() {
 
     assert!(nan1_32.is_nan());
     assert!(nan2_32.is_nan());
+}
+
+fn rounding() {
+    // Test cases taken from the library's tests for this feature
+    // f32
+    assert_eq(2.5f32.round_ties_even(), 2.0f32);
+    assert_eq(1.0f32.round_ties_even(), 1.0f32);
+    assert_eq(1.3f32.round_ties_even(), 1.0f32);
+    assert_eq(1.5f32.round_ties_even(), 2.0f32);
+    assert_eq(1.7f32.round_ties_even(), 2.0f32);
+    assert_eq(0.0f32.round_ties_even(), 0.0f32);
+    assert_eq((-0.0f32).round_ties_even(), -0.0f32);
+    assert_eq((-1.0f32).round_ties_even(), -1.0f32);
+    assert_eq((-1.3f32).round_ties_even(), -1.0f32);
+    assert_eq((-1.5f32).round_ties_even(), -2.0f32);
+    assert_eq((-1.7f32).round_ties_even(), -2.0f32);
+    // f64
+    assert_eq(2.5f64.round_ties_even(), 2.0f64);
+    assert_eq(1.0f64.round_ties_even(), 1.0f64);
+    assert_eq(1.3f64.round_ties_even(), 1.0f64);
+    assert_eq(1.5f64.round_ties_even(), 2.0f64);
+    assert_eq(1.7f64.round_ties_even(), 2.0f64);
+    assert_eq(0.0f64.round_ties_even(), 0.0f64);
+    assert_eq((-0.0f64).round_ties_even(), -0.0f64);
+    assert_eq((-1.0f64).round_ties_even(), -1.0f64);
+    assert_eq((-1.3f64).round_ties_even(), -1.0f64);
+    assert_eq((-1.5f64).round_ties_even(), -2.0f64);
+    assert_eq((-1.7f64).round_ties_even(), -2.0f64);
 }

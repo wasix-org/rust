@@ -7,7 +7,6 @@ use rustc_ast::attr;
 use rustc_ast::token::{self, Delimiter, Nonterminal};
 use rustc_errors::{error_code, Diagnostic, IntoDiagnostic, PResult};
 use rustc_span::{sym, BytePos, Span};
-use std::convert::TryInto;
 use thin_vec::ThinVec;
 use tracing::debug;
 
@@ -36,7 +35,7 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_outer_attributes(&mut self) -> PResult<'a, AttrWrapper> {
         let mut outer_attrs = ast::AttrVec::new();
         let mut just_parsed_doc_comment = false;
-        let start_pos = self.token_cursor.num_next_calls;
+        let start_pos = self.num_bump_calls;
         loop {
             let attr = if self.check(&token::Pound) {
                 let prev_outer_attr_sp = outer_attrs.last().map(|attr| attr.span);
@@ -45,10 +44,10 @@ impl<'a> Parser<'a> {
                     Some(InnerAttrForbiddenReason::AfterOuterDocComment {
                         prev_doc_comment_span: prev_outer_attr_sp.unwrap(),
                     })
-                } else if let Some(prev_outer_attr_sp) = prev_outer_attr_sp {
-                    Some(InnerAttrForbiddenReason::AfterOuterAttribute { prev_outer_attr_sp })
                 } else {
-                    None
+                    prev_outer_attr_sp.map(|prev_outer_attr_sp| {
+                        InnerAttrForbiddenReason::AfterOuterAttribute { prev_outer_attr_sp }
+                    })
                 };
                 let inner_parse_policy = InnerAttrPolicy::Forbidden(inner_error_reason);
                 just_parsed_doc_comment = false;
@@ -56,7 +55,7 @@ impl<'a> Parser<'a> {
             } else if let token::DocComment(comment_kind, attr_style, data) = self.token.kind {
                 if attr_style != ast::AttrStyle::Outer {
                     let span = self.token.span;
-                    let mut err = self.sess.span_diagnostic.struct_span_err_with_code(
+                    let mut err = self.dcx().struct_span_err_with_code(
                         span,
                         fluent::parse_inner_doc_comment_not_permitted,
                         error_code!(E0753),
@@ -249,7 +248,7 @@ impl<'a> Parser<'a> {
     /// The delimiters or `=` are still put into the resulting token stream.
     pub fn parse_attr_item(&mut self, capture_tokens: bool) -> PResult<'a, ast::AttrItem> {
         let item = match &self.token.kind {
-            token::Interpolated(nt) => match &**nt {
+            token::Interpolated(nt) => match &nt.0 {
                 Nonterminal::NtMeta(item) => Some(item.clone().into_inner()),
                 _ => None,
             },
@@ -277,7 +276,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_inner_attributes(&mut self) -> PResult<'a, ast::AttrVec> {
         let mut attrs = ast::AttrVec::new();
         loop {
-            let start_pos: u32 = self.token_cursor.num_next_calls.try_into().unwrap();
+            let start_pos: u32 = self.num_bump_calls.try_into().unwrap();
             // Only try to parse if it is an inner attribute (has `!`).
             let attr = if self.check(&token::Pound) && self.look_ahead(1, |t| t == &token::Not) {
                 Some(self.parse_attribute(InnerAttrPolicy::Permitted)?)
@@ -298,7 +297,7 @@ impl<'a> Parser<'a> {
                 None
             };
             if let Some(attr) = attr {
-                let end_pos: u32 = self.token_cursor.num_next_calls.try_into().unwrap();
+                let end_pos: u32 = self.num_bump_calls.try_into().unwrap();
                 // If we are currently capturing tokens, mark the location of this inner attribute.
                 // If capturing ends up creating a `LazyAttrTokenStream`, we will include
                 // this replace range with it, removing the inner attribute from the final
@@ -369,7 +368,7 @@ impl<'a> Parser<'a> {
     /// ```
     pub fn parse_meta_item(&mut self) -> PResult<'a, ast::MetaItem> {
         let nt_meta = match &self.token.kind {
-            token::Interpolated(nt) => match &**nt {
+            token::Interpolated(nt) => match &nt.0 {
                 token::NtMeta(e) => Some(e.clone()),
                 _ => None,
             },
@@ -418,19 +417,16 @@ impl<'a> Parser<'a> {
         }
 
         Err(InvalidMetaItem { span: self.token.span, token: self.token.clone() }
-            .into_diagnostic(&self.sess.span_diagnostic))
+            .into_diagnostic(self.dcx()))
     }
 }
 
-pub fn maybe_needs_tokens(attrs: &[ast::Attribute]) -> bool {
-    // One of the attributes may either itself be a macro,
-    // or expand to macro attributes (`cfg_attr`).
-    attrs.iter().any(|attr| {
-        if attr.is_doc_comment() {
-            return false;
-        }
-        attr.ident().map_or(true, |ident| {
-            ident.name == sym::cfg_attr || !rustc_feature::is_builtin_attr_name(ident.name)
-        })
+/// The attributes are complete if all attributes are either a doc comment or a builtin attribute other than `cfg_attr`
+pub fn is_complete(attrs: &[ast::Attribute]) -> bool {
+    attrs.iter().all(|attr| {
+        attr.is_doc_comment()
+            || attr.ident().is_some_and(|ident| {
+                ident.name != sym::cfg_attr && rustc_feature::is_builtin_attr_name(ident.name)
+            })
     })
 }

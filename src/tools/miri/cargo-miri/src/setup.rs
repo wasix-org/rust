@@ -2,6 +2,7 @@
 
 use std::env;
 use std::ffi::OsStr;
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::process::{self, Command};
 
@@ -13,13 +14,20 @@ use crate::util::*;
 /// Performs the setup required to make `cargo miri` work: Getting a custom-built libstd. Then sets
 /// `MIRI_SYSROOT`. Skipped if `MIRI_SYSROOT` is already set, in which case we expect the user has
 /// done all this already.
-pub fn setup(subcommand: &MiriCommand, target: &str, rustc_version: &VersionMeta, verbose: usize) {
+pub fn setup(
+    subcommand: &MiriCommand,
+    target: &str,
+    rustc_version: &VersionMeta,
+    verbose: usize,
+) -> PathBuf {
     let only_setup = matches!(subcommand, MiriCommand::Setup);
     let ask_user = !only_setup;
     let print_sysroot = only_setup && has_arg_flag("--print-sysroot"); // whether we just print the sysroot path
-    if !only_setup && std::env::var_os("MIRI_SYSROOT").is_some() {
-        // Skip setup step if MIRI_SYSROOT is explicitly set, *unless* we are `cargo miri setup`.
-        return;
+    if !only_setup {
+        if let Some(sysroot) = std::env::var_os("MIRI_SYSROOT") {
+            // Skip setup step if MIRI_SYSROOT is explicitly set, *unless* we are `cargo miri setup`.
+            return sysroot.into();
+        }
     }
 
     // Determine where the rust sources are located.  The env var trumps auto-detection.
@@ -67,7 +75,17 @@ pub fn setup(subcommand: &MiriCommand, target: &str, rustc_version: &VersionMeta
         }
     };
     // Sysroot configuration and build details.
-    let sysroot_config = if std::env::var_os("MIRI_NO_STD").is_some() {
+    let no_std = match std::env::var_os("MIRI_NO_STD") {
+        None =>
+        // No-std heuristic taken from rust/src/bootstrap/config.rs
+        // (https://github.com/rust-lang/rust/blob/25b5af1b3a0b9e2c0c57b223b2d0e3e203869b2c/src/bootstrap/config.rs#L549-L555).
+            target.contains("-none")
+                || target.contains("nvptx")
+                || target.contains("switch")
+                || target.contains("-uefi"),
+        Some(val) => val != "0",
+    };
+    let sysroot_config = if no_std {
         SysrootConfig::NoStd
     } else {
         SysrootConfig::WithStd {
@@ -92,6 +110,8 @@ pub fn setup(subcommand: &MiriCommand, target: &str, rustc_version: &VersionMeta
             command.env("RUSTC", &cargo_miri_path);
         }
         command.env("MIRI_CALLED_FROM_SETUP", "1");
+        // Miri expects `MIRI_SYSROOT` to be set when invoked in target mode. Even if that directory is empty.
+        command.env("MIRI_SYSROOT", &sysroot_dir);
         // Make sure there are no other wrappers getting in our way (Cc
         // https://github.com/rust-lang/miri/issues/1421,
         // https://github.com/rust-lang/miri/issues/2429). Looks like setting
@@ -105,7 +125,7 @@ pub fn setup(subcommand: &MiriCommand, target: &str, rustc_version: &VersionMeta
                 command.arg("-v");
             }
         } else {
-            // Supress output.
+            // Suppress output.
             command.stdout(process::Stdio::null());
             command.stderr(process::Stdio::null());
         }
@@ -117,18 +137,24 @@ pub fn setup(subcommand: &MiriCommand, target: &str, rustc_version: &VersionMeta
     // the user might have set, which is consistent with normal `cargo build` that does
     // not apply `RUSTFLAGS` to the sysroot either.
     let rustflags = &["-Cdebug-assertions=off", "-Coverflow-checks=on"];
-    // Make sure all target-level Miri invocations know their sysroot.
-    std::env::set_var("MIRI_SYSROOT", &sysroot_dir);
 
     // Do the build.
     if print_sysroot {
         // Be silent.
-    } else if only_setup {
-        // We want to be explicit.
-        eprintln!("Preparing a sysroot for Miri (target: {target})...");
     } else {
-        // We want to be quiet, but still let the user know that something is happening.
-        eprint!("Preparing a sysroot for Miri (target: {target})... ");
+        let mut msg = String::new();
+        write!(msg, "Preparing a sysroot for Miri (target: {target})").unwrap();
+        if verbose > 0 {
+            write!(msg, " in {}", sysroot_dir.display()).unwrap();
+        }
+        write!(msg, "...").unwrap();
+        if only_setup {
+            // We want to be explicit.
+            eprintln!("{msg}");
+        } else {
+            // We want to be quiet, but still let the user know that something is happening.
+            eprint!("{msg} ");
+        }
     }
     SysrootBuilder::new(&sysroot_dir, target)
         .build_mode(BuildMode::Check)
@@ -159,4 +185,6 @@ pub fn setup(subcommand: &MiriCommand, target: &str, rustc_version: &VersionMeta
         // Print just the sysroot and nothing else to stdout; this way we do not need any escaping.
         println!("{}", sysroot_dir.display());
     }
+
+    sysroot_dir
 }

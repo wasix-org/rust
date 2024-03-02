@@ -1,14 +1,13 @@
-#![feature(start, box_syntax, core_intrinsics, lang_items)]
+#![feature(start, core_intrinsics, lang_items)]
 #![no_std]
+#![allow(internal_features)]
 
 #[link(name = "c")]
 extern {}
 
 #[panic_handler]
-fn panic_handler(_: &core::panic::PanicInfo) -> ! {
-    unsafe {
-        core::intrinsics::abort();
-    }
+fn panic_handler(_: &core::panic::PanicInfo<'_>) -> ! {
+    core::intrinsics::abort();
 }
 
 #[lang="eh_personality"]
@@ -32,6 +31,6 @@ fn main(_argc: isize, _argv: *const *const u8) -> isize {
 #[inline(never)]
 fn black_box(i: u32) {
     if i != 1 {
-        unsafe { core::intrinsics::abort(); }
+        core::intrinsics::abort();
     }
 }

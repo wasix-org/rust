@@ -1,0 +1,42 @@
+// Test to check that the "warning blocks" are displayed as expected.
+go-to: "file://" + |DOC_PATH| + "/test_docs/struct.Foo.html"
+show-text: true
+
+define-function: (
+    "check-warning",
+    (theme, color, border_color),
+    block {
+        set-local-storage: {"rustdoc-theme": |theme|, "rustdoc-use-system-theme": "false"}
+        reload:
+
+        // The IDs are added directly into the DOM to make writing this test easier.
+        assert-css: ("#doc-warning-1", {
+            "margin-bottom": "12px",
+            "color": |color|,
+            "border-left": "2px solid " + |border_color|,
+            "background-color": "transparent",
+        })
+        assert-css: ("#doc-warning-2", {
+            "margin-bottom": "0px",
+            "color": |color|,
+            "border-left": "2px solid " + |border_color|,
+            "background-color": "transparent",
+        })
+    },
+)
+
+call-function: ("check-warning", {
+    "theme": "ayu",
+    "color": "#c5c5c5",
+    "border_color": "#ff8e00",
+})
+call-function: ("check-warning", {
+    "theme": "dark",
+    "color": "#ddd",
+    "border_color": "#ff8e00",
+})
+call-function: ("check-warning", {
+    "theme": "light",
+    "color": "black",
+    "border_color": "#ff8e00",
+})

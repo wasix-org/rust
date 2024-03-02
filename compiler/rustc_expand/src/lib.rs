@@ -1,3 +1,5 @@
+#![doc(rust_logo)]
+#![feature(rustdoc_internals)]
 #![feature(array_windows)]
 #![feature(associated_type_bounds)]
 #![feature(associated_type_defaults)]
@@ -11,6 +13,7 @@
 #![feature(try_blocks)]
 #![recursion_limit = "256"]
 #![deny(rustc::untranslatable_diagnostic)]
+#![allow(internal_features)]
 
 #[macro_use]
 extern crate rustc_macros;
@@ -19,9 +22,6 @@ extern crate rustc_macros;
 extern crate tracing;
 
 extern crate proc_macro as pm;
-
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::fluent_messages;
 
 mod placeholders;
 mod proc_macro_server;
@@ -64,4 +64,4 @@ mod mut_visit {
     mod tests;
 }
 
-fluent_messages! { "../locales/en-US.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

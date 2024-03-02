@@ -10,17 +10,16 @@
 //! * By **copying** the whole rustc `lib_proc_macro` code, we are able to build this with `stable`
 //!   rustc rather than `unstable`. (Although in general ABI compatibility is still an issue)…
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
-#![cfg_attr(
-    feature = "sysroot-abi",
-    feature(proc_macro_internals, proc_macro_diagnostic, proc_macro_span)
-)]
-#![allow(unreachable_pub)]
+#![cfg(any(feature = "sysroot-abi", rust_analyzer))]
+#![feature(proc_macro_internals, proc_macro_diagnostic, proc_macro_span)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
+#![allow(unreachable_pub, internal_features)]
+
+extern crate proc_macro;
 
 mod dylib;
-mod abis;
-
-pub mod cli;
+mod server;
+mod proc_macros;
 
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -33,24 +32,39 @@ use std::{
 };
 
 use proc_macro_api::{
-    msg::{ExpandMacro, FlatTree, PanicMessage},
+    msg::{self, ExpnGlobals, TokenId, CURRENT_API_VERSION},
     ProcMacroKind,
 };
 
-use ::tt::token_id as tt;
+mod tt {
+    pub use proc_macro_api::msg::TokenId;
+
+    pub use ::tt::*;
+
+    pub type Subtree = ::tt::Subtree<TokenId>;
+    pub type TokenTree = ::tt::TokenTree<TokenId>;
+    pub type Delimiter = ::tt::Delimiter<TokenId>;
+    pub type Leaf = ::tt::Leaf<TokenId>;
+    pub type Literal = ::tt::Literal<TokenId>;
+    pub type Punct = ::tt::Punct<TokenId>;
+    pub type Ident = ::tt::Ident<TokenId>;
+}
+
+// see `build.rs`
+include!(concat!(env!("OUT_DIR"), "/rustc_version.rs"));
 
 #[derive(Default)]
-pub(crate) struct ProcMacroSrv {
+pub struct ProcMacroSrv {
     expanders: HashMap<(PathBuf, SystemTime), dylib::Expander>,
 }
 
 const EXPANDER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 impl ProcMacroSrv {
-    pub fn expand(&mut self, task: ExpandMacro) -> Result<FlatTree, PanicMessage> {
+    pub fn expand(&mut self, task: msg::ExpandMacro) -> Result<msg::FlatTree, msg::PanicMessage> {
         let expander = self.expander(task.lib.as_ref()).map_err(|err| {
             debug_assert!(false, "should list macros before asking to expand");
-            PanicMessage(format!("failed to load macro: {err}"))
+            msg::PanicMessage(format!("failed to load macro: {err}"))
         })?;
 
         let prev_env = EnvSnapshot::new();
@@ -68,16 +82,28 @@ impl ProcMacroSrv {
             None => None,
         };
 
-        let macro_body = task.macro_body.to_subtree();
-        let attributes = task.attributes.map(|it| it.to_subtree());
+        let ExpnGlobals { def_site, call_site, mixed_site, .. } = task.has_global_spans;
+        let def_site = TokenId(def_site as u32);
+        let call_site = TokenId(call_site as u32);
+        let mixed_site = TokenId(mixed_site as u32);
+
+        let macro_body = task.macro_body.to_subtree_unresolved(CURRENT_API_VERSION);
+        let attributes = task.attributes.map(|it| it.to_subtree_unresolved(CURRENT_API_VERSION));
         let result = thread::scope(|s| {
             let thread = thread::Builder::new()
                 .stack_size(EXPANDER_STACK_SIZE)
                 .name(task.macro_name.clone())
                 .spawn_scoped(s, || {
                     expander
-                        .expand(&task.macro_name, &macro_body, attributes.as_ref())
-                        .map(|it| FlatTree::new(&it))
+                        .expand(
+                            &task.macro_name,
+                            &macro_body,
+                            attributes.as_ref(),
+                            def_site,
+                            call_site,
+                            mixed_site,
+                        )
+                        .map(|it| msg::FlatTree::new_raw(&it, CURRENT_API_VERSION))
                 });
             let res = match thread {
                 Ok(handle) => handle.join(),
@@ -102,10 +128,10 @@ impl ProcMacroSrv {
             }
         }
 
-        result.map_err(PanicMessage)
+        result.map_err(msg::PanicMessage)
     }
 
-    pub(crate) fn list_macros(
+    pub fn list_macros(
         &mut self,
         dylib_path: &Path,
     ) -> Result<Vec<(String, ProcMacroKind)>, String> {
@@ -129,6 +155,16 @@ impl ProcMacroSrv {
     }
 }
 
+pub struct PanicMessage {
+    message: Option<String>,
+}
+
+impl PanicMessage {
+    pub fn into_string(self) -> Option<String> {
+        self.message
+    }
+}
+
 struct EnvSnapshot {
     vars: HashMap<OsString, OsString>,
 }
@@ -138,10 +174,13 @@ impl EnvSnapshot {
         EnvSnapshot { vars: env::vars_os().collect() }
     }
 
-    fn rollback(self) {
-        let mut old_vars = self.vars;
+    fn rollback(self) {}
+}
+
+impl Drop for EnvSnapshot {
+    fn drop(&mut self) {
         for (name, value) in env::vars_os() {
-            let old_value = old_vars.remove(&name);
+            let old_value = self.vars.remove(&name);
             if old_value != Some(value) {
                 match old_value {
                     None => env::remove_var(name),
@@ -149,13 +188,13 @@ impl EnvSnapshot {
                 }
             }
         }
-        for (name, old_value) in old_vars {
+        for (name, old_value) in self.vars.drain() {
             env::set_var(name, old_value)
         }
     }
 }
 
-#[cfg(all(feature = "sysroot-abi", test))]
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

@@ -1,11 +1,12 @@
 use crate::cmp;
 use crate::ffi::CStr;
-use crate::io::{self, IoSlice, IoSliceMut};
+use crate::io::{self, BorrowedBuf, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::mem;
 use crate::net::{Shutdown, SocketAddr};
 use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
 use crate::str;
 use crate::sys::fd::FileDesc;
+use crate::sys::unix::IsMinusOne;
 use crate::sys_common::net::{getsockopt, setsockopt, sockaddr_to_addr};
 use crate::sys_common::{AsInner, FromInner, IntoInner};
 use crate::time::{Duration, Instant};
@@ -75,6 +76,7 @@ impl Socket {
                     target_os = "dragonfly",
                     target_os = "freebsd",
                     target_os = "illumos",
+                    target_os = "hurd",
                     target_os = "linux",
                     target_os = "netbsd",
                     target_os = "openbsd",
@@ -114,6 +116,7 @@ impl Socket {
                     target_os = "freebsd",
                     target_os = "illumos",
                     target_os = "linux",
+                    target_os = "hurd",
                     target_os = "netbsd",
                     target_os = "openbsd",
                     target_os = "nto",
@@ -136,6 +139,22 @@ impl Socket {
     #[cfg(target_os = "vxworks")]
     pub fn new_pair(_fam: c_int, _ty: c_int) -> io::Result<(Socket, Socket)> {
         unimplemented!()
+    }
+
+    pub fn connect(&self, addr: &SocketAddr) -> io::Result<()> {
+        let (addr, len) = addr.into_inner();
+        loop {
+            let result = unsafe { libc::connect(self.as_raw_fd(), addr.as_ptr(), len) };
+            if result.is_minus_one() {
+                let err = crate::sys::os::errno();
+                match err {
+                    libc::EINTR => continue,
+                    libc::EISCONN => return Ok(()),
+                    _ => return Err(io::Error::from_raw_os_error(err)),
+                }
+            }
+            return Ok(());
+        }
     }
 
     pub fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<()> {
@@ -184,7 +203,7 @@ impl Socket {
             match unsafe { libc::poll(&mut pollfd, 1, timeout) } {
                 -1 => {
                     let err = io::Error::last_os_error();
-                    if err.kind() != io::ErrorKind::Interrupted {
+                    if !err.is_interrupted() {
                         return Err(err);
                     }
                 }
@@ -220,6 +239,7 @@ impl Socket {
                 target_os = "freebsd",
                 target_os = "illumos",
                 target_os = "linux",
+                target_os = "hurd",
                 target_os = "netbsd",
                 target_os = "openbsd",
             ))] {
@@ -292,19 +312,35 @@ impl Socket {
         self.0.duplicate().map(Socket)
     }
 
-    fn recv_with_flags(&self, buf: &mut [u8], flags: c_int) -> io::Result<usize> {
+    fn recv_with_flags(&self, mut buf: BorrowedCursor<'_>, flags: c_int) -> io::Result<()> {
         let ret = cvt(unsafe {
-            libc::recv(self.as_raw_fd(), buf.as_mut_ptr() as *mut c_void, buf.len(), flags)
+            libc::recv(
+                self.as_raw_fd(),
+                buf.as_mut().as_mut_ptr() as *mut c_void,
+                buf.capacity(),
+                flags,
+            )
         })?;
-        Ok(ret as usize)
+        unsafe {
+            buf.advance(ret as usize);
+        }
+        Ok(())
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.recv_with_flags(buf, 0)
+        let mut buf = BorrowedBuf::from(buf);
+        self.recv_with_flags(buf.unfilled(), 0)?;
+        Ok(buf.len())
     }
 
     pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.recv_with_flags(buf, MSG_PEEK)
+        let mut buf = BorrowedBuf::from(buf);
+        self.recv_with_flags(buf.unfilled(), MSG_PEEK)?;
+        Ok(buf.len())
+    }
+
+    pub fn read_buf(&self, buf: BorrowedCursor<'_>) -> io::Result<()> {
+        self.recv_with_flags(buf, 0)
     }
 
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
@@ -477,10 +513,27 @@ impl Socket {
         Ok(passcred != 0)
     }
 
-    #[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
+    #[cfg(target_os = "freebsd")]
+    pub fn set_passcred(&self, passcred: bool) -> io::Result<()> {
+        setsockopt(self, libc::AF_LOCAL, libc::LOCAL_CREDS_PERSISTENT, passcred as libc::c_int)
+    }
+
+    #[cfg(target_os = "freebsd")]
+    pub fn passcred(&self) -> io::Result<bool> {
+        let passcred: libc::c_int = getsockopt(self, libc::AF_LOCAL, libc::LOCAL_CREDS_PERSISTENT)?;
+        Ok(passcred != 0)
+    }
+
+    #[cfg(not(any(target_os = "solaris", target_os = "illumos", target_os = "vita")))]
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         let mut nonblocking = nonblocking as libc::c_int;
         cvt(unsafe { libc::ioctl(self.as_raw_fd(), libc::FIONBIO, &mut nonblocking) }).map(drop)
+    }
+
+    #[cfg(target_os = "vita")]
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        let option = nonblocking as libc::c_int;
+        setsockopt(self, libc::SOL_SOCKET, libc::SO_NONBLOCK, option)
     }
 
     #[cfg(any(target_os = "solaris", target_os = "illumos"))]
@@ -513,6 +566,7 @@ impl Socket {
 }
 
 impl AsInner<FileDesc> for Socket {
+    #[inline]
     fn as_inner(&self) -> &FileDesc {
         &self.0
     }
@@ -537,6 +591,7 @@ impl AsFd for Socket {
 }
 
 impl AsRawFd for Socket {
+    #[inline]
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }

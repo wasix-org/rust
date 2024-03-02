@@ -1,11 +1,7 @@
-// revisions: no_drop_tracking drop_tracking drop_tracking_mir
-// [drop_tracking] compile-flags: -Zdrop-tracking
-// [drop_tracking_mir] compile-flags: -Zdrop-tracking-mir
-
 // Test that impl trait does not allow creating recursive types that are
 // otherwise forbidden.
 
-#![feature(generators)]
+#![feature(coroutines)]
 #![allow(unconditional_recursion)]
 
 fn option(i: i32) -> impl Sized {
@@ -54,14 +50,14 @@ fn closure_sig() -> impl Sized {
     || closure_sig()
 }
 
-fn generator_sig() -> impl Sized {
+fn coroutine_sig() -> impl Sized {
     //~^ ERROR
-    || generator_sig()
+    || coroutine_sig()
 }
 
-fn generator_capture() -> impl Sized {
+fn coroutine_capture() -> impl Sized {
     //~^ ERROR
-    let x = generator_capture();
+    let x = coroutine_capture();
     move || {
         yield;
         x;
@@ -73,10 +69,10 @@ fn substs_change<T: 'static>() -> impl Sized {
     (substs_change::<&T>(),)
 }
 
-fn generator_hold() -> impl Sized {
+fn coroutine_hold() -> impl Sized {
     //~^ ERROR
     move || {
-        let x = generator_hold();
+        let x = coroutine_hold();
         yield;
         x;
     }

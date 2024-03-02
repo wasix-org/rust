@@ -25,6 +25,7 @@ pub fn main() {
     //  2. write
     unsafe {
         let j1 = spawn(move || {
+            let ptr = ptr; // avoid field capturing
             // Concurrent allocate the memory.
             // Uses relaxed semantics to not generate
             // a release sequence.
@@ -34,8 +35,9 @@ pub fn main() {
         });
 
         let j2 = spawn(move || {
+            let ptr = ptr; // avoid field capturing
             let pointer = &*ptr.0;
-            *pointer.load(Ordering::Relaxed) = 2; //~ ERROR: Data race detected between (1) Allocate on thread `<unnamed>` and (2) Write on thread `<unnamed>`
+            *pointer.load(Ordering::Relaxed) = 2; //~ ERROR: Data race detected between (1) creating a new allocation on thread `<unnamed>` and (2) non-atomic write on thread `<unnamed>`
         });
 
         j1.join().unwrap();

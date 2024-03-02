@@ -1,16 +1,17 @@
 //! Attributes injected into the crate root from command line using `-Z crate-attr`.
 
+use crate::errors;
 use rustc_ast::attr::mk_attr;
 use rustc_ast::token;
 use rustc_ast::{self as ast, AttrItem, AttrStyle};
 use rustc_session::parse::ParseSess;
 use rustc_span::FileName;
 
-pub fn inject(mut krate: ast::Crate, parse_sess: &ParseSess, attrs: &[String]) -> ast::Crate {
+pub fn inject(krate: &mut ast::Crate, parse_sess: &ParseSess, attrs: &[String]) {
     for raw_attr in attrs {
         let mut parser = rustc_parse::new_parser_from_source_str(
             parse_sess,
-            FileName::cli_crate_attr_source_code(&raw_attr),
+            FileName::cli_crate_attr_source_code(raw_attr),
             raw_attr.clone(),
         );
 
@@ -24,7 +25,7 @@ pub fn inject(mut krate: ast::Crate, parse_sess: &ParseSess, attrs: &[String]) -
         };
         let end_span = parser.token.span;
         if parser.token != token::Eof {
-            parse_sess.span_diagnostic.span_err(start_span.to(end_span), "invalid crate attribute");
+            parse_sess.dcx.emit_err(errors::InvalidCrateAttr { span: start_span.to(end_span) });
             continue;
         }
 
@@ -36,6 +37,4 @@ pub fn inject(mut krate: ast::Crate, parse_sess: &ParseSess, attrs: &[String]) -
             start_span.to(end_span),
         ));
     }
-
-    krate
 }

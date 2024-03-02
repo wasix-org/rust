@@ -6,7 +6,6 @@ use crate::llvm;
 use crate::type_of::LayoutLlvmExt;
 use rustc_codegen_ssa::traits::*;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
-pub use rustc_middle::mir::mono::MonoItem;
 use rustc_middle::mir::mono::{Linkage, Visibility};
 use rustc_middle::ty::layout::{FnAbiOf, LayoutOf};
 use rustc_middle::ty::{self, Instance, TypeVisitableExt};
@@ -48,10 +47,10 @@ impl<'tcx> PreDefineMethods<'tcx> for CodegenCx<'_, 'tcx> {
         visibility: Visibility,
         symbol_name: &str,
     ) {
-        assert!(!instance.substs.needs_infer());
+        assert!(!instance.args.has_infer());
 
         let fn_abi = self.fn_abi_of_instance(instance, ty::List::empty());
-        let lldecl = self.declare_fn(symbol_name, fn_abi);
+        let lldecl = self.declare_fn(symbol_name, fn_abi, Some(instance));
         unsafe { llvm::LLVMRustSetLinkage(lldecl, base::linkage_to_llvm(linkage)) };
         let attrs = self.tcx.codegen_fn_attrs(instance.def_id());
         base::set_link_section(lldecl, attrs);
@@ -111,7 +110,7 @@ impl CodegenCx<'_, '_> {
         }
 
         // Symbols from executables can't really be imported any further.
-        let all_exe = self.tcx.sess.crate_types().iter().all(|ty| *ty == CrateType::Executable);
+        let all_exe = self.tcx.crate_types().iter().all(|ty| *ty == CrateType::Executable);
         let is_declaration_for_linker =
             is_declaration || linkage == llvm::Linkage::AvailableExternallyLinkage;
         if all_exe && !is_declaration_for_linker {
@@ -125,8 +124,7 @@ impl CodegenCx<'_, '_> {
 
         // Thread-local variables generally don't support copy relocations.
         let is_thread_local_var = llvm::LLVMIsAGlobalVariable(llval)
-            .map(|v| llvm::LLVMIsThreadLocal(v) == llvm::True)
-            .unwrap_or(false);
+            .is_some_and(|v| llvm::LLVMIsThreadLocal(v) == llvm::True);
         if is_thread_local_var {
             return false;
         }

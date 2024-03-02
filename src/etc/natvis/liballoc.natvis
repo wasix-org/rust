@@ -4,7 +4,7 @@
     <DisplayString>{{ len={len} }}</DisplayString>
     <Expand>
       <Item Name="[len]" ExcludeView="simple">len</Item>
-      <Item Name="[capacity]" ExcludeView="simple">buf.cap</Item>
+      <Item Name="[capacity]" ExcludeView="simple">buf.cap.__0</Item>
       <ArrayItems>
         <Size>len</Size>
         <ValuePointer>buf.ptr.pointer.pointer</ValuePointer>
@@ -15,7 +15,7 @@
     <DisplayString>{{ len={len} }}</DisplayString>
     <Expand>
       <Item Name="[len]" ExcludeView="simple">len</Item>
-      <Item Name="[capacity]" ExcludeView="simple">buf.cap</Item>
+      <Item Name="[capacity]" ExcludeView="simple">buf.cap.__0</Item>
       <CustomListItems>
         <Variable Name="i" InitialValue="0" />
         <Size>len</Size>
@@ -23,7 +23,7 @@
           <If Condition="i == len">
             <Break/>
           </If>
-          <Item>buf.ptr.pointer.pointer[(i + head) % buf.cap]</Item>
+          <Item>buf.ptr.pointer.pointer[(i + head) % buf.cap.__0]</Item>
           <Exec>i = i + 1</Exec>
         </Loop>
       </CustomListItems>
@@ -45,7 +45,7 @@
     <StringView>(char*)vec.buf.ptr.pointer.pointer,[vec.len]s8</StringView>
     <Expand>
       <Item Name="[len]" ExcludeView="simple">vec.len</Item>
-      <Item Name="[capacity]" ExcludeView="simple">vec.buf.cap</Item>
+      <Item Name="[capacity]" ExcludeView="simple">vec.buf.cap.__0</Item>
       <Synthetic Name="[chars]">
         <DisplayString>{(char*)vec.buf.ptr.pointer.pointer,[vec.len]s8}</DisplayString>
         <Expand>
@@ -66,7 +66,10 @@
       dyn pointees.
 
       Rc<[T]> and Arc<[T]> are handled separately altogether so we can actually show
-      the slice values.
+      the slice values. These visualizers have a second wildcard `foo&lt;slice2$&lt;*&gt;, *&gt;`
+      which accounts for the allocator parameter. This isn't needed for the other visualizers since
+      their inner `*` eats the type parameter but since the slice ones match part of the type params
+      it is necessary for them.
   -->
   <!-- alloc::rc::Rc<T> -->
   <Type Name="alloc::rc::Rc&lt;*&gt;">
@@ -84,7 +87,7 @@
   </Type>
 
   <!-- alloc::rc::Rc<[T]> -->
-  <Type Name="alloc::rc::Rc&lt;slice2$&lt;*&gt; &gt;">
+  <Type Name="alloc::rc::Rc&lt;slice2$&lt;*&gt;,*&gt;">
     <DisplayString>{{ len={ptr.pointer.length} }}</DisplayString>
     <Expand>
       <Item Name="[Length]" ExcludeView="simple">ptr.pointer.length</Item>
@@ -114,7 +117,7 @@
   </Type>
 
   <!-- alloc::rc::Weak<[T]> -->
-  <Type Name="alloc::rc::Weak&lt;slice2$&lt;*&gt; &gt;">
+  <Type Name="alloc::rc::Weak&lt;slice2$&lt;*&gt;,*&gt;">
     <DisplayString>{{ len={ptr.pointer.length} }}</DisplayString>
     <Expand>
       <Item Name="[Length]" ExcludeView="simple">ptr.pointer.length</Item>
@@ -143,7 +146,7 @@
   </Type>
 
   <!-- alloc::sync::Arc<[T]> -->
-  <Type Name="alloc::sync::Arc&lt;slice2$&lt;*&gt; &gt;">
+  <Type Name="alloc::sync::Arc&lt;slice2$&lt;*&gt;,*&gt;">
     <DisplayString>{{ len={ptr.pointer.length} }}</DisplayString>
     <Expand>
       <Item Name="[Length]" ExcludeView="simple">ptr.pointer.length</Item>
@@ -172,7 +175,7 @@
   </Type>
 
   <!-- alloc::sync::Weak<[T]> -->
-  <Type Name="alloc::sync::Weak&lt;slice2$&lt;*&gt; &gt;">
+  <Type Name="alloc::sync::Weak&lt;slice2$&lt;*&gt;,*&gt;">
     <DisplayString>{{ len={ptr.pointer.length} }}</DisplayString>
     <Expand>
       <Item Name="[Length]" ExcludeView="simple">ptr.pointer.length</Item>

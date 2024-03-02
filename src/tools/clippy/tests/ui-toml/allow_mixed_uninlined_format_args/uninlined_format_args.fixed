@@ -1,5 +1,5 @@
-// run-rustfix
 #![warn(clippy::uninlined_format_args)]
+#![allow(clippy::unnecessary_literal_unwrap)]
 
 fn main() {
     let local_i32 = 1;

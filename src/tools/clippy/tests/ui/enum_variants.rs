@@ -12,7 +12,10 @@ enum FakeCallType2 {
 }
 
 enum Foo {
+    //~^ ERROR: all variants have the same prefix: `c`
     cFoo,
+    //~^ ERROR: variant name ends with the enum's name
+    //~| NOTE: `-D clippy::enum-variant-names` implied by `-D warnings`
     cBar,
     cBaz,
 }
@@ -23,9 +26,13 @@ enum Fooo {
 }
 
 enum Food {
+    //~^ ERROR: all variants have the same prefix: `Food`
     FoodGood,
+    //~^ ERROR: variant name starts with the enum's name
     FoodMiddle,
+    //~^ ERROR: variant name starts with the enum's name
     FoodBad,
+    //~^ ERROR: variant name starts with the enum's name
 }
 
 enum Stuff {
@@ -33,6 +40,7 @@ enum Stuff {
 }
 
 enum BadCallType {
+    //~^ ERROR: all variants have the same prefix: `CallType`
     CallTypeCall,
     CallTypeCreate,
     CallTypeDestroy,
@@ -45,6 +53,7 @@ enum TwoCallType {
 }
 
 enum Consts {
+    //~^ ERROR: all variants have the same prefix: `Constant`
     ConstantInt,
     ConstantCake,
     ConstantLie,
@@ -57,6 +66,7 @@ enum Two {
 }
 
 enum Something {
+    //~^ ERROR: all variants have the same prefix: `C`
     CCall,
     CCreate,
     CCryogenize,
@@ -79,6 +89,7 @@ enum Sealll {
 }
 
 enum Seallll {
+    //~^ ERROR: all variants have the same prefix: `WithOut`
     WithOutCake,
     WithOutTea,
     WithOut,
@@ -134,12 +145,14 @@ pub enum NetworkLayer {
 
 // should lint suggesting `IData`, not only `Data` (see #4639)
 enum IDataRequest {
+    //~^ ERROR: all variants have the same postfix: `IData`
     PutIData(String),
     GetIData(String),
     DeleteUnpubIData(String),
 }
 
 enum HIDataRequest {
+    //~^ ERROR: all variants have the same postfix: `HIData`
     PutHIData(String),
     GetHIData(String),
     DeleteUnpubHIData(String),
@@ -160,6 +173,7 @@ enum Phase {
 
 mod issue9018 {
     enum DoLint {
+        //~^ ERROR: all variants have the same prefix: `_Type`
         _TypeCreate,
         _TypeRead,
         _TypeUpdate,
@@ -167,6 +181,7 @@ mod issue9018 {
     }
 
     enum DoLintToo {
+        //~^ ERROR: all variants have the same postfix: `Type`
         _CreateType,
         _UpdateType,
         _DeleteType,
@@ -176,6 +191,33 @@ mod issue9018 {
         _Foo,
         _Bar,
         _Baz,
+    }
+}
+
+mod allow_attributes_on_variants {
+    enum Enum {
+        #[allow(clippy::enum_variant_names)]
+        EnumStartsWith,
+        #[allow(clippy::enum_variant_names)]
+        EndsWithEnum,
+        Foo,
+    }
+}
+
+mod issue11494 {
+    // variant order should not affect lint
+    enum Data {
+        Valid,
+        Invalid,
+        DataDependent,
+        //~^ ERROR: variant name starts with the enum's name
+    }
+
+    enum Datas {
+        DatasDependent,
+        //~^ ERROR: variant name starts with the enum's name
+        Valid,
+        Invalid,
     }
 }
 

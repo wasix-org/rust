@@ -2,6 +2,7 @@ use crate::ffi::CStr;
 use crate::io;
 use crate::num::NonZeroUsize;
 use crate::os::windows::io::AsRawHandle;
+use crate::os::windows::io::HandleOrNull;
 use crate::ptr;
 use crate::sys::c;
 use crate::sys::handle::Handle;
@@ -9,8 +10,9 @@ use crate::sys::stack_overflow;
 use crate::sys_common::FromInner;
 use crate::time::Duration;
 
-use libc::c_void;
+use core::ffi::c_void;
 
+use super::time::WaitableTimer;
 use super::to_u16s;
 
 pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
@@ -32,12 +34,12 @@ impl Thread {
         let ret = c::CreateThread(
             ptr::null_mut(),
             stack,
-            thread_start,
+            Some(thread_start),
             p as *mut _,
             c::STACK_SIZE_PARAM_IS_A_RESERVATION,
             ptr::null_mut(),
         );
-
+        let ret = HandleOrNull::from_raw_handle(ret);
         return if let Ok(handle) = ret.try_into() {
             Ok(Thread { handle: Handle::from_inner(handle) })
         } else {
@@ -91,7 +93,17 @@ impl Thread {
     }
 
     pub fn sleep(dur: Duration) {
-        unsafe { c::Sleep(super::dur2timeout(dur)) }
+        fn high_precision_sleep(dur: Duration) -> Result<(), ()> {
+            let timer = WaitableTimer::high_resolution()?;
+            timer.set(dur)?;
+            timer.wait()
+        }
+        // Attempt to use high-precision sleep (Windows 10, version 1803+).
+        // On error fallback to the standard `Sleep` function.
+        // Also preserves the zero duration behaviour of `Sleep`.
+        if dur.is_zero() || high_precision_sleep(dur).is_err() {
+            unsafe { c::Sleep(super::dur2timeout(dur)) }
+        }
     }
 
     pub fn handle(&self) -> &Handle {

@@ -3,14 +3,15 @@
 // RFC for reference.
 
 use rustc_data_structures::sso::SsoHashSet;
-use rustc_middle::ty::subst::{GenericArg, GenericArgKind};
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::ty::{GenericArg, GenericArgKind};
 use smallvec::{smallvec, SmallVec};
 
 #[derive(Debug)]
 pub enum Component<'tcx> {
     Region(ty::Region<'tcx>),
     Param(ty::ParamTy),
+    Placeholder(ty::PlaceholderType),
     UnresolvedInferenceVariable(ty::InferTy),
 
     // Projections like `T::Foo` are tricky because a constraint like
@@ -71,15 +72,15 @@ fn compute_components<'tcx>(
     // in the `subtys` iterator (e.g., when encountering a
     // projection).
     match *ty.kind() {
-            ty::FnDef(_, substs) => {
-                // HACK(eddyb) ignore lifetimes found shallowly in `substs`.
-                // This is inconsistent with `ty::Adt` (including all substs)
-                // and with `ty::Closure` (ignoring all substs other than
+            ty::FnDef(_, args) => {
+                // HACK(eddyb) ignore lifetimes found shallowly in `args`.
+                // This is inconsistent with `ty::Adt` (including all args)
+                // and with `ty::Closure` (ignoring all args other than
                 // upvars, of which a `ty::FnDef` doesn't have any), but
                 // consistent with previous (accidental) behavior.
                 // See https://github.com/rust-lang/rust/issues/70917
                 // for further background and discussion.
-                for child in substs {
+                for child in args {
                     match child.unpack() {
                         GenericArgKind::Type(ty) => {
                             compute_components(tcx, ty, out, visited);
@@ -97,27 +98,31 @@ fn compute_components<'tcx>(
                 compute_components(tcx, element, out, visited);
             }
 
-            ty::Closure(_, ref substs) => {
-                let tupled_ty = substs.as_closure().tupled_upvars_ty();
+            ty::Closure(_, args) => {
+                let tupled_ty = args.as_closure().tupled_upvars_ty();
                 compute_components(tcx, tupled_ty, out, visited);
             }
 
-            ty::Generator(_, ref substs, _) => {
+            ty::Coroutine(_, args, _) => {
                 // Same as the closure case
-                let tupled_ty = substs.as_generator().tupled_upvars_ty();
+                let tupled_ty = args.as_coroutine().tupled_upvars_ty();
                 compute_components(tcx, tupled_ty, out, visited);
 
-                // We ignore regions in the generator interior as we don't
+                // We ignore regions in the coroutine interior as we don't
                 // want these to affect region inference
             }
 
             // All regions are bound inside a witness
-            ty::GeneratorWitness(..) | ty::GeneratorWitnessMIR(..) => (),
+            ty::CoroutineWitness(..) => (),
 
             // OutlivesTypeParameterEnv -- the actual checking that `X:'a`
             // is implied by the environment is done in regionck.
             ty::Param(p) => {
                 out.push(Component::Param(p));
+            }
+
+            ty::Placeholder(p) => {
+                out.push(Component::Placeholder(p));
             }
 
             // For projections, we prefer to generate an obligation like
@@ -143,7 +148,7 @@ fn compute_components<'tcx>(
                     // through and constrain Pi.
                     let mut subcomponents = smallvec![];
                     let mut subvisited = SsoHashSet::new();
-                    compute_components_recursive(tcx, ty.into(), &mut subcomponents, &mut subvisited);
+                    compute_alias_components_recursive(tcx, ty, &mut subcomponents, &mut subvisited);
                     out.push(Component::EscapingAlias(subcomponents.into_iter().collect()));
                 }
             }
@@ -176,7 +181,6 @@ fn compute_components<'tcx>(
             ty::Tuple(..) |       // ...
             ty::FnPtr(_) |        // OutlivesFunction (*)
             ty::Dynamic(..) |     // OutlivesObject, OutlivesFragment (*)
-            ty::Placeholder(..) |
             ty::Bound(..) |
             ty::Error(_) => {
                 // (*) Function pointers and trait objects are both binders.
@@ -189,11 +193,49 @@ fn compute_components<'tcx>(
         }
 }
 
-/// Collect [Component]s for *all* the substs of `parent`.
+/// Collect [Component]s for *all* the args of `parent`.
 ///
 /// This should not be used to get the components of `parent` itself.
 /// Use [push_outlives_components] instead.
-pub(super) fn compute_components_recursive<'tcx>(
+pub(super) fn compute_alias_components_recursive<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    alias_ty: Ty<'tcx>,
+    out: &mut SmallVec<[Component<'tcx>; 4]>,
+    visited: &mut SsoHashSet<GenericArg<'tcx>>,
+) {
+    let ty::Alias(kind, alias_ty) = alias_ty.kind() else {
+        unreachable!("can only call `compute_alias_components_recursive` on an alias type")
+    };
+    let opt_variances = if *kind == ty::Opaque { tcx.variances_of(alias_ty.def_id) } else { &[] };
+    for (index, child) in alias_ty.args.iter().enumerate() {
+        if opt_variances.get(index) == Some(&ty::Bivariant) {
+            continue;
+        }
+        if !visited.insert(child) {
+            continue;
+        }
+        match child.unpack() {
+            GenericArgKind::Type(ty) => {
+                compute_components(tcx, ty, out, visited);
+            }
+            GenericArgKind::Lifetime(lt) => {
+                // Ignore higher ranked regions.
+                if !lt.is_bound() {
+                    out.push(Component::Region(lt));
+                }
+            }
+            GenericArgKind::Const(_) => {
+                compute_components_recursive(tcx, child, out, visited);
+            }
+        }
+    }
+}
+
+/// Collect [Component]s for *all* the args of `parent`.
+///
+/// This should not be used to get the components of `parent` itself.
+/// Use [push_outlives_components] instead.
+fn compute_components_recursive<'tcx>(
     tcx: TyCtxt<'tcx>,
     parent: GenericArg<'tcx>,
     out: &mut SmallVec<[Component<'tcx>; 4]>,
@@ -205,8 +247,8 @@ pub(super) fn compute_components_recursive<'tcx>(
                 compute_components(tcx, ty, out, visited);
             }
             GenericArgKind::Lifetime(lt) => {
-                // Ignore late-bound regions.
-                if !lt.is_late_bound() {
+                // Ignore higher ranked regions.
+                if !lt.is_bound() {
                     out.push(Component::Region(lt));
                 }
             }

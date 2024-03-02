@@ -1,9 +1,8 @@
-use core::convert::TryFrom;
 use core::num::{
     IntErrorKind, NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize,
     NonZeroU128, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize,
 };
-use core::option::Option::{self, None, Some};
+use core::option::Option::None;
 use std::mem::size_of;
 
 #[test]
@@ -215,11 +214,13 @@ fn nonzero_const() {
     const ONE: Option<NonZeroU8> = NonZeroU8::new(1);
     assert!(ONE.is_some());
 
+    /* FIXME(#110395)
     const FROM_NONZERO_U8: u8 = u8::from(NONZERO_U8);
     assert_eq!(FROM_NONZERO_U8, 5);
 
     const NONZERO_CONVERT: NonZeroU32 = NonZeroU32::from(NONZERO_U8);
     assert_eq!(NONZERO_CONVERT.get(), 5);
+    */
 }
 
 #[test]
@@ -333,4 +334,22 @@ fn test_nonzero_uint_rem() {
 
     let x: u32 = 42u32 % nz;
     assert_eq!(x, 2u32);
+}
+
+#[test]
+fn test_signed_nonzero_neg() {
+    assert_eq!((-NonZeroI8::new(1).unwrap()).get(), -1);
+    assert_eq!((-NonZeroI8::new(-1).unwrap()).get(), 1);
+
+    assert_eq!((-NonZeroI16::new(1).unwrap()).get(), -1);
+    assert_eq!((-NonZeroI16::new(-1).unwrap()).get(), 1);
+
+    assert_eq!((-NonZeroI32::new(1).unwrap()).get(), -1);
+    assert_eq!((-NonZeroI32::new(-1).unwrap()).get(), 1);
+
+    assert_eq!((-NonZeroI64::new(1).unwrap()).get(), -1);
+    assert_eq!((-NonZeroI64::new(-1).unwrap()).get(), 1);
+
+    assert_eq!((-NonZeroI128::new(1).unwrap()).get(), -1);
+    assert_eq!((-NonZeroI128::new(-1).unwrap()).get(), 1);
 }

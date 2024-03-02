@@ -1,7 +1,6 @@
 use super::super::*;
 use core::num::flt2dec::strategy::grisu::*;
 use std::mem::MaybeUninit;
-use test::{black_box, Bencher};
 
 pub fn decode_finite<T: DecodableFloat>(v: T) -> Decoded {
     match decode(v).1 {
@@ -76,6 +75,33 @@ fn bench_small_exact_inf(b: &mut Bencher) {
 #[bench]
 fn bench_big_exact_inf(b: &mut Bencher) {
     let decoded = decode_finite(f64::MAX);
+    let mut buf = [MaybeUninit::new(0); 1024];
+    b.iter(|| {
+        format_exact(black_box(&decoded), &mut buf, i16::MIN);
+    });
+}
+
+#[bench]
+fn bench_one_exact_inf(b: &mut Bencher) {
+    let decoded = decode_finite(1.0);
+    let mut buf = [MaybeUninit::new(0); 1024];
+    b.iter(|| {
+        format_exact(black_box(&decoded), &mut buf, i16::MIN);
+    });
+}
+
+#[bench]
+fn bench_trailing_zero_exact_inf(b: &mut Bencher) {
+    let decoded = decode_finite(250.000000000000000000000000);
+    let mut buf = [MaybeUninit::new(0); 1024];
+    b.iter(|| {
+        format_exact(black_box(&decoded), &mut buf, i16::MIN);
+    });
+}
+
+#[bench]
+fn bench_halfway_point_exact_inf(b: &mut Bencher) {
+    let decoded = decode_finite(1.00000000000000011102230246251565404236316680908203125);
     let mut buf = [MaybeUninit::new(0); 1024];
     b.iter(|| {
         format_exact(black_box(&decoded), &mut buf, i16::MIN);

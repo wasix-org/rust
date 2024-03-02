@@ -31,7 +31,24 @@ pub struct InvalidAbi {
     pub abi: Symbol,
     pub command: String,
     #[subdiagnostic]
+    pub explain: Option<InvalidAbiReason>,
+    #[subdiagnostic]
     pub suggestion: Option<InvalidAbiSuggestion>,
+}
+
+pub struct InvalidAbiReason(pub &'static str);
+
+impl rustc_errors::AddToDiagnostic for InvalidAbiReason {
+    fn add_to_diagnostic_with<F>(self, diag: &mut rustc_errors::Diagnostic, _: F)
+    where
+        F: Fn(
+            &mut rustc_errors::Diagnostic,
+            rustc_errors::SubdiagnosticMessage,
+        ) -> rustc_errors::SubdiagnosticMessage,
+    {
+        #[allow(rustc::untranslatable_diagnostic)]
+        diag.note(self.0);
+    }
 }
 
 #[derive(Subdiagnostic)]
@@ -108,14 +125,14 @@ pub struct BaseExpressionDoubleDot {
 pub struct AwaitOnlyInAsyncFnAndBlocks {
     #[primary_span]
     #[label]
-    pub dot_await_span: Span,
+    pub await_kw_span: Span,
     #[label(ast_lowering_this_not_async)]
     pub item_span: Option<Span>,
 }
 
 #[derive(Diagnostic, Clone, Copy)]
-#[diag(ast_lowering_generator_too_many_parameters, code = "E0628")]
-pub struct GeneratorTooManyParameters {
+#[diag(ast_lowering_coroutine_too_many_parameters, code = "E0628")]
+pub struct CoroutineTooManyParameters {
     #[primary_span]
     pub fn_decl_span: Span,
 }
@@ -137,15 +154,15 @@ pub struct AsyncNonMoveClosureNotSupported {
 
 #[derive(Diagnostic, Clone, Copy)]
 #[diag(ast_lowering_functional_record_update_destructuring_assignment)]
-pub struct FunctionalRecordUpdateDestructuringAssignemnt {
+pub struct FunctionalRecordUpdateDestructuringAssignment {
     #[primary_span]
     #[suggestion(code = "", applicability = "machine-applicable")]
     pub span: Span,
 }
 
 #[derive(Diagnostic, Clone, Copy)]
-#[diag(ast_lowering_async_generators_not_supported, code = "E0727")]
-pub struct AsyncGeneratorsNotSupported {
+#[diag(ast_lowering_async_coroutines_not_supported, code = "E0727")]
+pub struct AsyncCoroutinesNotSupported {
     #[primary_span]
     pub span: Span,
 }
@@ -323,6 +340,32 @@ pub struct NotSupportedForLifetimeBinderAsyncClosure {
     pub span: Span,
 }
 
+#[derive(Diagnostic)]
+#[diag(ast_lowering_match_arm_with_no_body)]
+pub struct MatchArmWithNoBody {
+    #[primary_span]
+    pub span: Span,
+    #[suggestion(code = " => todo!(),", applicability = "has-placeholders")]
+    pub suggestion: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_lowering_never_pattern_with_body)]
+pub struct NeverPatternWithBody {
+    #[primary_span]
+    #[label]
+    #[suggestion(code = "", applicability = "maybe-incorrect")]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_lowering_never_pattern_with_guard)]
+pub struct NeverPatternWithGuard {
+    #[primary_span]
+    #[suggestion(code = "", applicability = "maybe-incorrect")]
+    pub span: Span,
+}
+
 #[derive(Diagnostic, Clone, Copy)]
 #[diag(ast_lowering_arbitrary_expression_in_pattern)]
 pub struct ArbitraryExpressionInPattern {
@@ -337,13 +380,18 @@ pub struct InclusiveRangeWithNoEnd {
     pub span: Span,
 }
 
-#[derive(Diagnostic, Clone, Copy)]
-#[diag(ast_lowering_trait_fn_async, code = "E0706")]
-#[note]
-#[note(ast_lowering_note2)]
-pub struct TraitFnAsync {
-    #[primary_span]
-    pub fn_span: Span,
-    #[label]
-    pub span: Span,
+#[derive(Diagnostic)]
+pub enum BadReturnTypeNotation {
+    #[diag(ast_lowering_bad_return_type_notation_inputs)]
+    Inputs {
+        #[primary_span]
+        #[suggestion(code = "()", applicability = "maybe-incorrect")]
+        span: Span,
+    },
+    #[diag(ast_lowering_bad_return_type_notation_output)]
+    Output {
+        #[primary_span]
+        #[suggestion(code = "", applicability = "maybe-incorrect")]
+        span: Span,
+    },
 }

@@ -1,3 +1,5 @@
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // compile-flags: --crate-type lib -Cdebug-assertions=no
 
 #![feature(flt2dec)]
@@ -8,7 +10,7 @@ use core::num::flt2dec;
 use std::fmt::{Formatter, Result};
 
 // EMIT_MIR funky_arms.float_to_exponential_common.ConstProp.diff
-fn float_to_exponential_common<T>(fmt: &mut Formatter<'_>, num: &T, upper: bool) -> Result
+pub fn float_to_exponential_common<T>(fmt: &mut Formatter<'_>, num: &T, upper: bool) -> Result
 where
     T: flt2dec::DecodableFloat,
 {

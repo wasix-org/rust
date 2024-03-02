@@ -1,40 +1,40 @@
+// exact-check
 // ignore-order
-
-const QUERY = [
-    'Aaaaaaa -> i32',
-    'Aaaaaaa -> Aaaaaaa',
-    'Aaaaaaa -> usize',
-    '-> Aaaaaaa',
-    'Aaaaaaa',
-];
 
 const EXPECTED = [
     {
-        // Aaaaaaa -> i32
+        'query': 'Aaaaaaa -> i32',
         'others': [
             { 'path': 'impl_trait::Ccccccc', 'name': 'eeeeeee' },
         ],
     },
     {
-        // Aaaaaaa -> Aaaaaaa
+        'query': 'Aaaaaaa -> Aaaaaaa',
         'others': [
             { 'path': 'impl_trait::Ccccccc', 'name': 'fffffff' },
         ],
     },
     {
-        // Aaaaaaa -> usize
+        'query': 'Aaaaaaa -> usize',
         'others': [],
     },
     {
-        // -> Aaaaaaa
+        'query': '-> Aaaaaaa',
         'others': [
-            { 'path': 'impl_trait::Ccccccc', 'name': 'fffffff' },
-            { 'path': 'impl_trait::Ccccccc', 'name': 'ddddddd' },
             { 'path': 'impl_trait', 'name': 'bbbbbbb' },
+            { 'path': 'impl_trait::Ccccccc', 'name': 'ddddddd' },
+            { 'path': 'impl_trait::Ccccccc', 'name': 'fffffff' },
+            { 'path': 'impl_trait::Ccccccc', 'name': 'ggggggg' },
         ],
     },
     {
-        // Aaaaaaa
+        'query': '-> Bbbbbbb',
+        'others': [
+            { 'path': 'impl_trait::Ccccccc', 'name': 'ggggggg' },
+        ],
+    },
+    {
+        'query': 'Aaaaaaa',
         'others': [
             { 'path': 'impl_trait', 'name': 'Aaaaaaa' },
         ],
@@ -43,9 +43,10 @@ const EXPECTED = [
             { 'path': 'impl_trait::Ccccccc', 'name': 'eeeeeee' },
         ],
         'returned': [
-            { 'path': 'impl_trait::Ccccccc', 'name': 'fffffff' },
-            { 'path': 'impl_trait::Ccccccc', 'name': 'ddddddd' },
             { 'path': 'impl_trait', 'name': 'bbbbbbb' },
+            { 'path': 'impl_trait::Ccccccc', 'name': 'ddddddd' },
+            { 'path': 'impl_trait::Ccccccc', 'name': 'fffffff' },
+            { 'path': 'impl_trait::Ccccccc', 'name': 'ggggggg' },
         ],
     },
 ];

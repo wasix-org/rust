@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::default::Default;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -58,6 +57,9 @@ create_config! {
     chain_width: usize, 60, true, "Maximum length of a chain to fit on a single line.";
     single_line_if_else_max_width: usize, 50, true, "Maximum line length for single line if-else \
         expressions. A value of zero means always break if-else expressions.";
+    single_line_let_else_max_width: usize, 50, true, "Maximum line length for single line \
+        let-else statements. A value of zero means always format the divergent `else` block \
+        over multiple lines.";
 
     // Comments. macros, and strings
     wrap_comments: bool, false, false, "Break comments to fit on the line";
@@ -213,8 +215,8 @@ impl Config {
             let required_version = self.required_version();
             if version != required_version {
                 println!(
-                    "Error: rustfmt version ({}) doesn't match the required version ({})",
-                    version, required_version,
+                    "Error: rustfmt version ({version}) doesn't match the required version \
+({required_version})"
                 );
                 return false;
             }
@@ -307,20 +309,20 @@ impl Config {
             .ok_or_else(|| String::from("Parsed config was not table"))?;
         for key in table.keys() {
             if !Config::is_valid_name(key) {
-                let msg = &format!("Warning: Unknown configuration option `{}`\n", key);
+                let msg = &format!("Warning: Unknown configuration option `{key}`\n");
                 err.push_str(msg)
             }
         }
         match parsed.try_into() {
             Ok(parsed_config) => {
                 if !err.is_empty() {
-                    eprint!("{}", err);
+                    eprint!("{err}");
                 }
                 Ok(Config::default().fill_from_parsed_config(parsed_config, dir))
             }
             Err(e) => {
                 err.push_str("Error: Decoding config file failed:\n");
-                err.push_str(format!("{}\n", e).as_str());
+                err.push_str(format!("{e}\n").as_str());
                 err.push_str("Please check your config file.");
                 Err(err)
             }
@@ -473,6 +475,9 @@ mod test {
             chain_width: usize, 60, true, "Maximum length of a chain to fit on a single line.";
             single_line_if_else_max_width: usize, 50, true, "Maximum line length for single \
                 line if-else expressions. A value of zero means always break if-else expressions.";
+            single_line_let_else_max_width: usize, 50, false, "Maximum line length for single \
+                line let-else statements. A value of zero means always format the divergent \
+                `else` block over multiple lines.";
 
             // Options that are used by the tests
             stable_option: bool, false, true, "A stable option";
@@ -557,10 +562,7 @@ mod test {
         let toml = used_options.to_toml().unwrap();
         assert_eq!(
             toml,
-            format!(
-                "merge_derives = {}\nskip_children = {}\n",
-                merge_derives, skip_children,
-            )
+            format!("merge_derives = {merge_derives}\nskip_children = {skip_children}\n",)
         );
     }
 
@@ -619,6 +621,7 @@ struct_variant_width = 35
 array_width = 60
 chain_width = 60
 single_line_if_else_max_width = 50
+single_line_let_else_max_width = 50
 wrap_comments = false
 format_code_in_doc_comments = false
 doc_comment_code_block_width = 100
@@ -1013,7 +1016,6 @@ make_backup = false
     #[cfg(test)]
     mod partially_unstable_option {
         use super::mock::{Config, PartiallyUnstableOption};
-        use super::*;
 
         /// From the command line, we can override with a stable variant.
         #[test]

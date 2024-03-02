@@ -1,5 +1,5 @@
 // compile-flags: -Z mir-opt-level=3 -Z inline-mir
-// ignore-wasm32-bare compiled with panic=abort by default
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 #![crate_type = "lib"]
 
 // EMIT_MIR issue_78442.bar.RevealAll.diff
@@ -8,6 +8,11 @@ pub fn bar<P>(
     // Error won't happen if "bar" is not generic
     _baz: P,
 ) {
+    // CHECK-LABEL: fn bar(
+    // CHECK: let mut {{.*}}: &fn() {foo};
+    // CHECK: let {{.*}}: fn() {foo};
+    // CHECK: (inlined hide_foo)
+    // CHECK-NOT: inlined
     hide_foo()();
 }
 

@@ -9,17 +9,15 @@ use rustc_session::lint::{
     FutureIncompatibilityReason, Level, Lint, LintId,
 };
 use rustc_session::Session;
-use rustc_span::hygiene::MacroKind;
-use rustc_span::source_map::{DesugaringKind, ExpnKind};
-use rustc_span::{symbol, Span, Symbol, DUMMY_SP};
+use rustc_span::hygiene::{ExpnKind, MacroKind};
+use rustc_span::{symbol, DesugaringKind, Span, Symbol, DUMMY_SP};
 
 use crate::ty::TyCtxt;
 
 /// How a lint level was set.
 #[derive(Clone, Copy, PartialEq, Eq, HashStable, Debug)]
 pub enum LintLevelSource {
-    /// Lint is at the default level as declared
-    /// in rustc or a plugin.
+    /// Lint is at the default level as declared in rustc.
     Default,
 
     /// Lint level was set by an attribute.
@@ -169,26 +167,6 @@ impl TyCtxt<'_> {
     pub fn lint_level_at_node(self, lint: &'static Lint, id: HirId) -> (Level, LintLevelSource) {
         self.shallow_lint_levels_on(id.owner).lint_level_id_at_node(self, LintId::of(lint), id)
     }
-
-    /// Walks upwards from `id` to find a node which might change lint levels with attributes.
-    /// It stops at `bound` and just returns it if reached.
-    pub fn maybe_lint_level_root_bounded(self, mut id: HirId, bound: HirId) -> HirId {
-        let hir = self.hir();
-        loop {
-            if id == bound {
-                return bound;
-            }
-
-            if hir.attrs(id).iter().any(|attr| Level::from_attr(attr).is_some()) {
-                return id;
-            }
-            let next = hir.parent_id(id);
-            if next == id {
-                bug!("lint traversal reached the root of the crate");
-            }
-            id = next;
-        }
-    }
 }
 
 /// This struct represents a lint expectation and holds all required information
@@ -231,34 +209,34 @@ pub fn explain_lint_level_source(
     let name = lint.name_lower();
     match src {
         LintLevelSource::Default => {
-            err.note_once(&format!("`#[{}({})]` on by default", level.as_str(), name));
+            err.note_once(format!("`#[{}({})]` on by default", level.as_str(), name));
         }
         LintLevelSource::CommandLine(lint_flag_val, orig_level) => {
             let flag = orig_level.to_cmd_flag();
             let hyphen_case_lint_name = name.replace('_', "-");
             if lint_flag_val.as_str() == name {
-                err.note_once(&format!(
-                    "requested on the command line with `{} {}`",
-                    flag, hyphen_case_lint_name
+                err.note_once(format!(
+                    "requested on the command line with `{flag} {hyphen_case_lint_name}`"
                 ));
             } else {
                 let hyphen_case_flag_val = lint_flag_val.as_str().replace('_', "-");
-                err.note_once(&format!(
-                    "`{} {}` implied by `{} {}`",
-                    flag, hyphen_case_lint_name, flag, hyphen_case_flag_val
+                err.note_once(format!(
+                    "`{flag} {hyphen_case_lint_name}` implied by `{flag} {hyphen_case_flag_val}`"
+                ));
+                err.help_once(format!(
+                    "to override `{flag} {hyphen_case_flag_val}` add `#[allow({name})]`"
                 ));
             }
         }
         LintLevelSource::Node { name: lint_attr_name, span, reason, .. } => {
             if let Some(rationale) = reason {
-                err.note(rationale.as_str());
+                err.note(rationale.to_string());
             }
             err.span_note_once(span, "the lint level is defined here");
             if lint_attr_name.as_str() != name {
                 let level_str = level.as_str();
-                err.note_once(&format!(
-                    "`#[{}({})]` implied by `#[{}({})]`",
-                    level_str, name, level_str, lint_attr_name
+                err.note_once(format!(
+                    "`#[{level_str}({name})]` implied by `#[{level_str}({lint_attr_name})]`"
                 ));
             }
         }
@@ -275,29 +253,11 @@ pub fn explain_lint_level_source(
 /// - [`TyCtxt::struct_lint_node`]
 /// - `LintContext::lookup`
 ///
-/// ## `decorate` signature
+/// ## `decorate`
 ///
-/// The return value of `decorate` is ignored by this function. So what is the
-/// point of returning `&'b mut DiagnosticBuilder<'a, ()>`?
-///
-/// There are 2 reasons for this signature.
-///
-/// First of all, it prevents accidental use of `.emit()` -- it's clear that the
-/// builder will be later used and shouldn't be emitted right away (this is
-/// especially important because the old API expected you to call `.emit()` in
-/// the closure).
-///
-/// Second of all, it makes the most common case of adding just a single label
-/// /suggestion much nicer, since [`DiagnosticBuilder`] methods return
-/// `&mut DiagnosticBuilder`, you can just chain methods, without needed
-/// awkward `{ ...; }`:
-/// ```ignore pseudo-code
-/// struct_lint_level(
-///     ...,
-///     |lint| lint.span_label(sp, "lbl")
-///     //          ^^^^^^^^^^^^^^^^^^^^^ returns `&mut DiagnosticBuilder` by default
-/// )
-/// ```
+/// It is not intended to call `emit`/`cancel` on the `DiagnosticBuilder` passed
+/// in the `decorate` callback.
+#[track_caller]
 pub fn struct_lint_level(
     sess: &Session,
     lint: &'static Lint,
@@ -305,12 +265,11 @@ pub fn struct_lint_level(
     src: LintLevelSource,
     span: Option<MultiSpan>,
     msg: impl Into<DiagnosticMessage>,
-    decorate: impl for<'a, 'b> FnOnce(
-        &'b mut DiagnosticBuilder<'a, ()>,
-    ) -> &'b mut DiagnosticBuilder<'a, ()>,
+    decorate: impl for<'a, 'b> FnOnce(&'b mut DiagnosticBuilder<'a, ()>),
 ) {
     // Avoid codegen bloat from monomorphization by immediately doing dyn dispatch of `decorate` to
     // the "real" work.
+    #[track_caller]
     fn struct_lint_level_impl(
         sess: &Session,
         lint: &'static Lint,
@@ -318,12 +277,7 @@ pub fn struct_lint_level(
         src: LintLevelSource,
         span: Option<MultiSpan>,
         msg: impl Into<DiagnosticMessage>,
-        decorate: Box<
-            dyn '_
-                + for<'a, 'b> FnOnce(
-                    &'b mut DiagnosticBuilder<'a, ()>,
-                ) -> &'b mut DiagnosticBuilder<'a, ()>,
-        >,
+        decorate: Box<dyn '_ + for<'a, 'b> FnOnce(&'b mut DiagnosticBuilder<'a, ()>)>,
     ) {
         // Check for future incompatibility lints and issue a stronger warning.
         let future_incompatible = lint.future_incompatible;
@@ -332,7 +286,10 @@ pub fn struct_lint_level(
             // Default allow lints trigger too often for testing.
             sess.opts.unstable_opts.future_incompat_test && lint.default_level != Level::Allow,
             |incompat| {
-                matches!(incompat.reason, FutureIncompatibilityReason::FutureReleaseErrorReportNow)
+                matches!(
+                    incompat.reason,
+                    FutureIncompatibilityReason::FutureReleaseErrorReportInDeps
+                )
             },
         );
 
@@ -351,7 +308,7 @@ pub fn struct_lint_level(
             (Level::Expect(expect_id), _) => {
                 // This case is special as we actually allow the lint itself in this context, but
                 // we can't return early like in the case for `Level::Allow` because we still
-                // need the lint diagnostic to be emitted to `rustc_error::HandlerInner`.
+                // need the lint diagnostic to be emitted to `rustc_error::DiagCtxtInner`.
                 //
                 // We can also not mark the lint expectation as fulfilled here right away, as it
                 // can still be cancelled in the decorate function. All of this means that we simply
@@ -367,11 +324,11 @@ pub fn struct_lint_level(
             (Level::Warn | Level::ForceWarn(None), Some(span)) => sess.struct_span_warn(span, ""),
             (Level::Warn | Level::ForceWarn(None), None) => sess.struct_warn(""),
             (Level::Deny | Level::Forbid, Some(span)) => {
-                let mut builder = sess.diagnostic().struct_err_lint("");
+                let mut builder = sess.dcx().struct_err_lint("");
                 builder.set_span(span);
                 builder
             }
-            (Level::Deny | Level::Forbid, None) => sess.diagnostic().struct_err_lint(""),
+            (Level::Deny | Level::Forbid, None) => sess.dcx().struct_err_lint(""),
         };
 
         err.set_is_lint();
@@ -388,10 +345,11 @@ pub fn struct_lint_level(
             // it'll become a hard error, so we have to emit *something*. Also,
             // if this lint occurs in the expansion of a macro from an external crate,
             // allow individual lints to opt-out from being reported.
-            let not_future_incompatible =
-                future_incompatible.map(|f| f.reason.edition().is_some()).unwrap_or(true);
-            if not_future_incompatible && !lint.report_in_external_macro {
+            let incompatible = future_incompatible.is_some_and(|f| f.reason.edition().is_none());
+
+            if !incompatible && !lint.report_in_external_macro {
                 err.cancel();
+
                 // Don't continue further, since we don't want to have
                 // `diag_span_note_once` called for a diagnostic that isn't emitted.
                 return;
@@ -421,8 +379,8 @@ pub fn struct_lint_level(
 
         if let Some(future_incompatible) = future_incompatible {
             let explanation = match future_incompatible.reason {
-                FutureIncompatibilityReason::FutureReleaseError
-                | FutureIncompatibilityReason::FutureReleaseErrorReportNow => {
+                FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps
+                | FutureIncompatibilityReason::FutureReleaseErrorReportInDeps => {
                     "this was previously accepted by the compiler but is being phased out; \
                          it will become a hard error in a future release!"
                         .to_owned()
@@ -433,23 +391,22 @@ pub fn struct_lint_level(
                 FutureIncompatibilityReason::EditionError(edition) => {
                     let current_edition = sess.edition();
                     format!(
-                        "this is accepted in the current edition (Rust {}) but is a hard error in Rust {}!",
-                        current_edition, edition
+                        "this is accepted in the current edition (Rust {current_edition}) but is a hard error in Rust {edition}!"
                     )
                 }
                 FutureIncompatibilityReason::EditionSemanticsChange(edition) => {
-                    format!("this changes meaning in Rust {}", edition)
+                    format!("this changes meaning in Rust {edition}")
                 }
                 FutureIncompatibilityReason::Custom(reason) => reason.to_owned(),
             };
 
             if future_incompatible.explain_reason {
-                err.warn(&explanation);
+                err.warn(explanation);
             }
             if !future_incompatible.reference.is_empty() {
                 let citation =
                     format!("for more information, see {}", future_incompatible.reference);
-                err.note(&citation);
+                err.note(citation);
             }
         }
 
@@ -468,10 +425,13 @@ pub fn struct_lint_level(
 pub fn in_external_macro(sess: &Session, span: Span) -> bool {
     let expn_data = span.ctxt().outer_expn_data();
     match expn_data.kind {
-        ExpnKind::Inlined
-        | ExpnKind::Root
+        ExpnKind::Root
         | ExpnKind::Desugaring(
-            DesugaringKind::ForLoop | DesugaringKind::WhileLoop | DesugaringKind::OpaqueTy,
+            DesugaringKind::ForLoop
+            | DesugaringKind::WhileLoop
+            | DesugaringKind::OpaqueTy
+            | DesugaringKind::Async
+            | DesugaringKind::Await,
         ) => false,
         ExpnKind::AstPass(_) | ExpnKind::Desugaring(_) => true, // well, it's "external"
         ExpnKind::Macro(MacroKind::Bang, _) => {
@@ -479,5 +439,14 @@ pub fn in_external_macro(sess: &Session, span: Span) -> bool {
             expn_data.def_site.is_dummy() || sess.source_map().is_imported(expn_data.def_site)
         }
         ExpnKind::Macro { .. } => true, // definitely a plugin
+    }
+}
+
+/// Return whether `span` is generated by `async` or `await`.
+pub fn is_from_async_await(span: Span) -> bool {
+    let expn_data = span.ctxt().outer_expn_data();
+    match expn_data.kind {
+        ExpnKind::Desugaring(DesugaringKind::Async | DesugaringKind::Await) => true,
+        _ => false,
     }
 }

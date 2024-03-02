@@ -1,21 +1,21 @@
-//! Related to out filenames of compilation (e.g. save analysis, binaries).
-use crate::config::{CrateType, Input, OutputFilenames, OutputType};
+//! Related to out filenames of compilation (e.g. binaries).
+use crate::config::{CrateType, Input, OutFileName, OutputFilenames, OutputType};
 use crate::errors::{
     CrateNameDoesNotMatch, CrateNameEmpty, CrateNameInvalid, FileIsNotWriteable,
-    InvalidCharacterInCrateName,
+    InvalidCharacterInCrateName, InvalidCrateNameHelp,
 };
 use crate::Session;
-use rustc_ast as ast;
+use rustc_ast::{self as ast, attr};
 use rustc_span::symbol::sym;
 use rustc_span::{Span, Symbol};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn out_filename(
     sess: &Session,
     crate_type: CrateType,
     outputs: &OutputFilenames,
     crate_name: Symbol,
-) -> PathBuf {
+) -> OutFileName {
     let default_filename = filename_for_input(sess, crate_type, crate_name, outputs);
     let out_filename = outputs
         .outputs
@@ -24,7 +24,9 @@ pub fn out_filename(
         .or_else(|| outputs.single_output_file.clone())
         .unwrap_or(default_filename);
 
-    check_file_is_writeable(&out_filename, sess);
+    if let OutFileName::Real(ref path) = out_filename {
+        check_file_is_writeable(path, sess);
+    }
 
     out_filename
 }
@@ -56,7 +58,7 @@ pub fn find_crate_name(sess: &Session, attrs: &[ast::Attribute]) -> Symbol {
     // the command line over one found in the #[crate_name] attribute. If we
     // find both we ensure that they're the same later on as well.
     let attr_crate_name =
-        sess.find_by_name(attrs, sym::crate_name).and_then(|at| at.value_str().map(|s| (at, s)));
+        attr::find_by_name(attrs, sym::crate_name).and_then(|at| at.value_str().map(|s| (at, s)));
 
     if let Some(ref s) = sess.opts.crate_name {
         let s = Symbol::intern(s);
@@ -99,7 +101,16 @@ pub fn validate_crate_name(sess: &Session, s: Symbol, sp: Option<Span>) {
                 continue;
             }
             err_count += 1;
-            sess.emit_err(InvalidCharacterInCrateName { span: sp, character: c, crate_name: s });
+            sess.emit_err(InvalidCharacterInCrateName {
+                span: sp,
+                character: c,
+                crate_name: s,
+                crate_name_help: if sp.is_none() {
+                    Some(InvalidCrateNameHelp::AddCrateName)
+                } else {
+                    None
+                },
+            });
         }
     }
 
@@ -108,25 +119,11 @@ pub fn validate_crate_name(sess: &Session, s: Symbol, sp: Option<Span>) {
     }
 }
 
-pub fn filename_for_metadata(
-    sess: &Session,
-    crate_name: Symbol,
-    outputs: &OutputFilenames,
-) -> PathBuf {
-    // If the command-line specified the path, use that directly.
-    if let Some(Some(out_filename)) = sess.opts.output_types.get(&OutputType::Metadata) {
-        return out_filename.clone();
+pub fn filename_for_metadata(sess: &Session, outputs: &OutputFilenames) -> OutFileName {
+    let out_filename = outputs.path(OutputType::Metadata);
+    if let OutFileName::Real(ref path) = out_filename {
+        check_file_is_writeable(path, sess);
     }
-
-    let libname = format!("{}{}", crate_name, sess.opts.cg.extra_filename);
-
-    let out_filename = outputs
-        .single_output_file
-        .clone()
-        .unwrap_or_else(|| outputs.out_directory.join(&format!("lib{libname}.rmeta")));
-
-    check_file_is_writeable(&out_filename, sess);
-
     out_filename
 }
 
@@ -135,23 +132,33 @@ pub fn filename_for_input(
     crate_type: CrateType,
     crate_name: Symbol,
     outputs: &OutputFilenames,
-) -> PathBuf {
+) -> OutFileName {
     let libname = format!("{}{}", crate_name, sess.opts.cg.extra_filename);
 
     match crate_type {
-        CrateType::Rlib => outputs.out_directory.join(&format!("lib{libname}.rlib")),
+        CrateType::Rlib => {
+            OutFileName::Real(outputs.out_directory.join(&format!("lib{libname}.rlib")))
+        }
         CrateType::Cdylib | CrateType::ProcMacro | CrateType::Dylib => {
             let (prefix, suffix) = (&sess.target.dll_prefix, &sess.target.dll_suffix);
-            outputs.out_directory.join(&format!("{prefix}{libname}{suffix}"))
+            OutFileName::Real(outputs.out_directory.join(&format!("{prefix}{libname}{suffix}")))
         }
         CrateType::Staticlib => {
             let (prefix, suffix) = (&sess.target.staticlib_prefix, &sess.target.staticlib_suffix);
-            outputs.out_directory.join(&format!("{prefix}{libname}{suffix}"))
+            OutFileName::Real(outputs.out_directory.join(&format!("{prefix}{libname}{suffix}")))
         }
         CrateType::Executable => {
             let suffix = &sess.target.exe_suffix;
             let out_filename = outputs.path(OutputType::Exe);
-            if suffix.is_empty() { out_filename } else { out_filename.with_extension(&suffix[1..]) }
+            if let OutFileName::Real(ref path) = out_filename {
+                if suffix.is_empty() {
+                    out_filename
+                } else {
+                    OutFileName::Real(path.with_extension(&suffix[1..]))
+                }
+            } else {
+                out_filename
+            }
         }
     }
 }
@@ -179,10 +186,14 @@ pub fn invalid_output_for_target(sess: &Session, crate_type: CrateType) -> bool 
             return true;
         }
     }
-    if let CrateType::ProcMacro | CrateType::Dylib = crate_type && sess.target.only_cdylib {
+    if let CrateType::ProcMacro | CrateType::Dylib = crate_type
+        && sess.target.only_cdylib
+    {
         return true;
     }
-    if let CrateType::Executable = crate_type && !sess.target.executables {
+    if let CrateType::Executable = crate_type
+        && !sess.target.executables
+    {
         return true;
     }
 

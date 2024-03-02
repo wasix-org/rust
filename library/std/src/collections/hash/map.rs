@@ -6,16 +6,13 @@ use self::Entry::*;
 use hashbrown::hash_map as base;
 
 use crate::borrow::Borrow;
-use crate::cell::Cell;
 use crate::collections::TryReserveError;
 use crate::collections::TryReserveErrorKind;
 use crate::error::Error;
 use crate::fmt::{self, Debug};
-#[allow(deprecated)]
-use crate::hash::{BuildHasher, Hash, Hasher, SipHasher13};
+use crate::hash::{BuildHasher, Hash, RandomState};
 use crate::iter::FusedIterator;
 use crate::ops::Index;
-use crate::sys;
 
 /// A [hash map] implemented with quadratic probing and SIMD lookup.
 ///
@@ -24,7 +21,7 @@ use crate::sys;
 /// reasonable best-effort is made to generate this seed from a high quality,
 /// secure source of randomness provided by the host without blocking the
 /// program. Because of this, the randomness of the seed depends on the output
-/// quality of the system's random number generator when the seed is created.
+/// quality of the system's random number coroutine when the seed is created.
 /// In particular, seeds generated when the system's entropy pool is abnormally
 /// low such as during system boot may be of a lower quality.
 ///
@@ -49,12 +46,14 @@ use crate::sys;
 /// ```
 ///
 /// In other words, if two keys are equal, their hashes must be equal.
+/// Violating this property is a logic error.
 ///
-/// It is a logic error for a key to be modified in such a way that the key's
+/// It is also a logic error for a key to be modified in such a way that the key's
 /// hash, as determined by the [`Hash`] trait, or its equality, as determined by
 /// the [`Eq`] trait, changes while it is in the map. This is normally only
 /// possible through [`Cell`], [`RefCell`], global state, I/O, or unsafe code.
-/// The behavior resulting from such a logic error is not specified, but will
+///
+/// The behavior resulting from either logic error is not specified, but will
 /// be encapsulated to the `HashMap` that observed the logic error and not
 /// result in undefined behavior. This could include panics, incorrect results,
 /// aborts, memory leaks, and non-termination.
@@ -272,7 +271,7 @@ impl<K, V, S> HashMap<K, V, S> {
     ///
     /// ```
     /// use std::collections::HashMap;
-    /// use std::collections::hash_map::RandomState;
+    /// use std::hash::RandomState;
     ///
     /// let s = RandomState::new();
     /// let mut map = HashMap::with_hasher(s);
@@ -304,7 +303,7 @@ impl<K, V, S> HashMap<K, V, S> {
     ///
     /// ```
     /// use std::collections::HashMap;
-    /// use std::collections::hash_map::RandomState;
+    /// use std::hash::RandomState;
     ///
     /// let s = RandomState::new();
     /// let mut map = HashMap::with_capacity_and_hasher(10, s);
@@ -623,28 +622,27 @@ impl<K, V, S> HashMap<K, V, S> {
     /// If the closure returns false, or panics, the element remains in the map and will not be
     /// yielded.
     ///
-    /// Note that `drain_filter` lets you mutate every value in the filter closure, regardless of
+    /// Note that `extract_if` lets you mutate every value in the filter closure, regardless of
     /// whether you choose to keep or remove it.
     ///
-    /// If the iterator is only partially consumed or not consumed at all, each of the remaining
-    /// elements will still be subjected to the closure and removed and dropped if it returns true.
+    /// If the returned `ExtractIf` is not exhausted, e.g. because it is dropped without iterating
+    /// or the iteration short-circuits, then the remaining elements will be retained.
+    /// Use [`retain`] with a negated predicate if you do not need the returned iterator.
     ///
-    /// It is unspecified how many more elements will be subjected to the closure
-    /// if a panic occurs in the closure, or a panic occurs while dropping an element,
-    /// or if the `DrainFilter` value is leaked.
+    /// [`retain`]: HashMap::retain
     ///
     /// # Examples
     ///
     /// Splitting a map into even and odd keys, reusing the original map:
     ///
     /// ```
-    /// #![feature(hash_drain_filter)]
+    /// #![feature(hash_extract_if)]
     /// use std::collections::HashMap;
     ///
     /// let mut map: HashMap<i32, i32> = (0..8).map(|x| (x, x)).collect();
-    /// let drained: HashMap<i32, i32> = map.drain_filter(|k, _v| k % 2 == 0).collect();
+    /// let extracted: HashMap<i32, i32> = map.extract_if(|k, _v| k % 2 == 0).collect();
     ///
-    /// let mut evens = drained.keys().copied().collect::<Vec<_>>();
+    /// let mut evens = extracted.keys().copied().collect::<Vec<_>>();
     /// let mut odds = map.keys().copied().collect::<Vec<_>>();
     /// evens.sort();
     /// odds.sort();
@@ -654,12 +652,12 @@ impl<K, V, S> HashMap<K, V, S> {
     /// ```
     #[inline]
     #[rustc_lint_query_instability]
-    #[unstable(feature = "hash_drain_filter", issue = "59618")]
-    pub fn drain_filter<F>(&mut self, pred: F) -> DrainFilter<'_, K, V, F>
+    #[unstable(feature = "hash_extract_if", issue = "59618")]
+    pub fn extract_if<F>(&mut self, pred: F) -> ExtractIf<'_, K, V, F>
     where
         F: FnMut(&K, &mut V) -> bool,
     {
-        DrainFilter { base: self.base.drain_filter(pred) }
+        ExtractIf { base: self.base.extract_if(pred) }
     }
 
     /// Retains only the elements specified by the predicate.
@@ -716,7 +714,7 @@ impl<K, V, S> HashMap<K, V, S> {
     ///
     /// ```
     /// use std::collections::HashMap;
-    /// use std::collections::hash_map::RandomState;
+    /// use std::hash::RandomState;
     ///
     /// let hasher = RandomState::new();
     /// let map: HashMap<i32, i32> = HashMap::with_hasher(hasher);
@@ -1446,7 +1444,6 @@ impl<'a, K, V> IterMut<'a, K, V> {
 /// (provided by the [`IntoIterator`] trait). See its documentation for more.
 ///
 /// [`into_iter`]: IntoIterator::into_iter
-/// [`IntoIterator`]: crate::iter::IntoIterator
 ///
 /// # Example
 ///
@@ -1579,28 +1576,29 @@ impl<'a, K, V> Drain<'a, K, V> {
 
 /// A draining, filtering iterator over the entries of a `HashMap`.
 ///
-/// This `struct` is created by the [`drain_filter`] method on [`HashMap`].
+/// This `struct` is created by the [`extract_if`] method on [`HashMap`].
 ///
-/// [`drain_filter`]: HashMap::drain_filter
+/// [`extract_if`]: HashMap::extract_if
 ///
 /// # Example
 ///
 /// ```
-/// #![feature(hash_drain_filter)]
+/// #![feature(hash_extract_if)]
 ///
 /// use std::collections::HashMap;
 ///
 /// let mut map = HashMap::from([
 ///     ("a", 1),
 /// ]);
-/// let iter = map.drain_filter(|_k, v| *v % 2 == 0);
+/// let iter = map.extract_if(|_k, v| *v % 2 == 0);
 /// ```
-#[unstable(feature = "hash_drain_filter", issue = "59618")]
-pub struct DrainFilter<'a, K, V, F>
+#[unstable(feature = "hash_extract_if", issue = "59618")]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct ExtractIf<'a, K, V, F>
 where
     F: FnMut(&K, &mut V) -> bool,
 {
-    base: base::DrainFilter<'a, K, V, F>,
+    base: base::ExtractIf<'a, K, V, F>,
 }
 
 /// A mutable iterator over the values of a `HashMap`.
@@ -2480,8 +2478,8 @@ where
     }
 }
 
-#[unstable(feature = "hash_drain_filter", issue = "59618")]
-impl<K, V, F> Iterator for DrainFilter<'_, K, V, F>
+#[unstable(feature = "hash_extract_if", issue = "59618")]
+impl<K, V, F> Iterator for ExtractIf<'_, K, V, F>
 where
     F: FnMut(&K, &mut V) -> bool,
 {
@@ -2497,16 +2495,16 @@ where
     }
 }
 
-#[unstable(feature = "hash_drain_filter", issue = "59618")]
-impl<K, V, F> FusedIterator for DrainFilter<'_, K, V, F> where F: FnMut(&K, &mut V) -> bool {}
+#[unstable(feature = "hash_extract_if", issue = "59618")]
+impl<K, V, F> FusedIterator for ExtractIf<'_, K, V, F> where F: FnMut(&K, &mut V) -> bool {}
 
-#[unstable(feature = "hash_drain_filter", issue = "59618")]
-impl<'a, K, V, F> fmt::Debug for DrainFilter<'a, K, V, F>
+#[unstable(feature = "hash_extract_if", issue = "59618")]
+impl<'a, K, V, F> fmt::Debug for ExtractIf<'a, K, V, F>
 where
     F: FnMut(&K, &mut V) -> bool,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DrainFilter").finish_non_exhaustive()
+        f.debug_struct("ExtractIf").finish_non_exhaustive()
     }
 }
 
@@ -2544,12 +2542,12 @@ impl<'a, K, V> Entry<'a, K, V> {
     /// ```
     /// use std::collections::HashMap;
     ///
-    /// let mut map: HashMap<&str, String> = HashMap::new();
-    /// let s = "hoho".to_string();
+    /// let mut map = HashMap::new();
+    /// let value = "hoho";
     ///
-    /// map.entry("poneyland").or_insert_with(|| s);
+    /// map.entry("poneyland").or_insert_with(|| value);
     ///
-    /// assert_eq!(map["poneyland"], "hoho".to_string());
+    /// assert_eq!(map["poneyland"], "hoho");
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -3068,154 +3066,6 @@ where
     #[inline]
     fn extend_reserve(&mut self, additional: usize) {
         Extend::<(K, V)>::extend_reserve(self, additional)
-    }
-}
-
-/// `RandomState` is the default state for [`HashMap`] types.
-///
-/// A particular instance `RandomState` will create the same instances of
-/// [`Hasher`], but the hashers created by two different `RandomState`
-/// instances are unlikely to produce the same result for the same values.
-///
-/// # Examples
-///
-/// ```
-/// use std::collections::HashMap;
-/// use std::collections::hash_map::RandomState;
-///
-/// let s = RandomState::new();
-/// let mut map = HashMap::with_hasher(s);
-/// map.insert(1, 2);
-/// ```
-#[derive(Clone)]
-#[stable(feature = "hashmap_build_hasher", since = "1.7.0")]
-pub struct RandomState {
-    k0: u64,
-    k1: u64,
-}
-
-impl RandomState {
-    /// Constructs a new `RandomState` that is initialized with random keys.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::hash_map::RandomState;
-    ///
-    /// let s = RandomState::new();
-    /// ```
-    #[inline]
-    #[allow(deprecated)]
-    // rand
-    #[must_use]
-    #[stable(feature = "hashmap_build_hasher", since = "1.7.0")]
-    pub fn new() -> RandomState {
-        // Historically this function did not cache keys from the OS and instead
-        // simply always called `rand::thread_rng().gen()` twice. In #31356 it
-        // was discovered, however, that because we re-seed the thread-local RNG
-        // from the OS periodically that this can cause excessive slowdown when
-        // many hash maps are created on a thread. To solve this performance
-        // trap we cache the first set of randomly generated keys per-thread.
-        //
-        // Later in #36481 it was discovered that exposing a deterministic
-        // iteration order allows a form of DOS attack. To counter that we
-        // increment one of the seeds on every RandomState creation, giving
-        // every corresponding HashMap a different iteration order.
-        thread_local!(static KEYS: Cell<(u64, u64)> = {
-            Cell::new(sys::hashmap_random_keys())
-        });
-
-        KEYS.with(|keys| {
-            let (k0, k1) = keys.get();
-            keys.set((k0.wrapping_add(1), k1));
-            RandomState { k0, k1 }
-        })
-    }
-}
-
-#[stable(feature = "hashmap_build_hasher", since = "1.7.0")]
-impl BuildHasher for RandomState {
-    type Hasher = DefaultHasher;
-    #[inline]
-    #[allow(deprecated)]
-    fn build_hasher(&self) -> DefaultHasher {
-        DefaultHasher(SipHasher13::new_with_keys(self.k0, self.k1))
-    }
-}
-
-/// The default [`Hasher`] used by [`RandomState`].
-///
-/// The internal algorithm is not specified, and so it and its hashes should
-/// not be relied upon over releases.
-#[stable(feature = "hashmap_default_hasher", since = "1.13.0")]
-#[allow(deprecated)]
-#[derive(Clone, Debug)]
-pub struct DefaultHasher(SipHasher13);
-
-impl DefaultHasher {
-    /// Creates a new `DefaultHasher`.
-    ///
-    /// This hasher is not guaranteed to be the same as all other
-    /// `DefaultHasher` instances, but is the same as all other `DefaultHasher`
-    /// instances created through `new` or `default`.
-    #[stable(feature = "hashmap_default_hasher", since = "1.13.0")]
-    #[inline]
-    #[allow(deprecated)]
-    #[rustc_const_unstable(feature = "const_hash", issue = "104061")]
-    #[must_use]
-    pub const fn new() -> DefaultHasher {
-        DefaultHasher(SipHasher13::new_with_keys(0, 0))
-    }
-}
-
-#[stable(feature = "hashmap_default_hasher", since = "1.13.0")]
-#[rustc_const_unstable(feature = "const_hash", issue = "104061")]
-impl const Default for DefaultHasher {
-    /// Creates a new `DefaultHasher` using [`new`].
-    /// See its documentation for more.
-    ///
-    /// [`new`]: DefaultHasher::new
-    #[inline]
-    fn default() -> DefaultHasher {
-        DefaultHasher::new()
-    }
-}
-
-#[stable(feature = "hashmap_default_hasher", since = "1.13.0")]
-#[rustc_const_unstable(feature = "const_hash", issue = "104061")]
-impl const Hasher for DefaultHasher {
-    // The underlying `SipHasher13` doesn't override the other
-    // `write_*` methods, so it's ok not to forward them here.
-
-    #[inline]
-    fn write(&mut self, msg: &[u8]) {
-        self.0.write(msg)
-    }
-
-    #[inline]
-    fn write_str(&mut self, s: &str) {
-        self.0.write_str(s);
-    }
-
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0.finish()
-    }
-}
-
-#[stable(feature = "hashmap_build_hasher", since = "1.7.0")]
-impl Default for RandomState {
-    /// Constructs a new `RandomState`.
-    #[inline]
-    fn default() -> RandomState {
-        RandomState::new()
-    }
-}
-
-#[stable(feature = "std_debug", since = "1.16.0")]
-impl fmt::Debug for RandomState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RandomState").finish_non_exhaustive()
     }
 }
 

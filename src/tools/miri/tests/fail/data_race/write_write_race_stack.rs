@@ -28,6 +28,7 @@ pub fn main() {
     //  5. write-value
     unsafe {
         let j1 = spawn(move || {
+            let ptr = ptr; // avoid field capturing
             // Concurrent allocate the memory.
             // Uses relaxed semantics to not generate
             // a release sequence.
@@ -39,13 +40,14 @@ pub fn main() {
 
             sleep(Duration::from_millis(200));
 
-            stack_var = 1usize; //~ ERROR: Data race detected between (1) Write on thread `<unnamed>` and (2) Write on thread `<unnamed>`
+            stack_var = 1usize; //~ ERROR: Data race detected between (1) non-atomic write on thread `<unnamed>` and (2) non-atomic write on thread `<unnamed>`
 
             // read to silence errors
             stack_var
         });
 
         let j2 = spawn(move || {
+            let ptr = ptr; // avoid field capturing
             let pointer = &*ptr.0;
             *pointer.load(Ordering::Acquire) = 3;
         });

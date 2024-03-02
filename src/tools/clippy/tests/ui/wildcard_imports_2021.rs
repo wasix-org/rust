@@ -1,8 +1,8 @@
-// revisions: edition2018 edition2021
-//[edition2018] edition:2018
-//[edition2021] edition:2021
-// run-rustfix
-// aux-build:wildcard_imports_helper.rs
+//@revisions: edition2018 edition2021
+//@[edition2018] edition:2018
+//@[edition2021] edition:2021
+
+//@aux-build:wildcard_imports_helper.rs
 
 #![warn(clippy::wildcard_imports)]
 #![allow(unused, clippy::unnecessary_wraps, clippy::let_unit_value)]
@@ -64,6 +64,34 @@ mod struct_mod {
     }
 }
 
+// issue 9942
+mod underscore_mod {
+    // allow use of `deref` so that `clippy --fix` includes `Deref`.
+    #![allow(noop_method_call)]
+
+    mod exports_underscore {
+        pub use std::ops::Deref as _;
+        pub fn dummy() {}
+    }
+
+    mod exports_underscore_ish {
+        pub use std::ops::Deref as _Deref;
+        pub fn dummy() {}
+    }
+
+    fn does_not_lint() {
+        use exports_underscore::*;
+        let _ = (&0).deref();
+        dummy();
+    }
+
+    fn does_lint() {
+        use exports_underscore_ish::*;
+        let _ = (&0).deref();
+        dummy();
+    }
+}
+
 fn main() {
     foo();
     multi_foo();
@@ -106,6 +134,7 @@ mod in_fn_test {
     }
 
     fn test_inner_nested() {
+        #[rustfmt::skip]
         use self::{inner::*, inner2::*};
 
         inner_foo();

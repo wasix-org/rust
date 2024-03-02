@@ -13,12 +13,11 @@ LL |     let foo: fn() = foo;
                  found fn item `fn() {foo}`
    = note: fn items are distinct from fn pointers
    = note: functions with `#[target_feature]` can only be coerced to `unsafe` function pointers
-   = note: when the arguments and return types match, functions can be coerced to function pointers
 help: consider casting to a fn pointer
    |
 LL |     let foo: fn() = foo as fn();
    |                     ~~~~~~~~~~~
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0308`.

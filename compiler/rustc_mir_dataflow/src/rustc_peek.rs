@@ -1,11 +1,3 @@
-use rustc_span::symbol::sym;
-use rustc_span::Span;
-
-use rustc_index::bit_set::ChunkedBitSet;
-use rustc_middle::mir::MirPass;
-use rustc_middle::mir::{self, Body, Local, Location};
-use rustc_middle::ty::{self, Ty, TyCtxt};
-
 use crate::errors::{
     PeekArgumentNotALocal, PeekArgumentUntracked, PeekBitNotSet, PeekMustBeNotTemporary,
     PeekMustBePlaceOrRefPlace, StopAfterDataFlowEndedCompilation,
@@ -17,14 +9,34 @@ use crate::impls::{
 use crate::move_paths::{HasMoveData, MoveData};
 use crate::move_paths::{LookupResult, MovePathIndex};
 use crate::MoveDataParamEnv;
-use crate::{Analysis, JoinSemiLattice, Results, ResultsCursor};
+use crate::{Analysis, JoinSemiLattice, ResultsCursor};
+use rustc_ast::MetaItem;
+use rustc_hir::def_id::DefId;
+use rustc_index::bit_set::ChunkedBitSet;
+use rustc_middle::mir::MirPass;
+use rustc_middle::mir::{self, Body, Local, Location};
+use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_span::symbol::{sym, Symbol};
+use rustc_span::Span;
 
 pub struct SanityCheck;
+
+fn has_rustc_mir_with(tcx: TyCtxt<'_>, def_id: DefId, name: Symbol) -> Option<MetaItem> {
+    for attr in tcx.get_attrs(def_id, sym::rustc_mir) {
+        let items = attr.meta_item_list();
+        for item in items.iter().flat_map(|l| l.iter()) {
+            match item.meta_item() {
+                Some(mi) if mi.has_name(name) => return Some(mi.clone()),
+                _ => continue,
+            }
+        }
+    }
+    None
+}
 
 // FIXME: This should be a `MirLint`, but it needs to be moved back to `rustc_mir_transform` first.
 impl<'tcx> MirPass<'tcx> for SanityCheck {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        use crate::has_rustc_mir_with;
         let def_id = body.source.def_id();
         if !tcx.has_attr(def_id, sym::rustc_mir) {
             debug!("skipping rustc_peek::SanityCheck on {}", tcx.def_path_str(def_id));
@@ -34,7 +46,7 @@ impl<'tcx> MirPass<'tcx> for SanityCheck {
         }
 
         let param_env = tcx.param_env(def_id);
-        let (_, move_data) = MoveData::gather_moves(body, tcx, param_env).unwrap();
+        let move_data = MoveData::gather_moves(body, tcx, param_env, |_| true);
         let mdpe = MoveDataParamEnv { move_data, param_env };
 
         if has_rustc_mir_with(tcx, def_id, sym::rustc_peek_maybe_init).is_some() {
@@ -42,7 +54,7 @@ impl<'tcx> MirPass<'tcx> for SanityCheck {
                 .into_engine(tcx, body)
                 .iterate_to_fixpoint();
 
-            sanity_check_via_rustc_peek(tcx, body, &flow_inits);
+            sanity_check_via_rustc_peek(tcx, flow_inits.into_results_cursor(body));
         }
 
         if has_rustc_mir_with(tcx, def_id, sym::rustc_peek_maybe_uninit).is_some() {
@@ -50,21 +62,21 @@ impl<'tcx> MirPass<'tcx> for SanityCheck {
                 .into_engine(tcx, body)
                 .iterate_to_fixpoint();
 
-            sanity_check_via_rustc_peek(tcx, body, &flow_uninits);
+            sanity_check_via_rustc_peek(tcx, flow_uninits.into_results_cursor(body));
         }
 
         if has_rustc_mir_with(tcx, def_id, sym::rustc_peek_definite_init).is_some() {
-            let flow_def_inits = DefinitelyInitializedPlaces::new(tcx, body, &mdpe)
+            let flow_def_inits = DefinitelyInitializedPlaces::new(body, &mdpe)
                 .into_engine(tcx, body)
                 .iterate_to_fixpoint();
 
-            sanity_check_via_rustc_peek(tcx, body, &flow_def_inits);
+            sanity_check_via_rustc_peek(tcx, flow_def_inits.into_results_cursor(body));
         }
 
         if has_rustc_mir_with(tcx, def_id, sym::rustc_peek_liveness).is_some() {
             let flow_liveness = MaybeLiveLocals.into_engine(tcx, body).iterate_to_fixpoint();
 
-            sanity_check_via_rustc_peek(tcx, body, &flow_liveness);
+            sanity_check_via_rustc_peek(tcx, flow_liveness.into_results_cursor(body));
         }
 
         if has_rustc_mir_with(tcx, def_id, sym::stop_after_dataflow).is_some() {
@@ -89,19 +101,14 @@ impl<'tcx> MirPass<'tcx> for SanityCheck {
 /// (If there are any calls to `rustc_peek` that do not match the
 /// expression form above, then that emits an error as well, but those
 /// errors are not intended to be used for unit tests.)
-pub fn sanity_check_via_rustc_peek<'tcx, A>(
-    tcx: TyCtxt<'tcx>,
-    body: &Body<'tcx>,
-    results: &Results<'tcx, A>,
-) where
+fn sanity_check_via_rustc_peek<'tcx, A>(tcx: TyCtxt<'tcx>, mut cursor: ResultsCursor<'_, 'tcx, A>)
+where
     A: RustcPeekAt<'tcx>,
 {
-    let def_id = body.source.def_id();
+    let def_id = cursor.body().source.def_id();
     debug!("sanity_check_via_rustc_peek def_id: {:?}", def_id);
 
-    let mut cursor = ResultsCursor::new(body, results);
-
-    let peek_calls = body.basic_blocks.iter_enumerated().filter_map(|(bb, block_data)| {
+    let peek_calls = cursor.body().basic_blocks.iter_enumerated().filter_map(|(bb, block_data)| {
         PeekCall::from_terminator(tcx, block_data.terminator()).map(|call| (bb, block_data, call))
     });
 
@@ -133,7 +140,8 @@ pub fn sanity_check_via_rustc_peek<'tcx, A>(
                 let loc = Location { block: bb, statement_index };
                 cursor.seek_before_primary_effect(loc);
                 let state = cursor.get();
-                results.analysis.peek_at(tcx, *place, state, call);
+                let analysis = cursor.analysis();
+                analysis.peek_at(tcx, *place, state, call);
             }
 
             _ => {
@@ -176,7 +184,7 @@ impl PeekCallKind {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct PeekCall {
+struct PeekCall {
     arg: Local,
     kind: PeekCallKind,
     span: Span,
@@ -193,14 +201,14 @@ impl PeekCall {
         if let mir::TerminatorKind::Call { func: Operand::Constant(func), args, .. } =
             &terminator.kind
         {
-            if let ty::FnDef(def_id, substs) = *func.literal.ty().kind() {
+            if let ty::FnDef(def_id, fn_args) = *func.const_.ty().kind() {
                 let name = tcx.item_name(def_id);
                 if !tcx.is_intrinsic(def_id) || name != sym::rustc_peek {
                     return None;
                 }
 
-                assert_eq!(args.len(), 1);
-                let kind = PeekCallKind::from_arg_ty(substs.type_at(0));
+                assert_eq!(fn_args.len(), 1);
+                let kind = PeekCallKind::from_arg_ty(fn_args.type_at(0));
                 let arg = match &args[0] {
                     Operand::Copy(place) | Operand::Move(place) => {
                         if let Some(local) = place.as_local() {
@@ -224,7 +232,7 @@ impl PeekCall {
     }
 }
 
-pub trait RustcPeekAt<'tcx>: Analysis<'tcx> {
+trait RustcPeekAt<'tcx>: Analysis<'tcx> {
     fn peek_at(
         &self,
         tcx: TyCtxt<'tcx>,

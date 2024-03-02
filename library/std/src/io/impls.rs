@@ -9,6 +9,7 @@ use crate::io::{
     self, BorrowedCursor, BufRead, ErrorKind, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write,
 };
 use crate::mem;
+use crate::str;
 
 // =============================================================================
 // Forwarding implementations
@@ -307,6 +308,17 @@ impl Read for &[u8] {
         *self = &self[len..];
         Ok(len)
     }
+
+    #[inline]
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        let content = str::from_utf8(self).map_err(|_| {
+            io::const_io_error!(ErrorKind::InvalidData, "stream did not contain valid UTF-8")
+        })?;
+        buf.push_str(content);
+        let len = self.len();
+        *self = &self[len..];
+        Ok(len)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -336,7 +348,7 @@ impl Write for &mut [u8] {
     #[inline]
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         let amt = cmp::min(data.len(), self.len());
-        let (a, b) = mem::replace(self, &mut []).split_at_mut(amt);
+        let (a, b) = mem::take(self).split_at_mut(amt);
         a.copy_from_slice(&data[..amt]);
         *self = b;
         Ok(amt)
@@ -434,6 +446,51 @@ impl<A: Allocator> Read for VecDeque<u8, A> {
         self.drain(..n);
         Ok(())
     }
+
+    #[inline]
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        // The total len is known upfront so we can reserve it in a single call.
+        let len = self.len();
+        buf.reserve(len);
+
+        let (front, back) = self.as_slices();
+        buf.extend_from_slice(front);
+        buf.extend_from_slice(back);
+        self.clear();
+        Ok(len)
+    }
+
+    #[inline]
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        // We have to use a single contiguous slice because the `VecDequeue` might be split in the
+        // middle of an UTF-8 character.
+        let len = self.len();
+        let content = self.make_contiguous();
+        let string = str::from_utf8(content).map_err(|_| {
+            io::const_io_error!(ErrorKind::InvalidData, "stream did not contain valid UTF-8")
+        })?;
+        buf.push_str(string);
+        self.clear();
+        Ok(len)
+    }
+}
+
+/// BufRead is implemented for `VecDeque<u8>` by reading bytes from the front of the `VecDeque`.
+#[stable(feature = "vecdeque_buf_read", since = "1.75.0")]
+impl<A: Allocator> BufRead for VecDeque<u8, A> {
+    /// Returns the contents of the "front" slice as returned by
+    /// [`as_slices`][`VecDeque::as_slices`]. If the contained byte slices of the `VecDeque` are
+    /// discontiguous, multiple calls to `fill_buf` will be needed to read the entire content.
+    #[inline]
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        let (front, _) = self.as_slices();
+        Ok(front)
+    }
+
+    #[inline]
+    fn consume(&mut self, amt: usize) {
+        self.drain(..amt);
+    }
 }
 
 /// Write is implemented for `VecDeque<u8>` by appending to the `VecDeque`, growing it as needed.
@@ -446,9 +503,38 @@ impl<A: Allocator> Write for VecDeque<u8, A> {
     }
 
     #[inline]
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        let len = bufs.iter().map(|b| b.len()).sum();
+        self.reserve(len);
+        for buf in bufs {
+            self.extend(&**buf);
+        }
+        Ok(len)
+    }
+
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
+    #[inline]
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.extend(buf);
         Ok(())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[unstable(feature = "read_buf", issue = "78485")]
+impl<'a> io::Write for core::io::BorrowedCursor<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let amt = cmp::min(buf.len(), self.capacity());
+        self.append(&buf[..amt]);
+        Ok(amt)
     }
 
     #[inline]

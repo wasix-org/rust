@@ -10,13 +10,10 @@ use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
 mod pretty;
 pub use self::pretty::*;
 
-// FIXME(eddyb) false positive, the lifetime parameters are used with `P:  Printer<...>`.
-#[allow(unused_lifetimes)]
-pub trait Print<'tcx, P> {
-    type Output;
-    type Error;
+pub type PrintError = std::fmt::Error;
 
-    fn print(&self, cx: P) -> Result<Self::Output, Self::Error>;
+pub trait Print<'tcx, P> {
+    fn print(&self, cx: &mut P) -> Result<(), PrintError>;
 }
 
 /// Interface for outputting user-facing "type-system entities"
@@ -29,81 +26,73 @@ pub trait Print<'tcx, P> {
 //
 // FIXME(eddyb) find a better name; this is more general than "printing".
 pub trait Printer<'tcx>: Sized {
-    type Error;
-
-    type Path;
-    type Region;
-    type Type;
-    type DynExistential;
-    type Const;
-
     fn tcx<'a>(&'a self) -> TyCtxt<'tcx>;
 
     fn print_def_path(
-        self,
+        &mut self,
         def_id: DefId,
-        substs: &'tcx [GenericArg<'tcx>],
-    ) -> Result<Self::Path, Self::Error> {
-        self.default_print_def_path(def_id, substs)
+        args: &'tcx [GenericArg<'tcx>],
+    ) -> Result<(), PrintError> {
+        self.default_print_def_path(def_id, args)
     }
 
     fn print_impl_path(
-        self,
+        &mut self,
         impl_def_id: DefId,
-        substs: &'tcx [GenericArg<'tcx>],
+        args: &'tcx [GenericArg<'tcx>],
         self_ty: Ty<'tcx>,
         trait_ref: Option<ty::TraitRef<'tcx>>,
-    ) -> Result<Self::Path, Self::Error> {
-        self.default_print_impl_path(impl_def_id, substs, self_ty, trait_ref)
+    ) -> Result<(), PrintError> {
+        self.default_print_impl_path(impl_def_id, args, self_ty, trait_ref)
     }
 
-    fn print_region(self, region: ty::Region<'tcx>) -> Result<Self::Region, Self::Error>;
+    fn print_region(&mut self, region: ty::Region<'tcx>) -> Result<(), PrintError>;
 
-    fn print_type(self, ty: Ty<'tcx>) -> Result<Self::Type, Self::Error>;
+    fn print_type(&mut self, ty: Ty<'tcx>) -> Result<(), PrintError>;
 
     fn print_dyn_existential(
-        self,
+        &mut self,
         predicates: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
-    ) -> Result<Self::DynExistential, Self::Error>;
+    ) -> Result<(), PrintError>;
 
-    fn print_const(self, ct: ty::Const<'tcx>) -> Result<Self::Const, Self::Error>;
+    fn print_const(&mut self, ct: ty::Const<'tcx>) -> Result<(), PrintError>;
 
-    fn path_crate(self, cnum: CrateNum) -> Result<Self::Path, Self::Error>;
+    fn path_crate(&mut self, cnum: CrateNum) -> Result<(), PrintError>;
 
     fn path_qualified(
-        self,
+        &mut self,
         self_ty: Ty<'tcx>,
         trait_ref: Option<ty::TraitRef<'tcx>>,
-    ) -> Result<Self::Path, Self::Error>;
+    ) -> Result<(), PrintError>;
 
     fn path_append_impl(
-        self,
-        print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
+        &mut self,
+        print_prefix: impl FnOnce(&mut Self) -> Result<(), PrintError>,
         disambiguated_data: &DisambiguatedDefPathData,
         self_ty: Ty<'tcx>,
         trait_ref: Option<ty::TraitRef<'tcx>>,
-    ) -> Result<Self::Path, Self::Error>;
+    ) -> Result<(), PrintError>;
 
     fn path_append(
-        self,
-        print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
+        &mut self,
+        print_prefix: impl FnOnce(&mut Self) -> Result<(), PrintError>,
         disambiguated_data: &DisambiguatedDefPathData,
-    ) -> Result<Self::Path, Self::Error>;
+    ) -> Result<(), PrintError>;
 
     fn path_generic_args(
-        self,
-        print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
+        &mut self,
+        print_prefix: impl FnOnce(&mut Self) -> Result<(), PrintError>,
         args: &[GenericArg<'tcx>],
-    ) -> Result<Self::Path, Self::Error>;
+    ) -> Result<(), PrintError>;
 
     // Defaults (should not be overridden):
 
     #[instrument(skip(self), level = "debug")]
     fn default_print_def_path(
-        self,
+        &mut self,
         def_id: DefId,
-        substs: &'tcx [GenericArg<'tcx>],
-    ) -> Result<Self::Path, Self::Error> {
+        args: &'tcx [GenericArg<'tcx>],
+    ) -> Result<(), PrintError> {
         let key = self.tcx().def_key(def_id);
         debug!(?key);
 
@@ -117,29 +106,32 @@ pub trait Printer<'tcx>: Sized {
                 let generics = self.tcx().generics_of(def_id);
                 let self_ty = self.tcx().type_of(def_id);
                 let impl_trait_ref = self.tcx().impl_trait_ref(def_id);
-                let (self_ty, impl_trait_ref) = if substs.len() >= generics.count() {
+                let (self_ty, impl_trait_ref) = if args.len() >= generics.count() {
                     (
-                        self_ty.subst(self.tcx(), substs),
-                        impl_trait_ref.map(|i| i.subst(self.tcx(), substs)),
+                        self_ty.instantiate(self.tcx(), args),
+                        impl_trait_ref.map(|i| i.instantiate(self.tcx(), args)),
                     )
                 } else {
-                    (self_ty.0, impl_trait_ref.map(|i| i.0))
+                    (
+                        self_ty.instantiate_identity(),
+                        impl_trait_ref.map(|i| i.instantiate_identity()),
+                    )
                 };
-                self.print_impl_path(def_id, substs, self_ty, impl_trait_ref)
+                self.print_impl_path(def_id, args, self_ty, impl_trait_ref)
             }
 
             _ => {
                 let parent_def_id = DefId { index: key.parent.unwrap(), ..def_id };
 
-                let mut parent_substs = substs;
+                let mut parent_args = args;
                 let mut trait_qualify_parent = false;
-                if !substs.is_empty() {
+                if !args.is_empty() {
                     let generics = self.tcx().generics_of(def_id);
-                    parent_substs = &substs[..generics.parent_count.min(substs.len())];
+                    parent_args = &args[..generics.parent_count.min(args.len())];
 
                     match key.disambiguated_data.data {
                         // Closures' own generics are only captures, don't print them.
-                        DefPathData::ClosureExpr => {}
+                        DefPathData::Closure => {}
                         // This covers both `DefKind::AnonConst` and `DefKind::InlineConst`.
                         // Anon consts doesn't have their own generics, and inline consts' own
                         // generics are their inferred types, so don't print them.
@@ -148,10 +140,10 @@ pub trait Printer<'tcx>: Sized {
                         // If we have any generic arguments to print, we do that
                         // on top of the same path, but without its own generics.
                         _ => {
-                            if !generics.params.is_empty() && substs.len() >= generics.count() {
-                                let args = generics.own_substs_no_defaults(self.tcx(), substs);
+                            if !generics.params.is_empty() && args.len() >= generics.count() {
+                                let args = generics.own_args_no_defaults(self.tcx(), args);
                                 return self.path_generic_args(
-                                    |cx| cx.print_def_path(def_id, parent_substs),
+                                    |cx| cx.print_def_path(def_id, parent_args),
                                     args,
                                 );
                             }
@@ -162,18 +154,21 @@ pub trait Printer<'tcx>: Sized {
                     // logic, instead of doing it when printing the child.
                     trait_qualify_parent = generics.has_self
                         && generics.parent == Some(parent_def_id)
-                        && parent_substs.len() == generics.parent_count
+                        && parent_args.len() == generics.parent_count
                         && self.tcx().generics_of(parent_def_id).parent_count == 0;
                 }
 
                 self.path_append(
-                    |cx: Self| {
+                    |cx: &mut Self| {
                         if trait_qualify_parent {
-                            let trait_ref =
-                                cx.tcx().mk_trait_ref(parent_def_id, parent_substs.iter().copied());
+                            let trait_ref = ty::TraitRef::new(
+                                cx.tcx(),
+                                parent_def_id,
+                                parent_args.iter().copied(),
+                            );
                             cx.path_qualified(trait_ref.self_ty(), Some(trait_ref))
                         } else {
-                            cx.print_def_path(parent_def_id, parent_substs)
+                            cx.print_def_path(parent_def_id, parent_args)
                         }
                     },
                     &key.disambiguated_data,
@@ -183,12 +178,12 @@ pub trait Printer<'tcx>: Sized {
     }
 
     fn default_print_impl_path(
-        self,
+        &mut self,
         impl_def_id: DefId,
-        _substs: &'tcx [GenericArg<'tcx>],
+        _args: &'tcx [GenericArg<'tcx>],
         self_ty: Ty<'tcx>,
         impl_trait_ref: Option<ty::TraitRef<'tcx>>,
-    ) -> Result<Self::Path, Self::Error> {
+    ) -> Result<(), PrintError> {
         debug!(
             "default_print_impl_path: impl_def_id={:?}, self_ty={}, impl_trait_ref={:?}",
             impl_def_id, self_ty, impl_trait_ref
@@ -255,7 +250,7 @@ fn characteristic_def_id_of_type_cached<'a>(
 
         ty::Ref(_, ty, _) => characteristic_def_id_of_type_cached(ty, visited),
 
-        ty::Tuple(ref tys) => tys.iter().find_map(|ty| {
+        ty::Tuple(tys) => tys.iter().find_map(|ty| {
             if visited.insert(ty) {
                 return characteristic_def_id_of_type_cached(ty, visited);
             }
@@ -264,8 +259,8 @@ fn characteristic_def_id_of_type_cached<'a>(
 
         ty::FnDef(def_id, _)
         | ty::Closure(def_id, _)
-        | ty::Generator(def_id, _, _)
-        | ty::GeneratorWitnessMIR(def_id, _)
+        | ty::Coroutine(def_id, _, _)
+        | ty::CoroutineWitness(def_id, _)
         | ty::Foreign(def_id) => Some(def_id),
 
         ty::Bool
@@ -280,7 +275,6 @@ fn characteristic_def_id_of_type_cached<'a>(
         | ty::Infer(_)
         | ty::Bound(..)
         | ty::Error(_)
-        | ty::GeneratorWitness(..)
         | ty::Never
         | ty::Float(_) => None,
     }
@@ -290,43 +284,35 @@ pub fn characteristic_def_id_of_type(ty: Ty<'_>) -> Option<DefId> {
 }
 
 impl<'tcx, P: Printer<'tcx>> Print<'tcx, P> for ty::Region<'tcx> {
-    type Output = P::Region;
-    type Error = P::Error;
-    fn print(&self, cx: P) -> Result<Self::Output, Self::Error> {
+    fn print(&self, cx: &mut P) -> Result<(), PrintError> {
         cx.print_region(*self)
     }
 }
 
 impl<'tcx, P: Printer<'tcx>> Print<'tcx, P> for Ty<'tcx> {
-    type Output = P::Type;
-    type Error = P::Error;
-
-    fn print(&self, cx: P) -> Result<Self::Output, Self::Error> {
+    fn print(&self, cx: &mut P) -> Result<(), PrintError> {
         cx.print_type(*self)
     }
 }
 
 impl<'tcx, P: Printer<'tcx>> Print<'tcx, P> for &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>> {
-    type Output = P::DynExistential;
-    type Error = P::Error;
-    fn print(&self, cx: P) -> Result<Self::Output, Self::Error> {
+    fn print(&self, cx: &mut P) -> Result<(), PrintError> {
         cx.print_dyn_existential(self)
     }
 }
 
 impl<'tcx, P: Printer<'tcx>> Print<'tcx, P> for ty::Const<'tcx> {
-    type Output = P::Const;
-    type Error = P::Error;
-    fn print(&self, cx: P) -> Result<Self::Output, Self::Error> {
+    fn print(&self, cx: &mut P) -> Result<(), PrintError> {
         cx.print_const(*self)
     }
 }
 
 // This is only used by query descriptions
-pub fn describe_as_module(def_id: LocalDefId, tcx: TyCtxt<'_>) -> String {
+pub fn describe_as_module(def_id: impl Into<LocalDefId>, tcx: TyCtxt<'_>) -> String {
+    let def_id = def_id.into();
     if def_id.is_top_level_module() {
         "top-level module".to_string()
     } else {
-        format!("module `{}`", tcx.def_path_str(def_id.to_def_id()))
+        format!("module `{}`", tcx.def_path_str(def_id))
     }
 }

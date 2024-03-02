@@ -37,8 +37,9 @@
 //! following snippet
 //!
 //! ```rust
-//! # #![allow(dead_code)]
-//! struct A { x : i32 }
+//! struct A {
+//!     x: i32,
+//! }
 //!
 //! struct B(i32);
 //!
@@ -74,6 +75,7 @@
 //! trait PartialEq {
 //!     fn eq(&self, other: &Self) -> bool;
 //! }
+//!
 //! impl PartialEq for i32 {
 //!     fn eq(&self, other: &i32) -> bool {
 //!         *self == *other
@@ -88,24 +90,24 @@
 //!
 //! When generating the `expr` for the `A` impl, the `SubstructureFields` is
 //!
-//! ```{.text}
+//! ```text
 //! Struct(vec![FieldInfo {
-//!            span: <span of x>
-//!            name: Some(<ident of x>),
-//!            self_: <expr for &self.x>,
-//!            other: vec![<expr for &other.x]
-//!          }])
+//!     span: <span of x>,
+//!     name: Some(<ident of x>),
+//!     self_: <expr for &self.x>,
+//!     other: vec![<expr for &other.x>],
+//! }])
 //! ```
 //!
 //! For the `B` impl, called with `B(a)` and `B(b)`,
 //!
-//! ```{.text}
+//! ```text
 //! Struct(vec![FieldInfo {
-//!           span: <span of `i32`>,
-//!           name: None,
-//!           self_: <expr for &a>
-//!           other: vec![<expr for &b>]
-//!          }])
+//!     span: <span of i32>,
+//!     name: None,
+//!     self_: <expr for &a>,
+//!     other: vec![<expr for &b>],
+//! }])
 //! ```
 //!
 //! ## Enums
@@ -113,34 +115,43 @@
 //! When generating the `expr` for a call with `self == C0(a)` and `other
 //! == C0(b)`, the SubstructureFields is
 //!
-//! ```{.text}
-//! EnumMatching(0, <ast::Variant for C0>,
-//!              vec![FieldInfo {
-//!                 span: <span of i32>
-//!                 name: None,
-//!                 self_: <expr for &a>,
-//!                 other: vec![<expr for &b>]
-//!               }])
+//! ```text
+//! EnumMatching(
+//!     0,
+//!     <ast::Variant for C0>,
+//!     vec![FieldInfo {
+//!         span: <span of i32>,
+//!         name: None,
+//!         self_: <expr for &a>,
+//!         other: vec![<expr for &b>],
+//!     }],
+//! )
 //! ```
 //!
 //! For `C1 {x}` and `C1 {x}`,
 //!
-//! ```{.text}
-//! EnumMatching(1, <ast::Variant for C1>,
-//!              vec![FieldInfo {
-//!                 span: <span of x>
-//!                 name: Some(<ident of x>),
-//!                 self_: <expr for &self.x>,
-//!                 other: vec![<expr for &other.x>]
-//!                }])
+//! ```text
+//! EnumMatching(
+//!     1,
+//!     <ast::Variant for C1>,
+//!     vec![FieldInfo {
+//!         span: <span of x>,
+//!         name: Some(<ident of x>),
+//!         self_: <expr for &self.x>,
+//!         other: vec![<expr for &other.x>],
+//!     }],
+//! )
 //! ```
 //!
 //! For the tags,
 //!
-//! ```{.text}
+//! ```text
 //! EnumTag(
-//!     &[<ident of self tag>, <ident of other tag>], <expr to combine with>)
+//!     &[<ident of self tag>, <ident of other tag>],
+//!     <expr to combine with>,
+//! )
 //! ```
+//!
 //! Note that this setup doesn't allow for the brute-force "match every variant
 //! against every other variant" approach, which is bad because it produces a
 //! quadratic amount of code (see #15375).
@@ -149,20 +160,24 @@
 //!
 //! A static method on the types above would result in,
 //!
-//! ```{.text}
+//! ```text
 //! StaticStruct(<ast::VariantData of A>, Named(vec![(<ident of x>, <span of x>)]))
 //!
 //! StaticStruct(<ast::VariantData of B>, Unnamed(vec![<span of x>]))
 //!
-//! StaticEnum(<ast::EnumDef of C>,
-//!            vec![(<ident of C0>, <span of C0>, Unnamed(vec![<span of i32>])),
-//!                 (<ident of C1>, <span of C1>, Named(vec![(<ident of x>, <span of x>)]))])
+//! StaticEnum(
+//!     <ast::EnumDef of C>,
+//!     vec![
+//!         (<ident of C0>, <span of C0>, Unnamed(vec![<span of i32>])),
+//!         (<ident of C1>, <span of C1>, Named(vec![(<ident of x>, <span of x>)])),
+//!     ],
+//! )
 //! ```
 
 pub use StaticFields::*;
 pub use SubstructureFields::*;
 
-use crate::deriving;
+use crate::{deriving, errors};
 use rustc_ast::ptr::P;
 use rustc_ast::{
     self as ast, BindingAnnotation, ByRef, EnumDef, Expr, GenericArg, GenericParamKind, Generics,
@@ -415,7 +430,7 @@ fn find_type_parameters(
         }
 
         fn visit_mac_call(&mut self, mac: &ast::MacCall) {
-            self.cx.span_err(mac.span(), "`derive` cannot be used on items with type macros");
+            self.cx.emit_err(errors::DeriveMacroCall { span: mac.span() });
         }
     }
 
@@ -452,7 +467,7 @@ impl<'a> TraitDef<'a> {
         match item {
             Annotatable::Item(item) => {
                 let is_packed = item.attrs.iter().any(|attr| {
-                    for r in attr::find_repr_attrs(&cx.sess, attr) {
+                    for r in attr::find_repr_attrs(cx.sess, attr) {
                         if let attr::ReprPacked(_) = r {
                             return true;
                         }
@@ -463,7 +478,7 @@ impl<'a> TraitDef<'a> {
                 let newitem = match &item.kind {
                     ast::ItemKind::Struct(struct_def, generics) => self.expand_struct_def(
                         cx,
-                        &struct_def,
+                        struct_def,
                         item.ident,
                         generics,
                         from_scratch,
@@ -481,14 +496,14 @@ impl<'a> TraitDef<'a> {
                         if self.supports_unions {
                             self.expand_struct_def(
                                 cx,
-                                &struct_def,
+                                struct_def,
                                 item.ident,
                                 generics,
                                 from_scratch,
                                 is_packed,
                             )
                         } else {
-                            cx.span_err(mitem.span, "this trait cannot be derived for unions");
+                            cx.emit_err(errors::DeriveUnion { span: mitem.span });
                             return;
                         }
                     }
@@ -522,7 +537,10 @@ impl<'a> TraitDef<'a> {
     /// Given that we are deriving a trait `DerivedTrait` for a type like:
     ///
     /// ```ignore (only-for-syntax-highlight)
-    /// struct Struct<'a, ..., 'z, A, B: DeclaredTrait, C, ..., Z> where C: WhereTrait {
+    /// struct Struct<'a, ..., 'z, A, B: DeclaredTrait, C, ..., Z>
+    /// where
+    ///     C: WhereTrait,
+    /// {
     ///     a: A,
     ///     b: B::Item,
     ///     b1: <B as DeclaredTrait>::Item,
@@ -535,12 +553,13 @@ impl<'a> TraitDef<'a> {
     /// create an impl like:
     ///
     /// ```ignore (only-for-syntax-highlight)
-    /// impl<'a, ..., 'z, A, B: DeclaredTrait, C, ... Z> where
-    ///     C:                       WhereTrait,
+    /// impl<'a, ..., 'z, A, B: DeclaredTrait, C, ..., Z>
+    /// where
+    ///     C: WhereTrait,
     ///     A: DerivedTrait + B1 + ... + BN,
     ///     B: DerivedTrait + B1 + ... + BN,
     ///     C: DerivedTrait + B1 + ... + BN,
-    ///     B::Item:                 DerivedTrait + B1 + ... + BN,
+    ///     B::Item: DerivedTrait + B1 + ... + BN,
     ///     <C as WhereTrait>::Item: DerivedTrait + B1 + ... + BN,
     ///     ...
     /// {
@@ -676,52 +695,50 @@ impl<'a> TraitDef<'a> {
             }
         }));
 
-        {
-            // Extra scope required here so ty_params goes out of scope before params is moved
+        let ty_param_names: Vec<Symbol> = params
+            .iter()
+            .filter(|param| matches!(param.kind, ast::GenericParamKind::Type { .. }))
+            .map(|ty_param| ty_param.ident.name)
+            .collect();
 
-            let mut ty_params = params
-                .iter()
-                .filter(|param| matches!(param.kind, ast::GenericParamKind::Type { .. }))
-                .peekable();
+        if !ty_param_names.is_empty() {
+            for field_ty in field_tys {
+                let field_ty_params = find_type_parameters(&field_ty, &ty_param_names, cx);
 
-            if ty_params.peek().is_some() {
-                let ty_param_names: Vec<Symbol> =
-                    ty_params.map(|ty_param| ty_param.ident.name).collect();
-
-                for field_ty in field_tys {
-                    let field_ty_params = find_type_parameters(&field_ty, &ty_param_names, cx);
-
-                    for field_ty_param in field_ty_params {
-                        // if we have already handled this type, skip it
-                        if let ast::TyKind::Path(_, p) = &field_ty_param.ty.kind
-                            && let [sole_segment] = &*p.segments
-                            && ty_param_names.contains(&sole_segment.ident.name)
-                        {
-                            continue;
-                        }
-                        let mut bounds: Vec<_> = self
-                            .additional_bounds
-                            .iter()
-                            .map(|p| {
-                                cx.trait_bound(
-                                    p.to_path(cx, self.span, type_ident, generics),
-                                    self.is_const,
-                                )
-                            })
-                            .collect();
-
-                        // Require the current trait.
-                        bounds.push(cx.trait_bound(trait_path.clone(), self.is_const));
-
-                        // Add a `Copy` bound if required.
-                        if is_packed && self.needs_copy_as_bound_if_packed {
-                            let p = deriving::path_std!(marker::Copy);
-                            bounds.push(cx.trait_bound(
+                for field_ty_param in field_ty_params {
+                    // if we have already handled this type, skip it
+                    if let ast::TyKind::Path(_, p) = &field_ty_param.ty.kind
+                        && let [sole_segment] = &*p.segments
+                        && ty_param_names.contains(&sole_segment.ident.name)
+                    {
+                        continue;
+                    }
+                    let mut bounds: Vec<_> = self
+                        .additional_bounds
+                        .iter()
+                        .map(|p| {
+                            cx.trait_bound(
                                 p.to_path(cx, self.span, type_ident, generics),
                                 self.is_const,
-                            ));
-                        }
+                            )
+                        })
+                        .collect();
 
+                    // Require the current trait.
+                    if !self.skip_path_as_bound {
+                        bounds.push(cx.trait_bound(trait_path.clone(), self.is_const));
+                    }
+
+                    // Add a `Copy` bound if required.
+                    if is_packed && self.needs_copy_as_bound_if_packed {
+                        let p = deriving::path_std!(marker::Copy);
+                        bounds.push(cx.trait_bound(
+                            p.to_path(cx, self.span, type_ident, generics),
+                            self.is_const,
+                        ));
+                    }
+
+                    if !bounds.is_empty() {
                         let predicate = ast::WhereBoundPredicate {
                             span: self.span,
                             bound_generic_params: field_ty_param.bound_generic_params,
@@ -1022,6 +1039,7 @@ impl<'a> MethodDef<'a> {
     }
 
     /// The normal case uses field access.
+    ///
     /// ```
     /// #[derive(PartialEq)]
     /// # struct Dummy;
@@ -1034,11 +1052,13 @@ impl<'a> MethodDef<'a> {
     ///     }
     /// }
     /// ```
+    ///
     /// But if the struct is `repr(packed)`, we can't use something like
     /// `&self.x` because that might cause an unaligned ref. So for any trait
     /// method that takes a reference, we use a local block to force a copy.
     /// This requires that the field impl `Copy`.
-    /// ```
+    ///
+    /// ```rust,ignore (example)
     /// # struct A { x: u8, y: u8 }
     /// impl PartialEq for A {
     ///     fn eq(&self, other: &A) -> bool {
@@ -1049,9 +1069,10 @@ impl<'a> MethodDef<'a> {
     /// impl Hash for A {
     ///     fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) -> () {
     ///         ::core::hash::Hash::hash(&{ self.x }, state);
-    ///         ::core::hash::Hash::hash(&{ self.y }, state)
+    ///         ::core::hash::Hash::hash(&{ self.y }, state);
     ///     }
     /// }
+    /// ```
     fn expand_struct_method_body<'b>(
         &self,
         cx: &mut ExtCtxt<'_>,
@@ -1102,7 +1123,9 @@ impl<'a> MethodDef<'a> {
     ///     A2(i32)
     /// }
     /// ```
+    ///
     /// is equivalent to:
+    ///
     /// ```
     /// #![feature(core_intrinsics)]
     /// enum A {
@@ -1114,15 +1137,15 @@ impl<'a> MethodDef<'a> {
     ///     fn eq(&self, other: &A) -> bool {
     ///         let __self_tag = ::core::intrinsics::discriminant_value(self);
     ///         let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-    ///         __self_tag == __arg1_tag &&
-    ///             match (self, other) {
-    ///                 (A::A2(__self_0), A::A2(__arg1_0)) =>
-    ///                     *__self_0 == *__arg1_0,
+    ///         __self_tag == __arg1_tag
+    ///             && match (self, other) {
+    ///                 (A::A2(__self_0), A::A2(__arg1_0)) => *__self_0 == *__arg1_0,
     ///                 _ => true,
     ///             }
     ///     }
     /// }
     /// ```
+    ///
     /// Creates a tag check combined with a match for a tuple of all
     /// `selflike_args`, with an arm for each variant with fields, possibly an
     /// arm for each fieldless variant (if `unify_fieldless_variants` is not
@@ -1133,9 +1156,14 @@ impl<'a> MethodDef<'a> {
         trait_: &TraitDef<'b>,
         enum_def: &'b EnumDef,
         type_ident: Ident,
-        selflike_args: ThinVec<P<Expr>>,
+        mut selflike_args: ThinVec<P<Expr>>,
         nonselflike_args: &[P<Expr>],
     ) -> BlockOrExpr {
+        assert!(
+            !selflike_args.is_empty(),
+            "static methods must use `expand_static_enum_method_body`",
+        );
+
         let span = trait_.span;
         let variants = &enum_def.variants;
 
@@ -1143,10 +1171,15 @@ impl<'a> MethodDef<'a> {
         let unify_fieldless_variants =
             self.fieldless_variants_strategy == FieldlessVariantsStrategy::Unify;
 
-        // There is no sensible code to be generated for *any* deriving on a
-        // zero-variant enum. So we just generate a failing expression.
+        // For zero-variant enum, this function body is unreachable. Generate
+        // `match *self {}`. This produces machine code identical to `unsafe {
+        // core::intrinsics::unreachable() }` while being safe and stable.
         if variants.is_empty() {
-            return BlockOrExpr(ThinVec::new(), Some(deriving::call_unreachable(cx, span)));
+            selflike_args.truncate(1);
+            let match_arg = cx.expr_deref(span, selflike_args.pop().unwrap());
+            let match_arms = ThinVec::new();
+            let expr = cx.expr_match(span, match_arg, match_arms);
+            return BlockOrExpr(ThinVec::new(), Some(expr));
         }
 
         let prefixes = iter::once("__self".to_string())
@@ -1155,7 +1188,7 @@ impl<'a> MethodDef<'a> {
                     .iter()
                     .enumerate()
                     .skip(1)
-                    .map(|(arg_count, _selflike_arg)| format!("__arg{}", arg_count)),
+                    .map(|(arg_count, _selflike_arg)| format!("__arg{arg_count}")),
             )
             .collect::<Vec<String>>();
 
@@ -1170,7 +1203,7 @@ impl<'a> MethodDef<'a> {
         let get_tag_pieces = |cx: &ExtCtxt<'_>| {
             let tag_idents: Vec<_> = prefixes
                 .iter()
-                .map(|name| Ident::from_str_and_span(&format!("{}_tag", name), span))
+                .map(|name| Ident::from_str_and_span(&format!("{name}_tag"), span))
                 .collect();
 
             let mut tag_exprs: Vec<_> = tag_idents
@@ -1334,7 +1367,7 @@ impl<'a> MethodDef<'a> {
         //          (Variant1, Variant1, ...) => Body1
         //          (Variant2, Variant2, ...) => Body2,
         //          ...
-        //          _ => ::core::intrinsics::unreachable()
+        //          _ => ::core::intrinsics::unreachable(),
         //      }
         let get_match_expr = |mut selflike_args: ThinVec<P<Expr>>| {
             let match_arg = if selflike_args.len() == 1 {
@@ -1452,7 +1485,7 @@ impl<'a> TraitDef<'a> {
 
                 let struct_path = struct_path.clone();
                 match *struct_def {
-                    VariantData::Struct(..) => {
+                    VariantData::Struct { .. } => {
                         let field_pats = pieces_iter
                             .map(|(sp, ident, pat)| {
                                 if ident.is_none() {
@@ -1510,7 +1543,7 @@ impl<'a> TraitDef<'a> {
     }
 
     fn mk_pattern_ident(&self, prefix: &str, i: usize) -> Ident {
-        Ident::from_str_and_span(&format!("{}_{}", prefix, i), self.span)
+        Ident::from_str_and_span(&format!("{prefix}_{i}"), self.span)
     }
 
     fn create_struct_pattern_fields(
@@ -1590,9 +1623,8 @@ impl<'a> TraitDef<'a> {
                                 BYTE_SLICE_IN_PACKED_STRUCT_WITH_DERIVE,
                                 sp,
                                 ast::CRATE_NODE_ID,
-                                &format!(
-                                    "{} slice in a packed struct that derives a built-in trait",
-                                    ty
+                                format!(
+                                    "{ty} slice in a packed struct that derives a built-in trait"
                                 ),
                                 rustc_lint_defs::BuiltinLintDiagnostics::ByteSliceInPackedStructWithDerive
                             );

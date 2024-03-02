@@ -1,14 +1,15 @@
 // run-pass
 // needs-unwind
 
-#![feature(generators, generator_trait)]
+#![feature(coroutines, coroutine_trait)]
+#![feature(if_let_guard)]
 
 #![allow(unused_assignments)]
 #![allow(unused_variables)]
 
 use std::cell::{Cell, RefCell};
 use std::mem::ManuallyDrop;
-use std::ops::Generator;
+use std::ops::Coroutine;
 use std::panic;
 use std::pin::Pin;
 
@@ -172,7 +173,7 @@ fn vec_simple(a: &Allocator) {
     let _x = vec![a.alloc(), a.alloc(), a.alloc(), a.alloc()];
 }
 
-fn generator(a: &Allocator, run_count: usize) {
+fn coroutine(a: &Allocator, run_count: usize) {
     assert!(run_count < 4);
 
     let mut gen = || {
@@ -332,6 +333,16 @@ fn move_ref_pattern(a: &Allocator) {
     let (ref _a, ref mut _b, _c, mut _d) = tup;
 }
 
+fn if_let_guard(a: &Allocator, c: bool, d: i32) {
+    let foo = if c { Some(a.alloc()) } else { None };
+
+    match d == 0 {
+        false if let Some(a) = foo => { let b = a; }
+        true if let true = { drop(foo.unwrap_or_else(|| a.alloc())); d == 1 } => {}
+        _ => {}
+    }
+}
+
 fn panic_after_return(a: &Allocator) -> Ptr<'_> {
     // Panic in the drop of `p` or `q` can leak
     let exceptions = vec![8, 9];
@@ -460,10 +471,10 @@ fn main() {
     run_test(|a| field_assignment(a, false));
     run_test(|a| field_assignment(a, true));
 
-    run_test(|a| generator(a, 0));
-    run_test(|a| generator(a, 1));
-    run_test(|a| generator(a, 2));
-    run_test(|a| generator(a, 3));
+    run_test(|a| coroutine(a, 0));
+    run_test(|a| coroutine(a, 1));
+    run_test(|a| coroutine(a, 2));
+    run_test(|a| coroutine(a, 3));
 
     run_test(|a| mixed_drop_and_nondrop(a));
 
@@ -496,6 +507,13 @@ fn main() {
     run_test(|a| subslice_mixed_min_lengths(a, 7));
 
     run_test(|a| move_ref_pattern(a));
+
+    run_test(|a| if_let_guard(a, true, 0));
+    run_test(|a| if_let_guard(a, true, 1));
+    run_test(|a| if_let_guard(a, true, 2));
+    run_test(|a| if_let_guard(a, false, 0));
+    run_test(|a| if_let_guard(a, false, 1));
+    run_test(|a| if_let_guard(a, false, 2));
 
     run_test(|a| {
         panic_after_return(a);

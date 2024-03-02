@@ -9,7 +9,7 @@ LL |     call_bare(f)
    |     arguments to this function are incorrect
    |
    = note: expected fn pointer `for<'a> fn(&'a str)`
-                 found closure `[closure@$DIR/closure-reform-bad.rs:10:13: 10:22]`
+                 found closure `{closure@$DIR/closure-reform-bad.rs:10:13: 10:22}`
 note: closures can only be coerced to `fn` types if they do not capture any variables
   --> $DIR/closure-reform-bad.rs:10:43
    |
@@ -21,6 +21,6 @@ note: function defined here
 LL | fn call_bare(f: fn(&str)) {
    |    ^^^^^^^^^ -----------
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0308`.

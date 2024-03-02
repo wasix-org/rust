@@ -1,31 +1,32 @@
-use crate::back::write::{self, save_temp_bitcode, DiagnosticHandlers};
+use crate::back::write::{
+    self, bitcode_section_name, save_temp_bitcode, CodegenDiagnosticsStage, DiagnosticHandlers,
+};
 use crate::errors::{
-    DynamicLinkingWithLTO, LlvmError, LtoBitcodeFromRlib, LtoDisallowed, LtoDylib,
+    DynamicLinkingWithLTO, LlvmError, LtoBitcodeFromRlib, LtoDisallowed, LtoDylib, LtoProcMacro,
 };
 use crate::llvm::{self, build_string};
 use crate::{LlvmCodegenBackend, ModuleLlvm};
 use object::read::archive::ArchiveFile;
 use rustc_codegen_ssa::back::lto::{LtoModuleCodegen, SerializedModule, ThinModule, ThinShared};
 use rustc_codegen_ssa::back::symbol_export;
-use rustc_codegen_ssa::back::write::{CodegenContext, FatLTOInput, TargetMachineFactoryConfig};
+use rustc_codegen_ssa::back::write::{CodegenContext, FatLtoInput, TargetMachineFactoryConfig};
 use rustc_codegen_ssa::traits::*;
 use rustc_codegen_ssa::{looks_like_rust_object_file, ModuleCodegen, ModuleKind};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::memmap::Mmap;
-use rustc_errors::{FatalError, Handler};
+use rustc_errors::{DiagCtxt, FatalError};
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_middle::bug;
 use rustc_middle::dep_graph::WorkProduct;
 use rustc_middle::middle::exported_symbols::{SymbolExportInfo, SymbolExportLevel};
-use rustc_session::cgu_reuse_tracker::CguReuse;
 use rustc_session::config::{self, CrateType, Lto};
 
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::iter;
+use std::mem::ManuallyDrop;
 use std::path::Path;
-use std::ptr;
 use std::slice;
 use std::sync::Arc;
 
@@ -35,14 +36,18 @@ pub const THIN_LTO_KEYS_INCR_COMP_FILE_NAME: &str = "thin-lto-past-keys.bin";
 
 pub fn crate_type_allows_lto(crate_type: CrateType) -> bool {
     match crate_type {
-        CrateType::Executable | CrateType::Dylib | CrateType::Staticlib | CrateType::Cdylib => true,
-        CrateType::Rlib | CrateType::ProcMacro => false,
+        CrateType::Executable
+        | CrateType::Dylib
+        | CrateType::Staticlib
+        | CrateType::Cdylib
+        | CrateType::ProcMacro => true,
+        CrateType::Rlib => false,
     }
 }
 
 fn prepare_lto(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
-    diag_handler: &Handler,
+    dcx: &DiagCtxt,
 ) -> Result<(Vec<CString>, Vec<(SerializedModule<ModuleBuffer>, CString)>), FatalError> {
     let export_threshold = match cgcx.lto {
         // We're just doing LTO for our one crate
@@ -79,18 +84,23 @@ fn prepare_lto(
         // Make sure we actually can run LTO
         for crate_type in cgcx.crate_types.iter() {
             if !crate_type_allows_lto(*crate_type) {
-                diag_handler.emit_err(LtoDisallowed);
+                dcx.emit_err(LtoDisallowed);
                 return Err(FatalError);
             } else if *crate_type == CrateType::Dylib {
                 if !cgcx.opts.unstable_opts.dylib_lto {
-                    diag_handler.emit_err(LtoDylib);
+                    dcx.emit_err(LtoDylib);
+                    return Err(FatalError);
+                }
+            } else if *crate_type == CrateType::ProcMacro {
+                if !cgcx.opts.unstable_opts.dylib_lto {
+                    dcx.emit_err(LtoProcMacro);
                     return Err(FatalError);
                 }
             }
         }
 
         if cgcx.opts.cg.prefer_dynamic && !cgcx.opts.unstable_opts.dylib_lto {
-            diag_handler.emit_err(DynamicLinkingWithLTO);
+            dcx.emit_err(DynamicLinkingWithLTO);
             return Err(FatalError);
         }
 
@@ -121,13 +131,14 @@ fn prepare_lto(
                 info!("adding bitcode from {}", name);
                 match get_bitcode_slice_from_object_data(
                     child.data(&*archive_data).expect("corrupt rlib"),
+                    cgcx,
                 ) {
                     Ok(data) => {
                         let module = SerializedModule::FromRlib(data.to_vec());
                         upstream_modules.push((module, CString::new(name).unwrap()));
                     }
                     Err(e) => {
-                        diag_handler.emit_err(e);
+                        dcx.emit_err(e);
                         return Err(FatalError);
                     }
                 }
@@ -142,10 +153,29 @@ fn prepare_lto(
     Ok((symbols_below_threshold, upstream_modules))
 }
 
-fn get_bitcode_slice_from_object_data(obj: &[u8]) -> Result<&[u8], LtoBitcodeFromRlib> {
+fn get_bitcode_slice_from_object_data<'a>(
+    obj: &'a [u8],
+    cgcx: &CodegenContext<LlvmCodegenBackend>,
+) -> Result<&'a [u8], LtoBitcodeFromRlib> {
+    // We're about to assume the data here is an object file with sections, but if it's raw LLVM IR that
+    // won't work. Fortunately, if that's what we have we can just return the object directly, so we sniff
+    // the relevant magic strings here and return.
+    if obj.starts_with(b"\xDE\xC0\x17\x0B") || obj.starts_with(b"BC\xC0\xDE") {
+        return Ok(obj);
+    }
+    // We drop the "__LLVM," prefix here because on Apple platforms there's a notion of "segment name"
+    // which in the public API for sections gets treated as part of the section name, but internally
+    // in MachOObjectFile.cpp gets treated separately.
+    let section_name = bitcode_section_name(cgcx).trim_start_matches("__LLVM,");
     let mut len = 0;
-    let data =
-        unsafe { llvm::LLVMRustGetBitcodeSliceFromObjectData(obj.as_ptr(), obj.len(), &mut len) };
+    let data = unsafe {
+        llvm::LLVMRustGetSliceFromObjectDataByName(
+            obj.as_ptr(),
+            obj.len(),
+            section_name.as_ptr(),
+            &mut len,
+        )
+    };
     if !data.is_null() {
         assert!(len != 0);
         let bc = unsafe { slice::from_raw_parts(data, len) };
@@ -167,21 +197,14 @@ fn get_bitcode_slice_from_object_data(obj: &[u8]) -> Result<&[u8], LtoBitcodeFro
 /// for further optimization.
 pub(crate) fn run_fat(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
-    modules: Vec<FatLTOInput<LlvmCodegenBackend>>,
+    modules: Vec<FatLtoInput<LlvmCodegenBackend>>,
     cached_modules: Vec<(SerializedModule<ModuleBuffer>, WorkProduct)>,
 ) -> Result<LtoModuleCodegen<LlvmCodegenBackend>, FatalError> {
-    let diag_handler = cgcx.create_diag_handler();
-    let (symbols_below_threshold, upstream_modules) = prepare_lto(cgcx, &diag_handler)?;
+    let dcx = cgcx.create_dcx();
+    let (symbols_below_threshold, upstream_modules) = prepare_lto(cgcx, &dcx)?;
     let symbols_below_threshold =
         symbols_below_threshold.iter().map(|c| c.as_ptr()).collect::<Vec<_>>();
-    fat_lto(
-        cgcx,
-        &diag_handler,
-        modules,
-        cached_modules,
-        upstream_modules,
-        &symbols_below_threshold,
-    )
+    fat_lto(cgcx, &dcx, modules, cached_modules, upstream_modules, &symbols_below_threshold)
 }
 
 /// Performs thin LTO by performing necessary global analysis and returning two
@@ -192,8 +215,8 @@ pub(crate) fn run_thin(
     modules: Vec<(String, ThinBuffer)>,
     cached_modules: Vec<(SerializedModule<ModuleBuffer>, WorkProduct)>,
 ) -> Result<(Vec<LtoModuleCodegen<LlvmCodegenBackend>>, Vec<WorkProduct>), FatalError> {
-    let diag_handler = cgcx.create_diag_handler();
-    let (symbols_below_threshold, upstream_modules) = prepare_lto(cgcx, &diag_handler)?;
+    let dcx = cgcx.create_dcx();
+    let (symbols_below_threshold, upstream_modules) = prepare_lto(cgcx, &dcx)?;
     let symbols_below_threshold =
         symbols_below_threshold.iter().map(|c| c.as_ptr()).collect::<Vec<_>>();
     if cgcx.opts.cg.linker_plugin_lto.enabled() {
@@ -202,14 +225,7 @@ pub(crate) fn run_thin(
                       is deferred to the linker"
         );
     }
-    thin_lto(
-        cgcx,
-        &diag_handler,
-        modules,
-        upstream_modules,
-        cached_modules,
-        &symbols_below_threshold,
-    )
+    thin_lto(cgcx, &dcx, modules, upstream_modules, cached_modules, &symbols_below_threshold)
 }
 
 pub(crate) fn prepare_thin(module: ModuleCodegen<ModuleLlvm>) -> (String, ThinBuffer) {
@@ -220,8 +236,8 @@ pub(crate) fn prepare_thin(module: ModuleCodegen<ModuleLlvm>) -> (String, ThinBu
 
 fn fat_lto(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
-    diag_handler: &Handler,
-    modules: Vec<FatLTOInput<LlvmCodegenBackend>>,
+    dcx: &DiagCtxt,
+    modules: Vec<FatLtoInput<LlvmCodegenBackend>>,
     cached_modules: Vec<(SerializedModule<ModuleBuffer>, WorkProduct)>,
     mut serialized_modules: Vec<(SerializedModule<ModuleBuffer>, CString)>,
     symbols_below_threshold: &[*const libc::c_char],
@@ -246,8 +262,8 @@ fn fat_lto(
     }));
     for module in modules {
         match module {
-            FatLTOInput::InMemory(m) => in_memory.push(m),
-            FatLTOInput::Serialized { name, buffer } => {
+            FatLtoInput::InMemory(m) => in_memory.push(m),
+            FatLtoInput::Serialized { name, buffer } => {
                 info!("pushing serialized module {:?}", name);
                 let buffer = SerializedModule::Local(buffer);
                 serialized_modules.push((buffer, CString::new(name).unwrap()));
@@ -286,7 +302,7 @@ fn fat_lto(
             let (buffer, name) = serialized_modules.remove(0);
             info!("no in-memory regular modules to choose from, parsing {:?}", name);
             ModuleCodegen {
-                module_llvm: ModuleLlvm::parse(cgcx, &name, buffer.data(), diag_handler)?,
+                module_llvm: ModuleLlvm::parse(cgcx, &name, buffer.data(), dcx)?,
                 name: name.into_string().unwrap(),
                 kind: ModuleKind::Regular,
             }
@@ -303,7 +319,8 @@ fn fat_lto(
         // The linking steps below may produce errors and diagnostics within LLVM
         // which we'd like to handle and print, so set up our diagnostic handlers
         // (which get unregistered when they go out of scope below).
-        let _handler = DiagnosticHandlers::new(cgcx, diag_handler, llcx);
+        let _handler =
+            DiagnosticHandlers::new(cgcx, dcx, llcx, &module, CodegenDiagnosticsStage::LTO);
 
         // For all other modules we codegened we'll need to link them into our own
         // bitcode. All modules were codegened in their own LLVM context, however,
@@ -327,13 +344,11 @@ fn fat_lto(
             let _timer = cgcx
                 .prof
                 .generic_activity_with_arg_recorder("LLVM_fat_lto_link_module", |recorder| {
-                    recorder.record_arg(format!("{:?}", name))
+                    recorder.record_arg(format!("{name:?}"))
                 });
             info!("linking {:?}", name);
             let data = bc_decoded.data();
-            linker
-                .add(data)
-                .map_err(|()| write::llvm_err(diag_handler, LlvmError::LoadBitcode { name }))?;
+            linker.add(data).map_err(|()| write::llvm_err(dcx, LlvmError::LoadBitcode { name }))?;
             serialized_bitcode.push(bc_decoded);
         }
         drop(linker);
@@ -416,7 +431,7 @@ impl Drop for Linker<'_> {
 /// they all go out of scope.
 fn thin_lto(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
-    diag_handler: &Handler,
+    dcx: &DiagCtxt,
     modules: Vec<(String, ThinBuffer)>,
     serialized_modules: Vec<(SerializedModule<ModuleBuffer>, CString)>,
     cached_modules: Vec<(SerializedModule<ModuleBuffer>, WorkProduct)>,
@@ -436,7 +451,7 @@ fn thin_lto(
 
         for (i, (name, buffer)) in modules.into_iter().enumerate() {
             info!("local module: {} - {}", i, name);
-            let cname = CString::new(name.clone()).unwrap();
+            let cname = CString::new(name.as_bytes()).unwrap();
             thin_modules.push(llvm::ThinLTOModule {
                 identifier: cname.as_ptr(),
                 data: buffer.data().as_ptr(),
@@ -491,7 +506,7 @@ fn thin_lto(
             symbols_below_threshold.as_ptr(),
             symbols_below_threshold.len() as u32,
         )
-        .ok_or_else(|| write::llvm_err(diag_handler, LlvmError::PrepareThinLtoContext))?;
+        .ok_or_else(|| write::llvm_err(dcx, LlvmError::PrepareThinLtoContext))?;
 
         let data = ThinData(data);
 
@@ -548,7 +563,6 @@ fn thin_lto(
                     copy_jobs.push(work_product);
                     info!(" - {}: re-used", module_name);
                     assert!(cgcx.incr_comp_session_dir.is_some());
-                    cgcx.cgu_reuse_tracker.set_actual_reuse(module_name, CguReuse::PostLto);
                     continue;
                 }
             }
@@ -564,7 +578,7 @@ fn thin_lto(
         // session, overwriting the previous serialized data (if any).
         if let Some(path) = key_map_path {
             if let Err(err) = curr_key_map.save_to_file(&path) {
-                return Err(write::llvm_err(diag_handler, LlvmError::WriteThinLtoKey { err }));
+                return Err(write::llvm_err(dcx, LlvmError::WriteThinLtoKey { err }));
             }
         }
 
@@ -574,11 +588,11 @@ fn thin_lto(
 
 pub(crate) fn run_pass_manager(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
-    diag_handler: &Handler,
+    dcx: &DiagCtxt,
     module: &mut ModuleCodegen<ModuleLlvm>,
     thin: bool,
 ) -> Result<(), FatalError> {
-    let _timer = cgcx.prof.verbose_generic_activity_with_arg("LLVM_lto_optimize", &*module.name);
+    let _timer = cgcx.prof.generic_activity_with_arg("LLVM_lto_optimize", &*module.name);
     let config = cgcx.config(module.kind);
 
     // Now we have one massive module inside of llmod. Time to run the
@@ -596,13 +610,13 @@ pub(crate) fn run_pass_manager(
             llvm::LLVMRustAddModuleFlag(
                 module.module_llvm.llmod(),
                 llvm::LLVMModFlagBehavior::Error,
-                "LTOPostLink\0".as_ptr().cast(),
+                c"LTOPostLink".as_ptr().cast(),
                 1,
             );
         }
         let opt_stage = if thin { llvm::OptStage::ThinLTO } else { llvm::OptStage::FatLTO };
         let opt_level = config.opt_level.unwrap_or(config::OptLevel::No);
-        write::llvm_optimize(cgcx, diag_handler, module, config, opt_level, opt_stage)?;
+        write::llvm_optimize(cgcx, dcx, module, config, opt_level, opt_stage)?;
     }
     debug!("lto done");
     Ok(())
@@ -686,11 +700,11 @@ pub unsafe fn optimize_thin_module(
     thin_module: ThinModule<LlvmCodegenBackend>,
     cgcx: &CodegenContext<LlvmCodegenBackend>,
 ) -> Result<ModuleCodegen<ModuleLlvm>, FatalError> {
-    let diag_handler = cgcx.create_diag_handler();
+    let dcx = cgcx.create_dcx();
 
     let module_name = &thin_module.shared.module_names[thin_module.idx];
     let tm_factory_config = TargetMachineFactoryConfig::new(cgcx, module_name.to_str().unwrap());
-    let tm = (cgcx.tm_factory)(tm_factory_config).map_err(|e| write::llvm_err(&diag_handler, e))?;
+    let tm = (cgcx.tm_factory)(tm_factory_config).map_err(|e| write::llvm_err(&dcx, e))?;
 
     // Right now the implementation we've got only works over serialized
     // modules, so we create a fresh new LLVM context and parse the module
@@ -698,9 +712,9 @@ pub unsafe fn optimize_thin_module(
     // crates but for locally codegened modules we may be able to reuse
     // that LLVM Context and Module.
     let llcx = llvm::LLVMRustContextCreate(cgcx.fewer_names);
-    let llmod_raw = parse_module(llcx, module_name, thin_module.data(), &diag_handler)? as *const _;
+    let llmod_raw = parse_module(llcx, module_name, thin_module.data(), &dcx)? as *const _;
     let mut module = ModuleCodegen {
-        module_llvm: ModuleLlvm { llmod_raw, llcx, tm },
+        module_llvm: ModuleLlvm { llmod_raw, llcx, tm: ManuallyDrop::new(tm) },
         name: thin_module.name().to_string(),
         kind: ModuleKind::Regular,
     };
@@ -708,17 +722,6 @@ pub unsafe fn optimize_thin_module(
         let target = &*module.module_llvm.tm;
         let llmod = module.module_llvm.llmod();
         save_temp_bitcode(cgcx, &module, "thin-lto-input");
-
-        // Before we do much else find the "main" `DICompileUnit` that we'll be
-        // using below. If we find more than one though then rustc has changed
-        // in a way we're not ready for, so generate an ICE by returning
-        // an error.
-        let mut cu1 = ptr::null_mut();
-        let mut cu2 = ptr::null_mut();
-        llvm::LLVMRustThinLTOGetDICompileUnit(llmod, &mut cu1, &mut cu2);
-        if !cu2.is_null() {
-            return Err(write::llvm_err(&diag_handler, LlvmError::MultipleSourceDiCompileUnit));
-        }
 
         // Up next comes the per-module local analyses that we do for Thin LTO.
         // Each of these functions is basically copied from the LLVM
@@ -732,7 +735,7 @@ pub unsafe fn optimize_thin_module(
             let _timer =
                 cgcx.prof.generic_activity_with_arg("LLVM_thin_lto_rename", thin_module.name());
             if !llvm::LLVMRustPrepareThinLTORename(thin_module.shared.data.0, llmod, target) {
-                return Err(write::llvm_err(&diag_handler, LlvmError::PrepareThinLtoModule));
+                return Err(write::llvm_err(&dcx, LlvmError::PrepareThinLtoModule));
             }
             save_temp_bitcode(cgcx, &module, "thin-lto-after-rename");
         }
@@ -742,7 +745,7 @@ pub unsafe fn optimize_thin_module(
                 .prof
                 .generic_activity_with_arg("LLVM_thin_lto_resolve_weak", thin_module.name());
             if !llvm::LLVMRustPrepareThinLTOResolveWeak(thin_module.shared.data.0, llmod) {
-                return Err(write::llvm_err(&diag_handler, LlvmError::PrepareThinLtoModule));
+                return Err(write::llvm_err(&dcx, LlvmError::PrepareThinLtoModule));
             }
             save_temp_bitcode(cgcx, &module, "thin-lto-after-resolve");
         }
@@ -752,7 +755,7 @@ pub unsafe fn optimize_thin_module(
                 .prof
                 .generic_activity_with_arg("LLVM_thin_lto_internalize", thin_module.name());
             if !llvm::LLVMRustPrepareThinLTOInternalize(thin_module.shared.data.0, llmod) {
-                return Err(write::llvm_err(&diag_handler, LlvmError::PrepareThinLtoModule));
+                return Err(write::llvm_err(&dcx, LlvmError::PrepareThinLtoModule));
             }
             save_temp_bitcode(cgcx, &module, "thin-lto-after-internalize");
         }
@@ -761,46 +764,9 @@ pub unsafe fn optimize_thin_module(
             let _timer =
                 cgcx.prof.generic_activity_with_arg("LLVM_thin_lto_import", thin_module.name());
             if !llvm::LLVMRustPrepareThinLTOImport(thin_module.shared.data.0, llmod, target) {
-                return Err(write::llvm_err(&diag_handler, LlvmError::PrepareThinLtoModule));
+                return Err(write::llvm_err(&dcx, LlvmError::PrepareThinLtoModule));
             }
             save_temp_bitcode(cgcx, &module, "thin-lto-after-import");
-        }
-
-        // Ok now this is a bit unfortunate. This is also something you won't
-        // find upstream in LLVM's ThinLTO passes! This is a hack for now to
-        // work around bugs in LLVM.
-        //
-        // First discovered in #45511 it was found that as part of ThinLTO
-        // importing passes LLVM will import `DICompileUnit` metadata
-        // information across modules. This means that we'll be working with one
-        // LLVM module that has multiple `DICompileUnit` instances in it (a
-        // bunch of `llvm.dbg.cu` members). Unfortunately there's a number of
-        // bugs in LLVM's backend which generates invalid DWARF in a situation
-        // like this:
-        //
-        //  https://bugs.llvm.org/show_bug.cgi?id=35212
-        //  https://bugs.llvm.org/show_bug.cgi?id=35562
-        //
-        // While the first bug there is fixed the second ended up causing #46346
-        // which was basically a resurgence of #45511 after LLVM's bug 35212 was
-        // fixed.
-        //
-        // This function below is a huge hack around this problem. The function
-        // below is defined in `PassWrapper.cpp` and will basically "merge"
-        // all `DICompileUnit` instances in a module. Basically it'll take all
-        // the objects, rewrite all pointers of `DISubprogram` to point to the
-        // first `DICompileUnit`, and then delete all the other units.
-        //
-        // This is probably mangling to the debug info slightly (but hopefully
-        // not too much) but for now at least gets LLVM to emit valid DWARF (or
-        // so it appears). Hopefully we can remove this once upstream bugs are
-        // fixed in LLVM.
-        {
-            let _timer = cgcx
-                .prof
-                .generic_activity_with_arg("LLVM_thin_lto_patch_debuginfo", thin_module.name());
-            llvm::LLVMRustThinLTOPatchDICompileUnit(llmod, cu1);
-            save_temp_bitcode(cgcx, &module, "thin-lto-after-patch");
         }
 
         // Alright now that we've done everything related to the ThinLTO
@@ -810,7 +776,7 @@ pub unsafe fn optimize_thin_module(
         // little differently.
         {
             info!("running thin lto passes over {}", module.name);
-            run_pass_manager(cgcx, &diag_handler, &mut module, true)?;
+            run_pass_manager(cgcx, &dcx, &mut module, true)?;
             save_temp_bitcode(cgcx, &module, "thin-lto-after-pm");
         }
     }
@@ -829,8 +795,11 @@ impl ThinLTOKeysMap {
         use std::io::Write;
         let file = File::create(path)?;
         let mut writer = io::BufWriter::new(file);
+        // The entries are loaded back into a hash map in `load_from_file()`, so
+        // the order in which we write them to file here does not matter.
+        #[allow(rustc::potential_query_instability)]
         for (module, key) in &self.keys {
-            writeln!(writer, "{} {}", module, key)?;
+            writeln!(writer, "{module} {key}")?;
         }
         Ok(())
     }
@@ -844,7 +813,7 @@ impl ThinLTOKeysMap {
             let mut split = line.split(' ');
             let module = split.next().unwrap();
             let key = split.next().unwrap();
-            assert_eq!(split.next(), None, "Expected two space-separated values, found {:?}", line);
+            assert_eq!(split.next(), None, "Expected two space-separated values, found {line:?}");
             keys.insert(module.to_string(), key.to_string());
         }
         Ok(Self { keys })
@@ -878,10 +847,10 @@ pub fn parse_module<'a>(
     cx: &'a llvm::Context,
     name: &CStr,
     data: &[u8],
-    diag_handler: &Handler,
+    dcx: &DiagCtxt,
 ) -> Result<&'a llvm::Module, FatalError> {
     unsafe {
         llvm::LLVMRustParseBitcodeForLTO(cx, data.as_ptr(), data.len(), name.as_ptr())
-            .ok_or_else(|| write::llvm_err(diag_handler, LlvmError::ParseBitcode))
+            .ok_or_else(|| write::llvm_err(dcx, LlvmError::ParseBitcode))
     }
 }

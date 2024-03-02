@@ -5,46 +5,34 @@ LL | #![clippy::msrv = "invalid.version"]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: `invalid.version` is not a valid Rust version
-  --> $DIR/min_rust_version_invalid_attr.rs:6:1
+  --> $DIR/min_rust_version_invalid_attr.rs:7:1
    |
 LL | #[clippy::msrv = "invalid.version"]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error: `msrv` is defined multiple times
-  --> $DIR/min_rust_version_invalid_attr.rs:11:5
-   |
-LL |     #![clippy::msrv = "=1.35.0"]
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-note: first definition found here
-  --> $DIR/min_rust_version_invalid_attr.rs:10:5
-   |
-LL |     #![clippy::msrv = "1.40"]
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
-
-error: `msrv` is defined multiple times
-  --> $DIR/min_rust_version_invalid_attr.rs:12:5
+error: `clippy::msrv` is defined multiple times
+  --> $DIR/min_rust_version_invalid_attr.rs:14:5
    |
 LL |     #![clippy::msrv = "1.10.1"]
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
 note: first definition found here
-  --> $DIR/min_rust_version_invalid_attr.rs:10:5
+  --> $DIR/min_rust_version_invalid_attr.rs:12:5
    |
 LL |     #![clippy::msrv = "1.40"]
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error: `msrv` is defined multiple times
-  --> $DIR/min_rust_version_invalid_attr.rs:16:9
+error: `clippy::msrv` is defined multiple times
+  --> $DIR/min_rust_version_invalid_attr.rs:19:9
    |
 LL |         #![clippy::msrv = "1.0.0"]
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
 note: first definition found here
-  --> $DIR/min_rust_version_invalid_attr.rs:15:9
+  --> $DIR/min_rust_version_invalid_attr.rs:18:9
    |
 LL |         #![clippy::msrv = "1"]
    |         ^^^^^^^^^^^^^^^^^^^^^^
 
-error: aborting due to 5 previous errors
+error: aborting due to 4 previous errors
 

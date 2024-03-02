@@ -6,7 +6,7 @@ LL |     _n: PhantomData,
    |
 help: consider importing this struct
    |
-LL | use std::marker::PhantomData;
+LL + use std::marker::PhantomData;
    |
 
 error[E0412]: cannot find type `VAL` in this scope
@@ -27,7 +27,7 @@ LL |     const VAL: T;
    |     ------------ `VAL` from trait
 ...
 LL | impl<N, M> TypeVal<usize> for Multiply<N, M> where N: TypeVal<VAL> {}
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `VAL` in implementation
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `VAL` in implementation
 
 error: aborting due to 3 previous errors
 

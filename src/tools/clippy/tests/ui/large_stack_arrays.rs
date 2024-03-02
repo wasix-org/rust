@@ -18,13 +18,33 @@ pub static DOESNOTLINT2: [u8; 512_001] = {
     [x; 512_001]
 };
 
+fn issue_10741() {
+    #[derive(Copy, Clone)]
+    struct Large([u32; 100_000]);
+
+    fn build() -> Large {
+        Large([0; 100_000])
+    }
+
+    let _x = [build(); 3];
+    //~^ ERROR: allocating a local array larger than 512000 bytes
+
+    let _y = [build(), build(), build()];
+    //~^ ERROR: allocating a local array larger than 512000 bytes
+}
+
 fn main() {
     let bad = (
         [0u32; 20_000_000],
+        //~^ ERROR: allocating a local array larger than 512000 bytes
         [S { data: [0; 32] }; 5000],
+        //~^ ERROR: allocating a local array larger than 512000 bytes
         [Some(""); 20_000_000],
+        //~^ ERROR: allocating a local array larger than 512000 bytes
         [E::T(0); 5000],
+        //~^ ERROR: allocating a local array larger than 512000 bytes
         [0u8; usize::MAX],
+        //~^ ERROR: allocating a local array larger than 512000 bytes
     );
 
     let good = (

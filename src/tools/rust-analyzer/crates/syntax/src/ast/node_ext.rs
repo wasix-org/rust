@@ -61,6 +61,14 @@ impl ast::BlockExpr {
     pub fn tail_expr(&self) -> Option<ast::Expr> {
         self.stmt_list()?.tail_expr()
     }
+    /// Block expressions accept outer and inner attributes, but only when they are the outer
+    /// expression of an expression statement or the final expression of another block expression.
+    pub fn may_carry_attributes(&self) -> bool {
+        matches!(
+            self.syntax().parent().map(|it| it.kind()),
+            Some(SyntaxKind::BLOCK_EXPR | SyntaxKind::EXPR_STMT)
+        )
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -267,8 +275,17 @@ impl ast::Path {
         successors(Some(self.clone()), ast::Path::qualifier).last().unwrap()
     }
 
+    pub fn first_qualifier(&self) -> Option<ast::Path> {
+        successors(self.qualifier(), ast::Path::qualifier).last()
+    }
+
     pub fn first_segment(&self) -> Option<ast::PathSegment> {
         self.first_qualifier_or_self().segment()
+    }
+
+    // FIXME: Check usages of Self::segments, they might be wrong because of the logic of the bloew function
+    pub fn segments_of_this_path_only_rev(&self) -> impl Iterator<Item = ast::PathSegment> + Clone {
+        self.qualifiers_and_self().filter_map(|it| it.segment())
     }
 
     pub fn segments(&self) -> impl Iterator<Item = ast::PathSegment> + Clone {
@@ -279,6 +296,10 @@ impl ast::Path {
 
     pub fn qualifiers(&self) -> impl Iterator<Item = ast::Path> + Clone {
         successors(self.qualifier(), |p| p.qualifier())
+    }
+
+    pub fn qualifiers_and_self(&self) -> impl Iterator<Item = ast::Path> + Clone {
+        successors(Some(self.clone()), |p| p.qualifier())
     }
 
     pub fn top_path(&self) -> ast::Path {
@@ -350,6 +371,15 @@ impl ast::Impl {
         } else {
             None
         }
+    }
+}
+
+// [#15778](https://github.com/rust-lang/rust-analyzer/issues/15778)
+impl ast::PathSegment {
+    pub fn qualifying_trait(&self) -> Option<ast::PathType> {
+        let mut path_types = support::children(self.syntax());
+        let first = path_types.next()?;
+        path_types.next().or(Some(first))
     }
 }
 
@@ -680,6 +710,81 @@ impl TypeOrConstParam {
     }
 }
 
+impl AstNode for TypeOrConstParam {
+    fn can_cast(kind: SyntaxKind) -> bool
+    where
+        Self: Sized,
+    {
+        matches!(kind, SyntaxKind::TYPE_PARAM | SyntaxKind::CONST_PARAM)
+    }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        let res = match syntax.kind() {
+            SyntaxKind::TYPE_PARAM => TypeOrConstParam::Type(ast::TypeParam { syntax }),
+            SyntaxKind::CONST_PARAM => TypeOrConstParam::Const(ast::ConstParam { syntax }),
+            _ => return None,
+        };
+        Some(res)
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            TypeOrConstParam::Type(it) => it.syntax(),
+            TypeOrConstParam::Const(it) => it.syntax(),
+        }
+    }
+}
+
+impl HasAttrs for TypeOrConstParam {}
+
+#[derive(Debug, Clone)]
+pub enum TraitOrAlias {
+    Trait(ast::Trait),
+    TraitAlias(ast::TraitAlias),
+}
+
+impl TraitOrAlias {
+    pub fn name(&self) -> Option<ast::Name> {
+        match self {
+            TraitOrAlias::Trait(x) => x.name(),
+            TraitOrAlias::TraitAlias(x) => x.name(),
+        }
+    }
+}
+
+impl AstNode for TraitOrAlias {
+    fn can_cast(kind: SyntaxKind) -> bool
+    where
+        Self: Sized,
+    {
+        matches!(kind, SyntaxKind::TRAIT | SyntaxKind::TRAIT_ALIAS)
+    }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        let res = match syntax.kind() {
+            SyntaxKind::TRAIT => TraitOrAlias::Trait(ast::Trait { syntax }),
+            SyntaxKind::TRAIT_ALIAS => TraitOrAlias::TraitAlias(ast::TraitAlias { syntax }),
+            _ => return None,
+        };
+        Some(res)
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            TraitOrAlias::Trait(it) => it.syntax(),
+            TraitOrAlias::TraitAlias(it) => it.syntax(),
+        }
+    }
+}
+
+impl HasAttrs for TraitOrAlias {}
+
 pub enum VisibilityKind {
     In(ast::Path),
     PubCrate,
@@ -859,12 +964,6 @@ impl From<ast::Adt> for ast::Item {
             ast::Adt::Struct(it) => ast::Item::Struct(it),
             ast::Adt::Union(it) => ast::Item::Union(it),
         }
-    }
-}
-
-impl ast::IfExpr {
-    pub fn condition(&self) -> Option<ast::Expr> {
-        support::child(&self.syntax)
     }
 }
 

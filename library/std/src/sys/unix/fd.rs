@@ -13,14 +13,16 @@ use crate::sys_common::{AsInner, FromInner, IntoInner};
     target_os = "android",
     target_os = "linux",
     target_os = "emscripten",
-    target_os = "l4re"
+    target_os = "l4re",
+    target_os = "hurd",
 ))]
 use libc::off64_t;
 #[cfg(not(any(
     target_os = "linux",
     target_os = "emscripten",
     target_os = "l4re",
-    target_os = "android"
+    target_os = "android",
+    target_os = "hurd",
 )))]
 use libc::off_t as off64_t;
 
@@ -44,6 +46,7 @@ const READ_LIMIT: usize = libc::ssize_t::MAX as usize;
     target_os = "dragonfly",
     target_os = "freebsd",
     target_os = "ios",
+    target_os = "tvos",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "openbsd",
@@ -69,12 +72,14 @@ const fn max_iov() -> usize {
     target_os = "emscripten",
     target_os = "freebsd",
     target_os = "ios",
+    target_os = "tvos",
     target_os = "linux",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "nto",
     target_os = "openbsd",
     target_os = "horizon",
+    target_os = "vita",
     target_os = "watchos",
 )))]
 const fn max_iov() -> usize {
@@ -93,7 +98,7 @@ impl FileDesc {
         Ok(ret as usize)
     }
 
-    #[cfg(not(any(target_os = "espidf", target_os = "horizon")))]
+    #[cfg(not(any(target_os = "espidf", target_os = "horizon", target_os = "vita")))]
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         let ret = cvt(unsafe {
             libc::readv(
@@ -105,14 +110,14 @@ impl FileDesc {
         Ok(ret as usize)
     }
 
-    #[cfg(any(target_os = "espidf", target_os = "horizon"))]
+    #[cfg(any(target_os = "espidf", target_os = "horizon", target_os = "vita"))]
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         io::default_read_vectored(|b| self.read(b), bufs)
     }
 
     #[inline]
     pub fn is_read_vectored(&self) -> bool {
-        cfg!(not(any(target_os = "espidf", target_os = "horizon")))
+        cfg!(not(any(target_os = "espidf", target_os = "horizon", target_os = "vita")))
     }
 
     pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -121,9 +126,17 @@ impl FileDesc {
     }
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        #[cfg(not(any(
+            all(target_os = "linux", not(target_env = "musl")),
+            target_os = "android",
+            target_os = "hurd"
+        )))]
         use libc::pread as pread64;
-        #[cfg(any(target_os = "linux", target_os = "android"))]
+        #[cfg(any(
+            all(target_os = "linux", not(target_env = "musl")),
+            target_os = "android",
+            target_os = "hurd"
+        ))]
         use libc::pread64;
 
         unsafe {
@@ -157,6 +170,7 @@ impl FileDesc {
         target_os = "emscripten",
         target_os = "freebsd",
         target_os = "fuchsia",
+        target_os = "hurd",
         target_os = "illumos",
         target_os = "linux",
         target_os = "netbsd",
@@ -178,8 +192,10 @@ impl FileDesc {
         target_os = "emscripten",
         target_os = "freebsd",
         target_os = "fuchsia",
+        target_os = "hurd",
         target_os = "illumos",
         target_os = "ios",
+        target_os = "tvos",
         target_os = "linux",
         target_os = "macos",
         target_os = "netbsd",
@@ -221,6 +237,7 @@ impl FileDesc {
     #[cfg(any(
         all(target_os = "android", target_pointer_width = "32"),
         target_os = "ios",
+        target_os = "tvos",
         target_os = "macos",
     ))]
     pub fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
@@ -253,7 +270,7 @@ impl FileDesc {
         Ok(ret as usize)
     }
 
-    #[cfg(not(any(target_os = "espidf", target_os = "horizon")))]
+    #[cfg(not(any(target_os = "espidf", target_os = "horizon", target_os = "vita")))]
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         let ret = cvt(unsafe {
             libc::writev(
@@ -265,20 +282,28 @@ impl FileDesc {
         Ok(ret as usize)
     }
 
-    #[cfg(any(target_os = "espidf", target_os = "horizon"))]
+    #[cfg(any(target_os = "espidf", target_os = "horizon", target_os = "vita"))]
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         io::default_write_vectored(|b| self.write(b), bufs)
     }
 
     #[inline]
     pub fn is_write_vectored(&self) -> bool {
-        cfg!(not(any(target_os = "espidf", target_os = "horizon")))
+        cfg!(not(any(target_os = "espidf", target_os = "horizon", target_os = "vita")))
     }
 
     pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        #[cfg(not(any(
+            all(target_os = "linux", not(target_env = "musl")),
+            target_os = "android",
+            target_os = "hurd"
+        )))]
         use libc::pwrite as pwrite64;
-        #[cfg(any(target_os = "linux", target_os = "android"))]
+        #[cfg(any(
+            all(target_os = "linux", not(target_env = "musl")),
+            target_os = "android",
+            target_os = "hurd"
+        ))]
         use libc::pwrite64;
 
         unsafe {
@@ -296,6 +321,7 @@ impl FileDesc {
         target_os = "emscripten",
         target_os = "freebsd",
         target_os = "fuchsia",
+        target_os = "hurd",
         target_os = "illumos",
         target_os = "linux",
         target_os = "netbsd",
@@ -317,8 +343,10 @@ impl FileDesc {
         target_os = "emscripten",
         target_os = "freebsd",
         target_os = "fuchsia",
+        target_os = "hurd",
         target_os = "illumos",
         target_os = "ios",
+        target_os = "tvos",
         target_os = "linux",
         target_os = "macos",
         target_os = "netbsd",
@@ -360,6 +388,7 @@ impl FileDesc {
     #[cfg(any(
         all(target_os = "android", target_pointer_width = "32"),
         target_os = "ios",
+        target_os = "tvos",
         target_os = "macos",
     ))]
     pub fn write_vectored_at(&self, bufs: &[IoSlice<'_>], offset: u64) -> io::Result<usize> {
@@ -401,7 +430,10 @@ impl FileDesc {
         }
     }
     #[cfg(any(
-        all(target_env = "newlib", not(any(target_os = "espidf", target_os = "horizon"))),
+        all(
+            target_env = "newlib",
+            not(any(target_os = "espidf", target_os = "horizon", target_os = "vita"))
+        ),
         target_os = "solaris",
         target_os = "illumos",
         target_os = "emscripten",
@@ -423,10 +455,10 @@ impl FileDesc {
             Ok(())
         }
     }
-    #[cfg(any(target_os = "espidf", target_os = "horizon"))]
+    #[cfg(any(target_os = "espidf", target_os = "horizon", target_os = "vita"))]
     pub fn set_cloexec(&self) -> io::Result<()> {
-        // FD_CLOEXEC is not supported in ESP-IDF and Horizon OS but there's no need to,
-        // because neither supports spawning processes.
+        // FD_CLOEXEC is not supported in ESP-IDF, Horizon OS and Vita but there's no need to,
+        // because none of them supports spawning processes.
         Ok(())
     }
 
@@ -469,9 +501,19 @@ impl<'a> Read for &'a FileDesc {
     fn read_buf(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
         (**self).read_buf(cursor)
     }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        (**self).read_vectored(bufs)
+    }
+
+    #[inline]
+    fn is_read_vectored(&self) -> bool {
+        (**self).is_read_vectored()
+    }
 }
 
 impl AsInner<OwnedFd> for FileDesc {
+    #[inline]
     fn as_inner(&self) -> &OwnedFd {
         &self.0
     }
@@ -496,6 +538,7 @@ impl AsFd for FileDesc {
 }
 
 impl AsRawFd for FileDesc {
+    #[inline]
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }

@@ -2,9 +2,6 @@
 
 // run-pass
 // edition:2018
-// revisions: normal drop-tracking
-// [normal]compile-flags: -Zdrop-tracking=no
-// [drop-tracking]compile-flags: -Zdrop-tracking
 
 #![allow(dead_code)]
 use std::future::Future;
@@ -31,7 +28,7 @@ fn main() {
             a: async { 0 }.await,
         };
 
-        // An error in the generator transform caused `b` to be overwritten with `a` when `b` was
+        // An error in the coroutine transform caused `b` to be overwritten with `a` when `b` was
         // borrowed.
         nop(&action.b);
         assert_ne!(0usize, unsafe { std::mem::transmute(action.b) });

@@ -1,15 +1,13 @@
-use clippy_utils::{
-    diagnostics::span_lint_and_then,
-    higher,
-    source::{snippet, snippet_with_applicability},
-};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::higher;
+use clippy_utils::source::{snippet, snippet_with_applicability};
 
 use rustc_ast::ast;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind};
 
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
   /// ### What it does
@@ -22,7 +20,7 @@ declare_clippy_lint! {
   ///
   /// ### Example
   ///
-  /// ```rust
+  /// ```no_run
   /// for i in (0)..10 {
   ///   println!("{i}");
   /// }
@@ -30,7 +28,7 @@ declare_clippy_lint! {
   ///
   /// Use instead:
   ///
-  /// ```rust
+  /// ```no_run
   /// for i in 0..10 {
   ///   println!("{i}");
   /// }
@@ -48,28 +46,30 @@ fn snippet_enclosed_in_parenthesis(snippet: &str) -> bool {
 }
 
 fn check_for_parens(cx: &LateContext<'_>, e: &Expr<'_>, is_start: bool) {
-    if is_start &&
-    let ExprKind::Lit(ref literal) = e.kind &&
-    let ast::LitKind::Float(_sym, ast::LitFloatType::Unsuffixed) = literal.node
+    if is_start
+        && let ExprKind::Lit(literal) = e.kind
+        && let ast::LitKind::Float(_sym, ast::LitFloatType::Unsuffixed) = literal.node
     {
         // don't check floating point literals on the start expression of a range
         return;
     }
-    if_chain! {
-        if let ExprKind::Lit(ref literal) = e.kind;
+    if let ExprKind::Lit(literal) = e.kind
         // the indicator that parenthesis surround the literal is that the span of the expression and the literal differ
-        if (literal.span.data().hi - literal.span.data().lo) != (e.span.data().hi - e.span.data().lo);
+        && (literal.span.data().hi - literal.span.data().lo) != (e.span.data().hi - e.span.data().lo)
         // inspect the source code of the expression for parenthesis
-        if snippet_enclosed_in_parenthesis(&snippet(cx, e.span, ""));
-        then {
-            let mut applicability = Applicability::MachineApplicable;
-            span_lint_and_then(cx, NEEDLESS_PARENS_ON_RANGE_LITERALS, e.span,
-                "needless parenthesis on range literals can be removed",
-                |diag| {
-                    let suggestion = snippet_with_applicability(cx, literal.span, "_", &mut applicability);
-                    diag.span_suggestion(e.span, "try", suggestion, applicability);
-                });
-        }
+        && snippet_enclosed_in_parenthesis(&snippet(cx, e.span, ""))
+    {
+        let mut applicability = Applicability::MachineApplicable;
+        span_lint_and_then(
+            cx,
+            NEEDLESS_PARENS_ON_RANGE_LITERALS,
+            e.span,
+            "needless parenthesis on range literals can be removed",
+            |diag| {
+                let suggestion = snippet_with_applicability(cx, literal.span, "_", &mut applicability);
+                diag.span_suggestion(e.span, "try", suggestion, applicability);
+            },
+        );
     }
 }
 

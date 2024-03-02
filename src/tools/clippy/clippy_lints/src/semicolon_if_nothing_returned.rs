@@ -1,12 +1,10 @@
 use crate::rustc_lint::LintContext;
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::source::snippet_with_macro_callsite;
-use clippy_utils::sugg;
-use if_chain::if_chain;
+use clippy_utils::source::snippet_with_context;
 use rustc_errors::Applicability;
 use rustc_hir::{Block, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -18,13 +16,13 @@ declare_clippy_lint! {
     /// code, it doesn't require a change in previous last line.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn main() {
     ///     println!("Hello world")
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// fn main() {
     ///     println!("Hello world");
     /// }
@@ -39,32 +37,29 @@ declare_lint_pass!(SemicolonIfNothingReturned => [SEMICOLON_IF_NOTHING_RETURNED]
 
 impl<'tcx> LateLintPass<'tcx> for SemicolonIfNothingReturned {
     fn check_block(&mut self, cx: &LateContext<'tcx>, block: &'tcx Block<'tcx>) {
-        if_chain! {
-            if !block.span.from_expansion();
-            if let Some(expr) = block.expr;
-            let t_expr = cx.typeck_results().expr_ty(expr);
-            if t_expr.is_unit();
-            if let snippet = snippet_with_macro_callsite(cx, expr.span, "}");
-            if !snippet.ends_with('}') && !snippet.ends_with(';');
-            if cx.sess().source_map().is_multiline(block.span);
-            then {
-                // filter out the desugared `for` loop
-                if let ExprKind::DropTemps(..) = &expr.kind {
-                    return;
-                }
-
-                let sugg = sugg::Sugg::hir_with_macro_callsite(cx, expr, "..");
-                let suggestion = format!("{sugg};");
-                span_lint_and_sugg(
-                    cx,
-                    SEMICOLON_IF_NOTHING_RETURNED,
-                    expr.span.source_callsite(),
-                    "consider adding a `;` to the last statement for consistent formatting",
-                    "add a `;` here",
-                    suggestion,
-                    Applicability::MaybeIncorrect,
-                );
+        if !block.span.from_expansion()
+            && let Some(expr) = block.expr
+            && let t_expr = cx.typeck_results().expr_ty(expr)
+            && t_expr.is_unit()
+            && let mut app = Applicability::MachineApplicable
+            && let snippet = snippet_with_context(cx, expr.span, block.span.ctxt(), "}", &mut app).0
+            && !snippet.ends_with('}')
+            && !snippet.ends_with(';')
+            && cx.sess().source_map().is_multiline(block.span)
+        {
+            // filter out the desugared `for` loop
+            if let ExprKind::DropTemps(..) = &expr.kind {
+                return;
             }
+            span_lint_and_sugg(
+                cx,
+                SEMICOLON_IF_NOTHING_RETURNED,
+                expr.span.source_callsite(),
+                "consider adding a `;` to the last statement for consistent formatting",
+                "add a `;` here",
+                format!("{snippet};"),
+                app,
+            );
         }
     }
 }

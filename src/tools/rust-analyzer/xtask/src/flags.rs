@@ -1,5 +1,7 @@
 #![allow(unreachable_pub)]
 
+use std::str::FromStr;
+
 use crate::install::{ClientOpt, Malloc, ServerOpt};
 
 xflags::xflags! {
@@ -42,7 +44,7 @@ xflags::xflags! {
             required changelog: String
         }
         cmd metrics {
-            optional --dry-run
+            optional measurement_type: MeasurementType
         }
         /// Builds a benchmark version of rust-analyzer and puts it into `./target`.
         cmd bb {
@@ -106,8 +108,48 @@ pub struct PublishReleaseNotes {
 }
 
 #[derive(Debug)]
+pub enum MeasurementType {
+    Build,
+    RustcTests,
+    AnalyzeSelf,
+    AnalyzeRipgrep,
+    AnalyzeWebRender,
+    AnalyzeDiesel,
+    AnalyzeHyper,
+}
+
+impl FromStr for MeasurementType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "build" => Ok(Self::Build),
+            "rustc_tests" => Ok(Self::RustcTests),
+            "self" => Ok(Self::AnalyzeSelf),
+            "ripgrep-13.0.0" => Ok(Self::AnalyzeRipgrep),
+            "webrender-2022" => Ok(Self::AnalyzeWebRender),
+            "diesel-1.4.8" => Ok(Self::AnalyzeDiesel),
+            "hyper-0.14.18" => Ok(Self::AnalyzeHyper),
+            _ => Err("Invalid option".to_string()),
+        }
+    }
+}
+impl AsRef<str> for MeasurementType {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Build => "build",
+            Self::RustcTests => "rustc_tests",
+            Self::AnalyzeSelf => "self",
+            Self::AnalyzeRipgrep => "ripgrep-13.0.0",
+            Self::AnalyzeWebRender => "webrender-2022",
+            Self::AnalyzeDiesel => "diesel-1.4.8",
+            Self::AnalyzeHyper => "hyper-0.14.18",
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Metrics {
-    pub dry_run: bool,
+    pub measurement_type: Option<MeasurementType>,
 }
 
 #[derive(Debug)]

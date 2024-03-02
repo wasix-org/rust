@@ -11,28 +11,55 @@
 // Note, however, that we run on lots older linuxes, as well as cross
 // compiling from a newer linux to an older linux, so we also have a
 // fallback implementation to use as well.
-#[cfg(any(target_os = "linux", target_os = "fuchsia", target_os = "redox"))]
+#[allow(unexpected_cfgs)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "fuchsia",
+    target_os = "redox",
+    target_os = "hurd"
+))]
+// FIXME: The Rust compiler currently omits weakly function definitions (i.e.,
+// __cxa_thread_atexit_impl) and its metadata from LLVM IR.
+#[no_sanitize(cfi, kcfi)]
 pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
     use crate::mem;
     use crate::sys_common::thread_local_dtor::register_dtor_fallback;
+
+    /// This is necessary because the __cxa_thread_atexit_impl implementation
+    /// std links to by default may be a C or C++ implementation that was not
+    /// compiled using the Clang integer normalization option.
+    #[cfg(sanitizer_cfi_normalize_integers)]
+    use core::ffi::c_int;
+    #[cfg(not(sanitizer_cfi_normalize_integers))]
+    #[cfi_encoding = "i"]
+    #[repr(transparent)]
+    pub struct c_int(pub libc::c_int);
 
     extern "C" {
         #[linkage = "extern_weak"]
         static __dso_handle: *mut u8;
         #[linkage = "extern_weak"]
-        static __cxa_thread_atexit_impl: *const libc::c_void;
+        static __cxa_thread_atexit_impl: Option<
+            extern "C" fn(
+                unsafe extern "C" fn(*mut libc::c_void),
+                *mut libc::c_void,
+                *mut libc::c_void,
+            ) -> c_int,
+        >;
     }
-    if !__cxa_thread_atexit_impl.is_null() {
-        type F = unsafe extern "C" fn(
-            dtor: unsafe extern "C" fn(*mut u8),
-            arg: *mut u8,
-            dso_handle: *mut u8,
-        ) -> libc::c_int;
-        mem::transmute::<*const libc::c_void, F>(__cxa_thread_atexit_impl)(
-            dtor,
-            t,
-            &__dso_handle as *const _ as *mut _,
-        );
+
+    if let Some(f) = __cxa_thread_atexit_impl {
+        unsafe {
+            f(
+                mem::transmute::<
+                    unsafe extern "C" fn(*mut u8),
+                    unsafe extern "C" fn(*mut libc::c_void),
+                >(dtor),
+                t.cast(),
+                &__dso_handle as *const _ as *mut _,
+            );
+        }
         return;
     }
     register_dtor_fallback(t, dtor);
@@ -48,17 +75,16 @@ pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
 // workaround below is to register, via _tlv_atexit, a custom DTOR list once per
 // thread. thread_local dtors are pushed to the DTOR list without calling
 // _tlv_atexit.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
 pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
-    use crate::cell::Cell;
-    use crate::mem;
+    use crate::cell::{Cell, RefCell};
     use crate::ptr;
 
     #[thread_local]
     static REGISTERED: Cell<bool> = Cell::new(false);
 
     #[thread_local]
-    static mut DTORS: Vec<(*mut u8, unsafe extern "C" fn(*mut u8))> = Vec::new();
+    static DTORS: RefCell<Vec<(*mut u8, unsafe extern "C" fn(*mut u8))>> = RefCell::new(Vec::new());
 
     if !REGISTERED.get() {
         _tlv_atexit(run_dtors, ptr::null_mut());
@@ -69,21 +95,28 @@ pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
         fn _tlv_atexit(dtor: unsafe extern "C" fn(*mut u8), arg: *mut u8);
     }
 
-    let list = &mut DTORS;
-    list.push((t, dtor));
+    match DTORS.try_borrow_mut() {
+        Ok(mut dtors) => dtors.push((t, dtor)),
+        Err(_) => rtabort!("global allocator may not use TLS"),
+    }
 
     unsafe extern "C" fn run_dtors(_: *mut u8) {
-        let mut list = mem::take(&mut DTORS);
+        let mut list = DTORS.take();
         while !list.is_empty() {
             for (ptr, dtor) in list {
                 dtor(ptr);
             }
-            list = mem::take(&mut DTORS);
+            list = DTORS.take();
         }
     }
 }
 
-#[cfg(any(target_os = "vxworks", target_os = "horizon", target_os = "emscripten"))]
+#[cfg(any(
+    target_os = "vxworks",
+    target_os = "horizon",
+    target_os = "emscripten",
+    target_os = "aix"
+))]
 #[cfg_attr(target_family = "wasm", allow(unused))] // might remain unused depending on target details (e.g. wasm32-unknown-emscripten)
 pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern "C" fn(*mut u8)) {
     use crate::sys_common::thread_local_dtor::register_dtor_fallback;

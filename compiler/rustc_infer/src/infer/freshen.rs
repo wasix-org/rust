@@ -11,7 +11,7 @@
 //!
 //! To handle closures, freshened types also have to contain the signature and kind of any
 //! closure in the local inference context, as otherwise the cache key might be invalidated.
-//! The way this is done is somewhat hacky - the closure signature is appended to the substs,
+//! The way this is done is somewhat hacky - the closure signature is appended to the args,
 //! as well as the closure kind "encoded" as a type. Also, special handling is needed when
 //! the closure signature contains a reference to the original closure.
 //!
@@ -42,19 +42,17 @@ pub struct TypeFreshener<'a, 'tcx> {
     ty_freshen_count: u32,
     const_freshen_count: u32,
     ty_freshen_map: FxHashMap<ty::InferTy, Ty<'tcx>>,
-    const_freshen_map: FxHashMap<ty::InferConst<'tcx>, ty::Const<'tcx>>,
-    keep_static: bool,
+    const_freshen_map: FxHashMap<ty::InferConst, ty::Const<'tcx>>,
 }
 
 impl<'a, 'tcx> TypeFreshener<'a, 'tcx> {
-    pub fn new(infcx: &'a InferCtxt<'tcx>, keep_static: bool) -> TypeFreshener<'a, 'tcx> {
+    pub fn new(infcx: &'a InferCtxt<'tcx>) -> TypeFreshener<'a, 'tcx> {
         TypeFreshener {
             infcx,
             ty_freshen_count: 0,
             const_freshen_count: 0,
             ty_freshen_map: Default::default(),
             const_freshen_map: Default::default(),
-            keep_static,
         }
     }
 
@@ -81,12 +79,12 @@ impl<'a, 'tcx> TypeFreshener<'a, 'tcx> {
     fn freshen_const<F>(
         &mut self,
         opt_ct: Option<ty::Const<'tcx>>,
-        key: ty::InferConst<'tcx>,
+        key: ty::InferConst,
         freshener: F,
         ty: Ty<'tcx>,
     ) -> ty::Const<'tcx>
     where
-        F: FnOnce(u32) -> ty::InferConst<'tcx>,
+        F: FnOnce(u32) -> ty::InferConst,
     {
         if let Some(ct) = opt_ct {
             return ct.fold_with(self);
@@ -97,7 +95,7 @@ impl<'a, 'tcx> TypeFreshener<'a, 'tcx> {
             Entry::Vacant(entry) => {
                 let index = self.const_freshen_count;
                 self.const_freshen_count += 1;
-                let ct = self.infcx.tcx.mk_const(freshener(index), ty);
+                let ct = ty::Const::new_infer(self.infcx.tcx, freshener(index), ty);
                 entry.insert(ct);
                 ct
             }
@@ -112,33 +110,24 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for TypeFreshener<'a, 'tcx> {
 
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
         match *r {
-            ty::ReLateBound(..) => {
+            ty::ReBound(..) => {
                 // leave bound regions alone
                 r
             }
 
-            ty::ReEarlyBound(..)
-            | ty::ReFree(_)
+            ty::ReEarlyParam(..)
+            | ty::ReLateParam(_)
             | ty::ReVar(_)
             | ty::RePlaceholder(..)
+            | ty::ReStatic
             | ty::ReError(_)
-            | ty::ReErased => {
-                // replace all free regions with 'erased
-                self.interner().lifetimes.re_erased
-            }
-            ty::ReStatic => {
-                if self.keep_static {
-                    r
-                } else {
-                    self.interner().lifetimes.re_erased
-                }
-            }
+            | ty::ReErased => self.interner().lifetimes.re_erased,
         }
     }
 
     #[inline]
     fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
-        if !t.needs_infer() && !t.has_erasable_regions() {
+        if !t.has_infer() && !t.has_erasable_regions() {
             t
         } else {
             match *t.kind() {
@@ -166,6 +155,21 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for TypeFreshener<'a, 'tcx> {
                     .val
                     .known();
                 self.freshen_const(opt_ct, ty::InferConst::Var(v), ty::InferConst::Fresh, ct.ty())
+            }
+            ty::ConstKind::Infer(ty::InferConst::EffectVar(v)) => {
+                let opt_ct = self
+                    .infcx
+                    .inner
+                    .borrow_mut()
+                    .effect_unification_table()
+                    .probe_value(v)
+                    .map(|effect| effect.as_const(self.infcx.tcx));
+                self.freshen_const(
+                    opt_ct,
+                    ty::InferConst::EffectVar(v),
+                    ty::InferConst::Fresh,
+                    ct.ty(),
+                )
             }
             ty::ConstKind::Infer(ty::InferConst::Fresh(i)) => {
                 if i >= self.const_freshen_count {
@@ -199,7 +203,7 @@ impl<'a, 'tcx> TypeFreshener<'a, 'tcx> {
         match v {
             ty::TyVar(v) => {
                 let opt_ty = self.infcx.inner.borrow_mut().type_variables().probe(v).known();
-                Some(self.freshen_ty(opt_ty, ty::TyVar(v), |n| self.infcx.tcx.mk_fresh_ty(n)))
+                Some(self.freshen_ty(opt_ty, ty::TyVar(v), |n| Ty::new_fresh(self.infcx.tcx, n)))
             }
 
             ty::IntVar(v) => Some(
@@ -211,7 +215,7 @@ impl<'a, 'tcx> TypeFreshener<'a, 'tcx> {
                         .probe_value(v)
                         .map(|v| v.to_type(self.infcx.tcx)),
                     ty::IntVar(v),
-                    |n| self.infcx.tcx.mk_fresh_int_ty(n),
+                    |n| Ty::new_fresh_int(self.infcx.tcx, n),
                 ),
             ),
 
@@ -224,7 +228,7 @@ impl<'a, 'tcx> TypeFreshener<'a, 'tcx> {
                         .probe_value(v)
                         .map(|v| v.to_type(self.infcx.tcx)),
                     ty::FloatVar(v),
-                    |n| self.infcx.tcx.mk_fresh_float_ty(n),
+                    |n| Ty::new_fresh_float(self.infcx.tcx, n),
                 ),
             ),
 

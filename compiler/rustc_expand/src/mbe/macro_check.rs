@@ -104,12 +104,13 @@
 //! Kleene operators under which a meta-variable is repeating is the concatenation of the stacks
 //! stored when entering a macro definition starting from the state in which the meta-variable is
 //! bound.
+use crate::errors;
 use crate::mbe::{KleeneToken, TokenTree};
 
 use rustc_ast::token::{Delimiter, Token, TokenKind};
 use rustc_ast::{NodeId, DUMMY_NODE_ID};
 use rustc_data_structures::fx::FxHashMap;
-use rustc_errors::MultiSpan;
+use rustc_errors::{DiagnosticMessage, MultiSpan};
 use rustc_session::lint::builtin::{META_VARIABLE_MISUSE, MISSING_FRAGMENT_SPECIFIER};
 use rustc_session::parse::ParseSess;
 use rustc_span::symbol::kw;
@@ -204,7 +205,7 @@ pub(super) fn check_meta_variables(
     rhses: &[TokenTree],
 ) -> bool {
     if lhses.len() != rhses.len() {
-        sess.span_diagnostic.span_bug(span, "length mismatch between LHSes and RHSes")
+        sess.dcx.span_bug(span, "length mismatch between LHSes and RHSes")
     }
     let mut valid = true;
     for (lhs, rhs) in iter::zip(lhses, rhses) {
@@ -243,7 +244,7 @@ fn check_binders(
         // MetaVar(fragment) and not as MetaVarDecl(y, fragment).
         TokenTree::MetaVar(span, name) => {
             if macros.is_empty() {
-                sess.span_diagnostic.span_bug(span, "unexpected MetaVar in lhs");
+                sess.dcx.span_bug(span, "unexpected MetaVar in lhs");
             }
             let name = MacroRulesNormalizedIdent::new(name);
             // There are 3 possibilities:
@@ -274,17 +275,13 @@ fn check_binders(
                 );
             }
             if !macros.is_empty() {
-                sess.span_diagnostic.span_bug(span, "unexpected MetaVarDecl in nested lhs");
+                sess.dcx.span_bug(span, "unexpected MetaVarDecl in nested lhs");
             }
             let name = MacroRulesNormalizedIdent::new(name);
             if let Some(prev_info) = get_binder_info(macros, binders, name) {
                 // Duplicate binders at the top-level macro definition are errors. The lint is only
                 // for nested macro definitions.
-                sess.span_diagnostic
-                    .struct_span_err(span, "duplicate matcher binding")
-                    .span_label(span, "duplicate binding")
-                    .span_label(prev_info.span, "previous binding")
-                    .emit();
+                sess.dcx.emit_err(errors::DuplicateMatcherBinding { span, prev: prev_info.span });
                 *valid = false;
             } else {
                 binders.insert(name, BinderInfo { span, ops: ops.into() });
@@ -292,7 +289,7 @@ fn check_binders(
         }
         // `MetaVarExpr` can not appear in the LHS of a macro arm
         TokenTree::MetaVarExpr(..) => {}
-        TokenTree::Delimited(_, ref del) => {
+        TokenTree::Delimited(.., ref del) => {
             for tt in &del.tts {
                 check_binders(sess, node_id, tt, macros, binders, ops, valid);
             }
@@ -343,7 +340,7 @@ fn check_occurrences(
     match *rhs {
         TokenTree::Token(..) => {}
         TokenTree::MetaVarDecl(span, _name, _kind) => {
-            sess.span_diagnostic.span_bug(span, "unexpected MetaVarDecl in rhs")
+            sess.dcx.span_bug(span, "unexpected MetaVarDecl in rhs")
         }
         TokenTree::MetaVar(span, name) => {
             let name = MacroRulesNormalizedIdent::new(name);
@@ -355,7 +352,7 @@ fn check_occurrences(
             };
             check_ops_is_prefix(sess, node_id, macros, binders, ops, dl.entire(), name);
         }
-        TokenTree::Delimited(_, ref del) => {
+        TokenTree::Delimited(.., ref del) => {
             check_nested_occurrences(sess, node_id, &del.tts, macros, binders, ops, valid);
         }
         TokenTree::Sequence(_, ref seq) => {
@@ -437,8 +434,8 @@ fn check_nested_occurrences(
                 // We check that the meta-variable is correctly used.
                 check_occurrences(sess, node_id, tt, macros, binders, ops, valid);
             }
-            (NestedMacroState::MacroRulesNotName, TokenTree::Delimited(_, del))
-            | (NestedMacroState::MacroName, TokenTree::Delimited(_, del))
+            (NestedMacroState::MacroRulesNotName, TokenTree::Delimited(.., del))
+            | (NestedMacroState::MacroName, TokenTree::Delimited(.., del))
                 if del.delim == Delimiter::Brace =>
             {
                 let macro_rules = state == NestedMacroState::MacroRulesNotName;
@@ -468,7 +465,7 @@ fn check_nested_occurrences(
                 // We check that the meta-variable is correctly used.
                 check_occurrences(sess, node_id, tt, macros, binders, ops, valid);
             }
-            (NestedMacroState::MacroName, TokenTree::Delimited(_, del))
+            (NestedMacroState::MacroName, TokenTree::Delimited(.., del))
                 if del.delim == Delimiter::Parenthesis =>
             {
                 state = NestedMacroState::MacroNameParen;
@@ -483,7 +480,7 @@ fn check_nested_occurrences(
                     valid,
                 );
             }
-            (NestedMacroState::MacroNameParen, TokenTree::Delimited(_, del))
+            (NestedMacroState::MacroNameParen, TokenTree::Delimited(.., del))
                 if del.delim == Delimiter::Brace =>
             {
                 state = NestedMacroState::Empty;
@@ -595,7 +592,7 @@ fn check_ops_is_prefix(
             return;
         }
     }
-    buffer_lint(sess, span.into(), node_id, &format!("unknown macro variable `{}`", name));
+    buffer_lint(sess, span.into(), node_id, format!("unknown macro variable `{name}`"));
 }
 
 /// Returns whether `binder_ops` is a prefix of `occurrence_ops`.
@@ -628,7 +625,7 @@ fn ops_is_prefix(
         if i >= occurrence_ops.len() {
             let mut span = MultiSpan::from_span(span);
             span.push_span_label(binder.span, "expected repetition");
-            let message = &format!("variable '{}' is still repeating at this depth", name);
+            let message = format!("variable '{name}' is still repeating at this depth");
             buffer_lint(sess, span, node_id, message);
             return;
         }
@@ -644,9 +641,14 @@ fn ops_is_prefix(
     }
 }
 
-fn buffer_lint(sess: &ParseSess, span: MultiSpan, node_id: NodeId, message: &str) {
+fn buffer_lint(
+    sess: &ParseSess,
+    span: MultiSpan,
+    node_id: NodeId,
+    message: impl Into<DiagnosticMessage>,
+) {
     // Macros loaded from other crates have dummy node ids.
     if node_id != DUMMY_NODE_ID {
-        sess.buffer_lint(&META_VARIABLE_MISUSE, span, node_id, message);
+        sess.buffer_lint(META_VARIABLE_MISUSE, span, node_id, message);
     }
 }

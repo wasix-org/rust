@@ -18,12 +18,8 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Returns the `DefId` for a given `LangItem`.
     /// If not found, fatally aborts compilation.
     pub fn require_lang_item(self, lang_item: LangItem, span: Option<Span>) -> DefId {
-        self.lang_items().require(lang_item).unwrap_or_else(|err| {
-            if let Some(span) = span {
-                self.sess.span_fatal(span, err.to_string())
-            } else {
-                self.sess.fatal(err.to_string())
-            }
+        self.lang_items().get(lang_item).unwrap_or_else(|| {
+            self.sess.emit_fatal(crate::error::RequiresLangItem { span, name: lang_item.name() });
         })
     }
 
@@ -37,6 +33,17 @@ impl<'tcx> TyCtxt<'tcx> {
             x if x == items.fn_mut_trait() => Some(ty::ClosureKind::FnMut),
             x if x == items.fn_once_trait() => Some(ty::ClosureKind::FnOnce),
             _ => None,
+        }
+    }
+
+    /// Given a [`ty::ClosureKind`], get the [`DefId`] of its corresponding `Fn`-family
+    /// trait, if it is defined.
+    pub fn fn_trait_kind_to_def_id(self, kind: ty::ClosureKind) -> Option<DefId> {
+        let items = self.lang_items();
+        match kind {
+            ty::ClosureKind::Fn => items.fn_trait(),
+            ty::ClosureKind::FnMut => items.fn_mut_trait(),
+            ty::ClosureKind::FnOnce => items.fn_once_trait(),
         }
     }
 

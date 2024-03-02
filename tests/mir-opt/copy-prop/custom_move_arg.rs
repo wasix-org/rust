@@ -1,3 +1,5 @@
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // unit-test: CopyProp
 
 #![feature(custom_mir, core_intrinsics)]
@@ -12,11 +14,11 @@ struct NotCopy(bool);
 fn f(_1: NotCopy) {
     mir!({
         let _2 = _1;
-        Call(RET, bb1, opaque(Move(_1)))
+        Call(RET = opaque(Move(_1)), bb1, UnwindContinue())
     }
     bb1 = {
         let _3 = Move(_2);
-        Call(RET, bb2, opaque(_3))
+        Call(RET = opaque(_3), bb2, UnwindContinue())
     }
     bb2 = {
         Return()

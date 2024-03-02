@@ -35,7 +35,7 @@ fn check_lsp_extensions_docs() {
 
     let expected_hash = {
         let lsp_ext_rs = sh
-            .read_file(sourcegen::project_root().join("crates/rust-analyzer/src/lsp_ext.rs"))
+            .read_file(sourcegen::project_root().join("crates/rust-analyzer/src/lsp/ext.rs"))
             .unwrap();
         stable_hash(lsp_ext_rs.as_str())
     };
@@ -45,7 +45,7 @@ fn check_lsp_extensions_docs() {
             sh.read_file(sourcegen::project_root().join("docs/dev/lsp-extensions.md")).unwrap();
         let text = lsp_extensions_md
             .lines()
-            .find_map(|line| line.strip_prefix("lsp_ext.rs hash:"))
+            .find_map(|line| line.strip_prefix("lsp/ext.rs hash:"))
             .unwrap()
             .trim();
         u64::from_str_radix(text, 16).unwrap()
@@ -54,7 +54,7 @@ fn check_lsp_extensions_docs() {
     if actual_hash != expected_hash {
         panic!(
             "
-lsp_ext.rs was changed without touching lsp-extensions.md.
+lsp/ext.rs was changed without touching lsp-extensions.md.
 
 Expected hash: {expected_hash:x}
 Actual hash:   {actual_hash:x}
@@ -157,8 +157,7 @@ Apache-2.0 OR MIT
 Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 Apache-2.0/MIT
 BSD-3-Clause
-BlueOak-1.0.0 OR MIT OR Apache-2.0
-CC0-1.0 OR Artistic-2.0
+CC0-1.0
 ISC
 MIT
 MIT / Apache-2.0
@@ -251,12 +250,15 @@ fn check_dbg(path: &Path, text: &str) {
         // We have .dbg postfix
         "ide-completion/src/completions/postfix.rs",
         "ide-completion/src/completions/keyword.rs",
+        "ide-completion/src/tests/expression.rs",
         "ide-completion/src/tests/proc_macros.rs",
         // The documentation in string literals may contain anything for its own purposes
         "ide-completion/src/lib.rs",
         "ide-db/src/generated/lints.rs",
         // test for doc test for remove_dbg
         "src/tests/generated.rs",
+        // `expect!` string can contain `dbg!` (due to .dbg postfix)
+        "ide-completion/src/tests/special.rs",
     ];
     if need_dbg.iter().any(|p| path.ends_with(p)) {
         return;
@@ -298,6 +300,8 @@ fn check_test_attrs(path: &Path, text: &str) {
         // This file.
         "slow-tests/tidy.rs",
         "test-utils/src/fixture.rs",
+        // Generated code from lints contains doc tests in string literals.
+        "ide-db/src/generated/lints.rs",
     ];
     if text.contains("#[should_panic") && !need_panic.iter().any(|p| path.ends_with(p)) {
         panic!(
@@ -313,7 +317,7 @@ fn check_trailing_ws(path: &Path, text: &str) {
         return;
     }
     for (line_number, line) in text.lines().enumerate() {
-        if line.chars().last().map(char::is_whitespace) == Some(true) {
+        if line.chars().last().is_some_and(char::is_whitespace) {
             panic!("Trailing whitespace in {} at line {}", path.display(), line_number + 1)
         }
     }

@@ -17,7 +17,6 @@
 //! }
 //! ```
 
-use crate::MirPass;
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::{mir::visit::Visitor, ty::ParamEnv};
@@ -28,7 +27,9 @@ pub struct ConstGoto;
 
 impl<'tcx> MirPass<'tcx> for ConstGoto {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
-        sess.mir_opt_level() >= 4
+        // This pass participates in some as-of-yet untested unsoundness found
+        // in https://github.com/rust-lang/rust/issues/112460
+        sess.mir_opt_level() >= 2 && sess.opts.unstable_opts.unsound_mir_opts
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -94,10 +95,10 @@ impl<'tcx> Visitor<'tcx> for ConstGotoOptimizationFinder<'_, 'tcx> {
                 let (discr, targets) = target_bb_terminator.kind.as_switch()?;
                 if discr.place() == Some(*place) {
                     let switch_ty = place.ty(self.body.local_decls(), self.tcx).ty;
+                    debug_assert_eq!(switch_ty, _const.ty());
                     // We now know that the Switch matches on the const place, and it is statementless
                     // Now find which value in the Switch matches the const value.
-                    let const_value =
-                        _const.literal.try_eval_bits(self.tcx, self.param_env, switch_ty)?;
+                    let const_value = _const.const_.try_eval_bits(self.tcx, self.param_env)?;
                     let target_to_use_in_goto = targets.target_for_value(const_value);
                     self.optimizations.push(OptimizationToApply {
                         bb_with_goto: location.block,

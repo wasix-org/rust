@@ -1,13 +1,10 @@
-use std::{
-    cmp::Ordering,
-    hash::{Hash, Hasher},
-    ops::Deref,
-};
-
-use rustc_data_structures::{
-    fingerprint::Fingerprint,
-    stable_hasher::{HashStable, StableHasher},
-};
+#[cfg(feature = "nightly")]
+use rustc_data_structures::fingerprint::Fingerprint;
+#[cfg(feature = "nightly")]
+use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 
 use crate::{DebruijnIndex, TypeFlags};
 
@@ -21,6 +18,8 @@ use crate::{DebruijnIndex, TypeFlags};
 #[derive(Copy, Clone)]
 pub struct WithCachedTypeInfo<T> {
     pub internee: T,
+
+    #[cfg(feature = "nightly")]
     pub stable_hash: Fingerprint,
 
     /// This field provides fast access to information that is also contained
@@ -86,14 +85,16 @@ impl<T> Deref for WithCachedTypeInfo<T> {
 impl<T: Hash> Hash for WithCachedTypeInfo<T> {
     #[inline]
     fn hash<H: Hasher>(&self, s: &mut H) {
+        #[cfg(feature = "nightly")]
         if self.stable_hash != Fingerprint::ZERO {
-            self.stable_hash.hash(s)
-        } else {
-            self.internee.hash(s)
+            return self.stable_hash.hash(s);
         }
+
+        self.internee.hash(s)
     }
 }
 
+#[cfg(feature = "nightly")]
 impl<T: HashStable<CTX>, CTX> HashStable<CTX> for WithCachedTypeInfo<T> {
     fn hash_stable(&self, hcx: &mut CTX, hasher: &mut StableHasher) {
         if self.stable_hash == Fingerprint::ZERO || cfg!(debug_assertions) {

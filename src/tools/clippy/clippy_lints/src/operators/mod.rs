@@ -1,8 +1,8 @@
 mod absurd_extreme_comparisons;
 mod assign_op_pattern;
 mod bit_mask;
-mod cmp_nan;
 mod cmp_owned;
+mod const_comparisons;
 mod double_comparison;
 mod duration_subsec;
 mod eq_op;
@@ -25,7 +25,7 @@ pub(crate) mod arithmetic_side_effects;
 
 use rustc_hir::{Body, Expr, ExprKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_session::impl_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -48,7 +48,7 @@ declare_clippy_lint! {
     /// like `#[cfg(target_pointer_width = "64")] ..` instead.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let vec: Vec<isize> = Vec::new();
     /// if vec.len() <= 0 {}
     /// if 100 > i32::MAX {}
@@ -76,7 +76,7 @@ declare_clippy_lint! {
     /// desirable to explicitly call checked, wrapping or saturating arithmetic methods.
     ///
     /// #### Example
-    /// ```rust
+    /// ```no_run
     /// // `n` can be any number, including `i32::MAX`.
     /// fn foo(n: i32) -> i32 {
     ///   n + 1
@@ -98,32 +98,6 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for integer arithmetic operations which could overflow or panic.
-    ///
-    /// Specifically, checks for any operators (`+`, `-`, `*`, `<<`, etc) which are capable
-    /// of overflowing according to the [Rust
-    /// Reference](https://doc.rust-lang.org/reference/expressions/operator-expr.html#overflow),
-    /// or which can panic (`/`, `%`). No bounds analysis or sophisticated reasoning is
-    /// attempted.
-    ///
-    /// ### Why is this bad?
-    /// Integer overflow will trigger a panic in debug builds or will wrap in
-    /// release mode. Division by zero will cause a panic in either mode. In some applications one
-    /// wants explicitly checked, wrapping or saturating arithmetic.
-    ///
-    /// ### Example
-    /// ```rust
-    /// # let a = 0;
-    /// a + 1;
-    /// ```
-    #[clippy::version = "pre 1.29.0"]
-    pub INTEGER_ARITHMETIC,
-    restriction,
-    "any integer arithmetic expression which could overflow or panic"
-}
-
-declare_clippy_lint! {
-    /// ### What it does
     /// Checks for float arithmetic.
     ///
     /// ### Why is this bad?
@@ -131,7 +105,7 @@ declare_clippy_lint! {
     /// can be useful to rule out floating-point numbers.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let a = 0.0;
     /// a + 1.0;
     /// ```
@@ -154,7 +128,7 @@ declare_clippy_lint! {
     /// implementations that differ from the regular `Op` impl.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let mut a = 5;
     /// let b = 0;
     /// // ...
@@ -163,7 +137,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let mut a = 5;
     /// let b = 0;
     /// // ...
@@ -191,7 +165,7 @@ declare_clippy_lint! {
     /// written as `a = a op a op b` as it's less confusing.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let mut a = 5;
     /// let b = 2;
     /// // ...
@@ -231,7 +205,7 @@ declare_clippy_lint! {
     /// test-case for this lint.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// if (x & 1 == 2) { }
     /// ```
@@ -264,7 +238,7 @@ declare_clippy_lint! {
     /// uncommon).
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// if (x | 1 > 3) {  }
     /// ```
@@ -287,7 +261,7 @@ declare_clippy_lint! {
     /// llvm generates better code for `x & 15 == 0` on x86
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// if x & 0b1111 == 0 { }
     /// ```
@@ -306,7 +280,7 @@ declare_clippy_lint! {
     /// Readability.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// # let y = 2;
     /// if x == y || x < y {}
@@ -314,7 +288,7 @@ declare_clippy_lint! {
     ///
     /// Use instead:
     ///
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// # let y = 2;
     /// if x <= y {}
@@ -327,6 +301,45 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
+    /// Checks for double comparisons that can never succeed
+    ///
+    /// ### Why is this bad?
+    /// The whole expression can be replaced by `false`,
+    /// which is probably not the programmer's intention
+    ///
+    /// ### Example
+    /// ```no_run
+    /// # let status_code = 200;
+    /// if status_code <= 400 && status_code > 500 {}
+    /// ```
+    #[clippy::version = "1.73.0"]
+    pub IMPOSSIBLE_COMPARISONS,
+    correctness,
+    "double comparisons that will never evaluate to `true`"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for ineffective double comparisons against constants.
+    ///
+    /// ### Why is this bad?
+    /// Only one of the comparisons has any effect on the result, the programmer
+    /// probably intended to flip one of the comparison operators, or compare a
+    /// different value entirely.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// # let status_code = 200;
+    /// if status_code <= 400 && status_code < 500 {}
+    /// ```
+    #[clippy::version = "1.73.0"]
+    pub REDUNDANT_COMPARISONS,
+    correctness,
+    "double comparisons where one of them can be removed"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
     /// Checks for calculation of subsecond microseconds or milliseconds
     /// from other `Duration` methods.
     ///
@@ -335,7 +348,7 @@ declare_clippy_lint! {
     /// `Duration::subsec_millis()` than to calculate them.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::time::Duration;
     /// # let duration = Duration::new(5, 0);
     /// let micros = duration.subsec_nanos() / 1_000;
@@ -343,7 +356,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # use std::time::Duration;
     /// # let duration = Duration::new(5, 0);
     /// let micros = duration.subsec_micros();
@@ -371,7 +384,7 @@ declare_clippy_lint! {
     /// calls. We may introduce a list of known pure functions in the future.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// if x + 1 == x + 1 {}
     ///
@@ -421,7 +434,7 @@ declare_clippy_lint! {
     /// corrected
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = 1;
     /// 0 / x;
     /// 0 * x;
@@ -449,13 +462,13 @@ declare_clippy_lint! {
     /// with an allow.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// pub fn is_roughly_equal(a: f32, b: f32) -> bool {
     ///     (a - b) < f32::EPSILON
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// pub fn is_roughly_equal(a: f32, b: f32) -> bool {
     ///     (a - b).abs() < f32::EPSILON
     /// }
@@ -475,7 +488,7 @@ declare_clippy_lint! {
     /// meaning. So it just obscures what's going on. Delete it mercilessly.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// x / 1 + 0 * 1 - 0 | 0;
     /// ```
@@ -495,13 +508,13 @@ declare_clippy_lint! {
     /// remainder.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = 3 / 2;
     /// println!("{}", x);
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let x = 3f32 / 2f32;
     /// println!("{}", x);
     /// ```
@@ -509,31 +522,6 @@ declare_clippy_lint! {
     pub INTEGER_DIVISION,
     restriction,
     "integer division may cause loss of precision"
-}
-
-declare_clippy_lint! {
-    /// ### What it does
-    /// Checks for comparisons to NaN.
-    ///
-    /// ### Why is this bad?
-    /// NaN does not compare meaningfully to anything – not
-    /// even itself – so those comparisons are simply wrong.
-    ///
-    /// ### Example
-    /// ```rust
-    /// # let x = 1.0;
-    /// if x == f32::NAN { }
-    /// ```
-    ///
-    /// Use instead:
-    /// ```rust
-    /// # let x = 1.0f32;
-    /// if x.is_nan() { }
-    /// ```
-    #[clippy::version = "pre 1.29.0"]
-    pub CMP_NAN,
-    correctness,
-    "comparisons to `NAN`, which will always return false, probably not intended"
 }
 
 declare_clippy_lint! {
@@ -547,14 +535,14 @@ declare_clippy_lint! {
     /// needlessly consuming code and heap space.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = "foo";
     /// # let y = String::from("foo");
     /// if x.to_owned() == y {}
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let x = "foo";
     /// # let y = String::from("foo");
     /// if x == y {}
@@ -578,7 +566,7 @@ declare_clippy_lint! {
     /// guide](http://www.floating-point-gui.de/errors/comparison).
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = 1.2331f64;
     /// let y = 1.2332f64;
     ///
@@ -587,7 +575,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let x = 1.2331f64;
     /// # let y = 1.2332f64;
     /// let error_margin = f64::EPSILON; // Use an epsilon for comparison
@@ -615,7 +603,7 @@ declare_clippy_lint! {
     /// guide](http://www.floating-point-gui.de/errors/comparison).
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x: f64 = 1.0;
     /// const ONE: f64 = 1.00;
     ///
@@ -623,7 +611,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let x: f64 = 1.0;
     /// # const ONE: f64 = 1.00;
     /// let error_margin = f64::EPSILON; // Use an epsilon for comparison
@@ -650,7 +638,7 @@ declare_clippy_lint! {
     /// contest, it's probably a bad idea. Use something more underhanded.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// let a = x % 1;
     /// let a = x % -1;
@@ -674,7 +662,7 @@ declare_clippy_lint! {
     /// For example, in Rust `17 % -3 = 2`, but in Python `17 % -3 = -1`.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = -17 % 3;
     /// ```
     #[clippy::version = "1.42.0"]
@@ -685,7 +673,7 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for uses of bitwise and/or operators between booleans, where performance may be improved by using
+    /// Checks for usage of bitwise and/or operators between booleans, where performance may be improved by using
     /// a lazy and.
     ///
     /// ### Why is this bad?
@@ -697,12 +685,12 @@ declare_clippy_lint! {
     /// determination is quite conservative.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let (x,y) = (true, false);
     /// if x & !y {} // where both x and y are booleans
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let (x,y) = (true, false);
     /// if x && !y {}
     /// ```
@@ -722,14 +710,14 @@ declare_clippy_lint! {
     /// comparing the values they point to.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let a = &[1, 2, 3];
     /// let b = &[1, 2, 3];
     ///
     /// assert!(a as *const _ as usize == b as *const _ as usize);
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let a = &[1, 2, 3];
     /// let b = &[1, 2, 3];
     ///
@@ -754,7 +742,7 @@ declare_clippy_lint! {
     /// indexing operations they are assumed not to have any side effects.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// struct Event {
     ///     x: i32,
     /// }
@@ -765,7 +753,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Should be:
-    /// ```rust
+    /// ```no_run
     /// struct Event {
     ///     x: i32,
     /// }
@@ -787,7 +775,6 @@ pub struct Operators {
 impl_lint_pass!(Operators => [
     ABSURD_EXTREME_COMPARISONS,
     ARITHMETIC_SIDE_EFFECTS,
-    INTEGER_ARITHMETIC,
     FLOAT_ARITHMETIC,
     ASSIGN_OP_PATTERN,
     MISREFACTORED_ASSIGN_OP,
@@ -795,6 +782,8 @@ impl_lint_pass!(Operators => [
     INEFFECTIVE_BIT_MASK,
     VERBOSE_BIT_MASK,
     DOUBLE_COMPARISONS,
+    IMPOSSIBLE_COMPARISONS,
+    REDUNDANT_COMPARISONS,
     DURATION_SUBSEC,
     EQ_OP,
     OP_REF,
@@ -802,7 +791,6 @@ impl_lint_pass!(Operators => [
     FLOAT_EQUALITY_WITHOUT_ABS,
     IDENTITY_OP,
     INTEGER_DIVISION,
-    CMP_NAN,
     CMP_OWNED,
     FLOAT_CMP,
     FLOAT_CMP_CONST,
@@ -840,10 +828,10 @@ impl<'tcx> LateLintPass<'tcx> for Operators {
                 bit_mask::check(cx, e, op.node, lhs, rhs);
                 verbose_bit_mask::check(cx, e, op.node, lhs, rhs, self.verbose_bit_mask_threshold);
                 double_comparison::check(cx, op.node, lhs, rhs, e.span);
+                const_comparisons::check(cx, op, lhs, rhs, e.span);
                 duration_subsec::check(cx, e, op.node, lhs, rhs);
                 float_equality_without_abs::check(cx, e, op.node, lhs, rhs);
                 integer_division::check(cx, e, op.node, lhs, rhs);
-                cmp_nan::check(cx, e, op.node, lhs, rhs);
                 cmp_owned::check(cx, op.node, lhs, rhs);
                 float_cmp::check(cx, e, op.node, lhs, rhs);
                 modulo_one::check(cx, e, op.node, rhs);

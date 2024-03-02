@@ -38,7 +38,7 @@
 //! [`Handle`]: loader::Handle
 //! [`Entries`]: loader::Entry
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
 
 mod anchored_path;
 pub mod file_set;
@@ -60,9 +60,29 @@ pub use paths::{AbsPath, AbsPathBuf};
 ///
 /// Most functions in rust-analyzer use this when they need to refer to a file.
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct FileId(pub u32);
+pub struct FileId(u32);
+// pub struct FileId(NonMaxU32);
 
-impl stdx::hash::NoHashHashable for FileId {}
+impl FileId {
+    /// Think twice about using this outside of tests. If this ends up in a wrong place it will cause panics!
+    // FIXME: To be removed once we get rid of all `SpanData::DUMMY` usages.
+    pub const BOGUS: FileId = FileId(0xe4e4e);
+    pub const MAX_FILE_ID: u32 = 0x7fff_ffff;
+
+    #[inline]
+    pub const fn from_raw(raw: u32) -> FileId {
+        assert!(raw <= Self::MAX_FILE_ID);
+        FileId(raw)
+    }
+
+    #[inline]
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// safe because `FileId` is a newtype of `u32`
+impl nohash_hasher::IsEnabled for FileId {}
 
 /// Storage for all files read by rust-analyzer.
 ///
@@ -108,13 +128,6 @@ pub enum ChangeKind {
 }
 
 impl Vfs {
-    /// Amount of files currently stored.
-    ///
-    /// Note that this includes deleted files.
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
     /// Id of the given path if it exists in the `Vfs` and is not deleted.
     pub fn file_id(&self, path: &VfsPath) -> Option<FileId> {
         self.interner.get(path).filter(|&it| self.get(it).is_some())
@@ -139,6 +152,11 @@ impl Vfs {
         self.get(file_id).as_deref().unwrap()
     }
 
+    /// Returns the overall memory usage for the stored files.
+    pub fn memory_usage(&self) -> usize {
+        self.data.iter().flatten().map(|d| d.capacity()).sum()
+    }
+
     /// Returns an iterator over the stored ids and their corresponding paths.
     ///
     /// This will skip deleted files.
@@ -158,16 +176,18 @@ impl Vfs {
     ///
     /// If the path does not currently exists in the `Vfs`, allocates a new
     /// [`FileId`] for it.
-    pub fn set_file_contents(&mut self, path: VfsPath, contents: Option<Vec<u8>>) -> bool {
+    pub fn set_file_contents(&mut self, path: VfsPath, mut contents: Option<Vec<u8>>) -> bool {
         let file_id = self.alloc_file_id(path);
-        let change_kind = match (&self.get(file_id), &contents) {
+        let change_kind = match (self.get(file_id), &contents) {
             (None, None) => return false,
             (Some(old), Some(new)) if old == new => return false,
             (None, Some(_)) => ChangeKind::Create,
             (Some(_), None) => ChangeKind::Delete,
             (Some(_), Some(_)) => ChangeKind::Modify,
         };
-
+        if let Some(contents) = &mut contents {
+            contents.shrink_to_fit();
+        }
         *self.get_mut(file_id) = contents;
         self.changes.push(ChangedFile { file_id, change_kind });
         true
@@ -181,6 +201,11 @@ impl Vfs {
     /// Drain and returns all the changes in the `Vfs`.
     pub fn take_changes(&mut self) -> Vec<ChangedFile> {
         mem::take(&mut self.changes)
+    }
+
+    /// Provides a panic-less way to verify file_id validity.
+    pub fn exists(&self, file_id: FileId) -> bool {
+        self.get(file_id).is_some()
     }
 
     /// Returns the id associated with `path`

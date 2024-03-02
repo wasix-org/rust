@@ -1,4 +1,4 @@
-use crate::{Diagnostic, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 // Diagnostic: malformed-derive
 //
@@ -7,14 +7,13 @@ pub(crate) fn malformed_derive(
     ctx: &DiagnosticsContext<'_>,
     d: &hir::MalformedDerive,
 ) -> Diagnostic {
-    let display_range = ctx.sema.diagnostics_display_range(d.node.clone()).range;
+    let display_range = ctx.sema.diagnostics_display_range(d.node.clone());
 
     Diagnostic::new(
-        "malformed-derive",
+        DiagnosticCode::RustcHardError("E0777"),
         "malformed derive input, derive attributes are of the form `#[derive(Derive1, Derive2, ...)]`",
         display_range,
     )
-    .severity(Severity::Error)
 }
 
 #[cfg(test)]

@@ -1,8 +1,6 @@
 use super::*;
 use crate::boxed::Box;
 use crate::testing::crash_test::{CrashTestDummy, Panic};
-use core::mem;
-use std::iter::TrustedLen;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[test]
@@ -309,6 +307,7 @@ fn test_drain_sorted() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_drain_sorted_leak() {
     let d0 = CrashTestDummy::new(0);
     let d1 = CrashTestDummy::new(1);
@@ -475,6 +474,7 @@ fn test_retain() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_retain_catch_unwind() {
     let mut heap = BinaryHeap::from(vec![3, 1, 2]);
 
@@ -502,6 +502,7 @@ fn test_retain_catch_unwind() {
 // FIXME: re-enable emscripten once it can unwind again
 #[test]
 #[cfg(not(target_os = "emscripten"))]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn panic_safe() {
     use rand::seq::SliceRandom;
     use std::cmp;

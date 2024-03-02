@@ -39,17 +39,28 @@ COPY host-x86_64/mingw-check/validate-toolstate.sh /scripts/
 COPY host-x86_64/mingw-check/validate-error-codes.sh /scripts/
 
 ENV RUN_CHECK_WITH_PARALLEL_QUERIES 1
+
+# Run clippy just to make sure it doesn't error out; we don't actually want to gate on the warnings
+# though.
+# Ideally we'd use stage 1, but that ICEs: https://github.com/rust-lang/rust-clippy/issues/11230
+
 ENV SCRIPT python3 ../x.py --stage 2 test src/tools/expand-yaml-anchors && \
            python3 ../x.py check --target=i686-pc-windows-gnu --host=i686-pc-windows-gnu && \
+           python3 ../x.py clippy --stage 0 -Awarnings && \
            python3 ../x.py build --stage 0 src/tools/build-manifest && \
            python3 ../x.py test --stage 0 src/tools/compiletest && \
            python3 ../x.py test --stage 0 core alloc std test proc_macro && \
            # Build both public and internal documentation.
+           RUSTDOCFLAGS=\"--document-private-items --document-hidden-items\" python3 ../x.py doc --stage 0 library && \
+           mkdir -p /checkout/obj/staging/doc && \
+           cp -r build/x86_64-unknown-linux-gnu/doc /checkout/obj/staging && \
            RUSTDOCFLAGS=\"--document-private-items --document-hidden-items\" python3 ../x.py doc --stage 0 compiler && \
            RUSTDOCFLAGS=\"--document-private-items --document-hidden-items\" python3 ../x.py doc --stage 0 library/test && \
            /scripts/validate-toolstate.sh && \
            /scripts/validate-error-codes.sh && \
-           reuse lint && \
+           reuse --include-submodules lint && \
            # Runs checks to ensure that there are no ES5 issues in our JS code.
            es-check es6 ../src/librustdoc/html/static/js/*.js && \
-           eslint -c ../src/librustdoc/html/static/.eslintrc.js ../src/librustdoc/html/static/js/*.js
+           eslint -c ../src/librustdoc/html/static/.eslintrc.js ../src/librustdoc/html/static/js/*.js && \
+           eslint -c ../src/tools/rustdoc-js/.eslintrc.js ../src/tools/rustdoc-js/tester.js && \
+           eslint -c ../src/tools/rustdoc-gui/.eslintrc.js ../src/tools/rustdoc-gui/tester.js

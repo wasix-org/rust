@@ -52,6 +52,37 @@ pub trait Visitable<'tcx> {
     /// Calls the corresponding `visit_*` function on the visitor.
     fn visit<V: Visitor<'tcx>>(self, visitor: &mut V);
 }
+impl<'tcx, T> Visitable<'tcx> for &'tcx [T]
+where
+    &'tcx T: Visitable<'tcx>,
+{
+    fn visit<V: Visitor<'tcx>>(self, visitor: &mut V) {
+        for x in self {
+            x.visit(visitor);
+        }
+    }
+}
+impl<'tcx, A, B> Visitable<'tcx> for (A, B)
+where
+    A: Visitable<'tcx>,
+    B: Visitable<'tcx>,
+{
+    fn visit<V: Visitor<'tcx>>(self, visitor: &mut V) {
+        let (a, b) = self;
+        a.visit(visitor);
+        b.visit(visitor);
+    }
+}
+impl<'tcx, T> Visitable<'tcx> for Option<T>
+where
+    T: Visitable<'tcx>,
+{
+    fn visit<V: Visitor<'tcx>>(self, visitor: &mut V) {
+        if let Some(x) = self {
+            x.visit(visitor);
+        }
+    }
+}
 macro_rules! visitable_ref {
     ($t:ident, $f:ident) => {
         impl<'tcx> Visitable<'tcx> for &'tcx $t<'tcx> {
@@ -151,7 +182,7 @@ pub fn for_each_expr_with_closures<'tcx, B, C: Continue>(
 /// returns `true` if expr contains match expr desugared from try
 fn contains_try(expr: &hir::Expr<'_>) -> bool {
     for_each_expr(expr, |e| {
-        if matches!(e.kind, hir::ExprKind::Match(_, _, hir::MatchSource::TryDesugar)) {
+        if matches!(e.kind, hir::ExprKind::Match(_, _, hir::MatchSource::TryDesugar(_))) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -319,7 +350,7 @@ pub fn is_const_evaluatable<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> 
                         && self.cx.typeck_results().expr_ty(rhs).peel_refs().is_primitive_ty() => {},
                 ExprKind::Unary(UnOp::Deref, e) if self.cx.typeck_results().expr_ty(e).is_ref() => (),
                 ExprKind::Unary(_, e) if self.cx.typeck_results().expr_ty(e).peel_refs().is_primitive_ty() => (),
-                ExprKind::Index(base, _)
+                ExprKind::Index(base, _, _)
                     if matches!(
                         self.cx.typeck_results().expr_ty(base).peel_refs().kind(),
                         ty::Slice(_) | ty::Array(..)
@@ -599,10 +630,7 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
             | ExprKind::Let(&Let { init: e, .. }) => {
                 helper(typeck, false, e, f)?;
             },
-            ExprKind::Block(&Block { expr: Some(e), .. }, _)
-            | ExprKind::Box(e)
-            | ExprKind::Cast(e, _)
-            | ExprKind::Unary(_, e) => {
+            ExprKind::Block(&Block { expr: Some(e), .. }, _) | ExprKind::Cast(e, _) | ExprKind::Unary(_, e) => {
                 helper(typeck, true, e, f)?;
             },
             ExprKind::Call(callee, args) => {
@@ -622,7 +650,7 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
                     helper(typeck, true, arg, f)?;
                 }
             },
-            ExprKind::Index(borrowed, consumed)
+            ExprKind::Index(borrowed, consumed, _)
             | ExprKind::Assign(borrowed, consumed, _)
             | ExprKind::AssignOp(_, borrowed, consumed) => {
                 helper(typeck, false, borrowed, f)?;
@@ -654,6 +682,7 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
             // Either drops temporaries, jumps out of the current expression, or has no sub expression.
             ExprKind::DropTemps(_)
             | ExprKind::Ret(_)
+            | ExprKind::Become(_)
             | ExprKind::Break(..)
             | ExprKind::Yield(..)
             | ExprKind::Block(..)
@@ -665,6 +694,7 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
             | ExprKind::Path(_)
             | ExprKind::Continue(_)
             | ExprKind::InlineAsm(_)
+            | ExprKind::OffsetOf(..)
             | ExprKind::Err(_) => (),
         }
         ControlFlow::Continue(())
@@ -738,4 +768,27 @@ pub fn contains_break_or_continue(expr: &Expr<'_>) -> bool {
         }
     })
     .is_some()
+}
+
+/// If the local is only used once in `visitable` returns the path expression referencing the given
+/// local
+pub fn local_used_once<'tcx>(
+    cx: &LateContext<'tcx>,
+    visitable: impl Visitable<'tcx>,
+    id: HirId,
+) -> Option<&'tcx Expr<'tcx>> {
+    let mut expr = None;
+
+    let cf = for_each_expr_with_closures(cx, visitable, |e| {
+        if path_to_local_id(e, id) && expr.replace(e).is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    if cf.is_some() {
+        return None;
+    }
+
+    expr
 }

@@ -3,9 +3,10 @@ use rustc_hir as hir;
 use rustc_hir::lang_items::LangItem;
 use rustc_macros::HashStable;
 use rustc_span::Span;
+use rustc_target::abi::FieldIdx;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
-pub enum PointerCast {
+pub enum PointerCoercion {
     /// Go from a fn-item type to a fn-pointer type.
     ReifyFnPointer,
 
@@ -75,7 +76,7 @@ pub enum PointerCast {
 ///    At some point, of course, `Box` should move out of the compiler, in which
 ///    case this is analogous to transforming a struct. E.g., `Box<[i32; 4]>` ->
 ///    `Box<[i32]>` is an `Adjust::Unsize` with the target `Box<[i32]>`.
-#[derive(Clone, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Clone, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub struct Adjustment<'tcx> {
     pub kind: Adjust<'tcx>,
     pub target: Ty<'tcx>,
@@ -87,7 +88,7 @@ impl<'tcx> Adjustment<'tcx> {
     }
 }
 
-#[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable, Lift)]
+#[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub enum Adjust<'tcx> {
     /// Go from ! to any type.
     NeverToAny,
@@ -98,7 +99,7 @@ pub enum Adjust<'tcx> {
     /// Take the address and produce either a `&` or `*` pointer.
     Borrow(AutoBorrow<'tcx>),
 
-    Pointer(PointerCast),
+    Pointer(PointerCoercion),
 
     /// Cast into a dyn* object.
     DynStar,
@@ -109,7 +110,7 @@ pub enum Adjust<'tcx> {
 /// The target type is `U` in both cases, with the region and mutability
 /// being those shared by both the receiver and the returned reference.
 #[derive(Copy, Clone, PartialEq, Debug, TyEncodable, TyDecodable, HashStable)]
-#[derive(TypeFoldable, TypeVisitable, Lift)]
+#[derive(TypeFoldable, TypeVisitable)]
 pub struct OverloadedDeref<'tcx> {
     pub region: ty::Region<'tcx>,
     pub mutbl: hir::Mutability,
@@ -131,7 +132,7 @@ impl<'tcx> OverloadedDeref<'tcx> {
             .find(|m| m.kind == ty::AssocKind::Fn)
             .unwrap()
             .def_id;
-        tcx.mk_fn_def(method_def_id, [source])
+        Ty::new_fn_def(tcx, method_def_id, [source])
     }
 }
 
@@ -181,7 +182,7 @@ impl From<AutoBorrowMutability> for hir::Mutability {
 }
 
 #[derive(Copy, Clone, PartialEq, Debug, TyEncodable, TyDecodable, HashStable)]
-#[derive(TypeFoldable, TypeVisitable, Lift)]
+#[derive(TypeFoldable, TypeVisitable)]
 pub enum AutoBorrow<'tcx> {
     /// Converts from T to &T.
     Ref(ty::Region<'tcx>, AutoBorrowMutability),
@@ -208,5 +209,5 @@ pub struct CoerceUnsizedInfo {
 #[derive(Clone, Copy, TyEncodable, TyDecodable, Debug, HashStable)]
 pub enum CustomCoerceUnsized {
     /// Records the index of the field being coerced.
-    Struct(usize),
+    Struct(FieldIdx),
 }

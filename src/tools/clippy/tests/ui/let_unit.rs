@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![feature(lint_reasons)]
 #![warn(clippy::let_unit_value)]
 #![allow(unused, clippy::no_effect, clippy::needless_late_init, path_statements)]
@@ -175,3 +173,9 @@ fn attributes() {
     #[expect(clippy::let_unit_value)]
     let _ = f();
 }
+
+async fn issue10433() {
+    let _pending: () = std::future::pending().await;
+}
+
+pub async fn issue11502(a: ()) {}

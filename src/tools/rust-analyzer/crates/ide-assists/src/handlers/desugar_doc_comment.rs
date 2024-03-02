@@ -27,13 +27,13 @@ use crate::{
 pub(crate) fn desugar_doc_comment(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let comment = ctx.find_token_at_offset::<ast::Comment>()?;
     // Only allow doc comments
-    let Some(placement) = comment.kind().doc else { return None; };
+    let Some(placement) = comment.kind().doc else {
+        return None;
+    };
 
     // Only allow comments which are alone on their line
     if let Some(prev) = comment.syntax().prev_token() {
-        if Whitespace::cast(prev).filter(|w| w.text().contains('\n')).is_none() {
-            return None;
-        }
+        Whitespace::cast(prev).filter(|w| w.text().contains('\n'))?;
     }
 
     let indentation = IndentLevel::from_token(comment.syntax()).to_string();
@@ -48,7 +48,7 @@ pub(crate) fn desugar_doc_comment(acc: &mut Assists, ctx: &AssistContext<'_>) ->
             (
                 TextRange::new(
                     comments[0].syntax().text_range().start(),
-                    comments.last().unwrap().syntax().text_range().end(),
+                    comments.last()?.syntax().text_range().end(),
                 ),
                 Either::Right(comments),
             )
@@ -69,9 +69,11 @@ pub(crate) fn desugar_doc_comment(acc: &mut Assists, ctx: &AssistContext<'_>) ->
                         .map(|l| l.strip_prefix(&indentation).unwrap_or(l))
                         .join("\n")
                 }
-                Either::Right(comments) => {
-                    comments.into_iter().map(|c| line_comment_text(IndentLevel(0), c)).join("\n")
-                }
+                Either::Right(comments) => comments
+                    .into_iter()
+                    .map(|cm| line_comment_text(IndentLevel(0), cm))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             };
 
             let hashes = "#".repeat(required_hashes(&text));

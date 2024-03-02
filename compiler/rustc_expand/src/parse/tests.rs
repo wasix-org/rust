@@ -1,8 +1,10 @@
-use crate::tests::{matches_codepattern, string_to_stream, with_error_checking_parse};
+use crate::tests::{
+    matches_codepattern, string_to_stream, with_error_checking_parse, with_expected_parse_error,
+};
 
 use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Delimiter, Token};
-use rustc_ast::tokenstream::{DelimSpan, TokenStream, TokenTree};
+use rustc_ast::tokenstream::{DelimSpacing, DelimSpan, Spacing, TokenStream, TokenTree};
 use rustc_ast::visit;
 use rustc_ast::{self as ast, PatKind};
 use rustc_ast_pretty::pprust::item_to_string;
@@ -51,11 +53,15 @@ fn string_to_item(source_str: String) -> Option<P<ast::Item>> {
     with_error_checking_parse(source_str, &sess(), |p| p.parse_item(ForceCollect::No))
 }
 
-#[should_panic]
 #[test]
 fn bad_path_expr_1() {
+    // This should trigger error: expected identifier, found keyword `return`
     create_default_session_globals_then(|| {
-        string_to_expr("::abc::def::return".to_string());
+        with_expected_parse_error(
+            "::abc::def::return",
+            "expected identifier, found keyword `return`",
+            |p| p.parse_expr(),
+        );
     })
 }
 
@@ -63,23 +69,22 @@ fn bad_path_expr_1() {
 #[test]
 fn string_to_tts_macro() {
     create_default_session_globals_then(|| {
-        let tts: Vec<_> =
-            string_to_stream("macro_rules! zip (($a)=>($a))".to_string()).into_trees().collect();
-        let tts: &[TokenTree] = &tts[..];
+        let stream = string_to_stream("macro_rules! zip (($a)=>($a))".to_string());
+        let tts = &stream.trees().collect::<Vec<_>>()[..];
 
         match tts {
             [
                 TokenTree::Token(Token { kind: token::Ident(name_macro_rules, false), .. }, _),
                 TokenTree::Token(Token { kind: token::Not, .. }, _),
                 TokenTree::Token(Token { kind: token::Ident(name_zip, false), .. }, _),
-                TokenTree::Delimited(_, macro_delim, macro_tts),
+                TokenTree::Delimited(.., macro_delim, macro_tts),
             ] if name_macro_rules == &kw::MacroRules && name_zip.as_str() == "zip" => {
                 let tts = &macro_tts.trees().collect::<Vec<_>>();
                 match &tts[..] {
                     [
-                        TokenTree::Delimited(_, first_delim, first_tts),
+                        TokenTree::Delimited(.., first_delim, first_tts),
                         TokenTree::Token(Token { kind: token::FatArrow, .. }, _),
-                        TokenTree::Delimited(_, second_delim, second_tts),
+                        TokenTree::Delimited(.., second_delim, second_tts),
                     ] if macro_delim == &Delimiter::Parenthesis => {
                         let tts = &first_tts.trees().collect::<Vec<_>>();
                         match &tts[..] {
@@ -111,27 +116,36 @@ fn string_to_tts_macro() {
 #[test]
 fn string_to_tts_1() {
     create_default_session_globals_then(|| {
-        let tts = string_to_stream("fn a (b : i32) { b; }".to_string());
+        let tts = string_to_stream("fn a(b: i32) { b; }".to_string());
 
         let expected = TokenStream::new(vec![
             TokenTree::token_alone(token::Ident(kw::Fn, false), sp(0, 2)),
-            TokenTree::token_alone(token::Ident(Symbol::intern("a"), false), sp(3, 4)),
+            TokenTree::token_joint_hidden(token::Ident(Symbol::intern("a"), false), sp(3, 4)),
             TokenTree::Delimited(
-                DelimSpan::from_pair(sp(5, 6), sp(13, 14)),
+                DelimSpan::from_pair(sp(4, 5), sp(11, 12)),
+                // `JointHidden` because the `(` is followed immediately by
+                // `b`, `Alone` because the `)` is followed by whitespace.
+                DelimSpacing::new(Spacing::JointHidden, Spacing::Alone),
                 Delimiter::Parenthesis,
                 TokenStream::new(vec![
-                    TokenTree::token_alone(token::Ident(Symbol::intern("b"), false), sp(6, 7)),
-                    TokenTree::token_alone(token::Colon, sp(8, 9)),
-                    TokenTree::token_alone(token::Ident(sym::i32, false), sp(10, 13)),
+                    TokenTree::token_joint(token::Ident(Symbol::intern("b"), false), sp(5, 6)),
+                    TokenTree::token_alone(token::Colon, sp(6, 7)),
+                    // `JointHidden` because the `i32` is immediately followed by the `)`.
+                    TokenTree::token_joint_hidden(token::Ident(sym::i32, false), sp(8, 11)),
                 ])
                 .into(),
             ),
             TokenTree::Delimited(
-                DelimSpan::from_pair(sp(15, 16), sp(20, 21)),
+                DelimSpan::from_pair(sp(13, 14), sp(18, 19)),
+                // First `Alone` because the `{` is followed by whitespace,
+                // second `Alone` because the `}` is followed immediately by
+                // EOF.
+                DelimSpacing::new(Spacing::Alone, Spacing::Alone),
                 Delimiter::Brace,
                 TokenStream::new(vec![
-                    TokenTree::token_joint(token::Ident(Symbol::intern("b"), false), sp(17, 18)),
-                    TokenTree::token_alone(token::Semi, sp(18, 19)),
+                    TokenTree::token_joint(token::Ident(Symbol::intern("b"), false), sp(15, 16)),
+                    // `Alone` because the `;` is followed by whitespace.
+                    TokenTree::token_alone(token::Semi, sp(16, 17)),
                 ])
                 .into(),
             ),
@@ -294,9 +308,7 @@ fn ttdelim_span() {
         .unwrap();
 
         let ast::ExprKind::MacCall(mac) = &expr.kind else { panic!("not a macro") };
-        let tts: Vec<_> = mac.args.tokens.clone().into_trees().collect();
-
-        let span = tts.iter().rev().next().unwrap().span();
+        let span = mac.args.tokens.trees().last().unwrap().span();
 
         match sess.source_map().span_to_snippet(span) {
             Ok(s) => assert_eq!(&s[..], "{ body }"),

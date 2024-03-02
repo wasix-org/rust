@@ -6,7 +6,7 @@ use crate::{validate, MirPass};
 
 /// Just like `MirPass`, except it cannot mutate `Body`.
 pub trait MirLint<'tcx> {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         let name = std::any::type_name::<Self>();
         if let Some((_, tail)) = name.rsplit_once(':') { tail } else { name }
     }
@@ -26,7 +26,7 @@ impl<'tcx, T> MirPass<'tcx> for Lint<T>
 where
     T: MirLint<'tcx>,
 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         self.0.name()
     }
 
@@ -49,7 +49,7 @@ impl<'tcx, T> MirPass<'tcx> for WithMinOptLevel<T>
 where
     T: MirPass<'tcx>,
 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         self.1.name()
     }
 
@@ -83,6 +83,25 @@ pub fn run_passes<'tcx>(
     run_passes_inner(tcx, body, passes, phase_change, true);
 }
 
+pub fn should_run_pass<'tcx, P>(tcx: TyCtxt<'tcx>, pass: &P) -> bool
+where
+    P: MirPass<'tcx> + ?Sized,
+{
+    let name = pass.name();
+
+    let overridden_passes = &tcx.sess.opts.unstable_opts.mir_enable_passes;
+    let overridden =
+        overridden_passes.iter().rev().find(|(s, _)| s == &*name).map(|(_name, polarity)| {
+            trace!(
+                pass = %name,
+                "{} as requested by flag",
+                if *polarity { "Running" } else { "Not running" },
+            );
+            *polarity
+        });
+    overridden.unwrap_or_else(|| pass.is_enabled(tcx.sess))
+}
+
 fn run_passes_inner<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &mut Body<'tcx>,
@@ -94,40 +113,39 @@ fn run_passes_inner<'tcx>(
     let overridden_passes = &tcx.sess.opts.unstable_opts.mir_enable_passes;
     trace!(?overridden_passes);
 
+    let prof_arg = tcx.sess.prof.enabled().then(|| format!("{:?}", body.source.def_id()));
+
     if !body.should_skip() {
         for pass in passes {
             let name = pass.name();
 
-            let overridden = overridden_passes.iter().rev().find(|(s, _)| s == &*name).map(
-                |(_name, polarity)| {
-                    trace!(
-                        pass = %name,
-                        "{} as requested by flag",
-                        if *polarity { "Running" } else { "Not running" },
-                    );
-                    *polarity
-                },
-            );
-            if !overridden.unwrap_or_else(|| pass.is_enabled(&tcx.sess)) {
+            if !should_run_pass(tcx, *pass) {
                 continue;
-            }
+            };
 
             let dump_enabled = pass.is_mir_dump_enabled();
 
             if dump_enabled {
-                dump_mir_for_pass(tcx, body, &name, false);
+                dump_mir_for_pass(tcx, body, name, false);
             }
             if validate {
-                validate_body(tcx, body, format!("before pass {}", name));
+                validate_body(tcx, body, format!("before pass {name}"));
             }
 
-            pass.run_pass(tcx, body);
+            if let Some(prof_arg) = &prof_arg {
+                tcx.sess
+                    .prof
+                    .generic_activity_with_arg(pass.profiler_name(), &**prof_arg)
+                    .run(|| pass.run_pass(tcx, body));
+            } else {
+                pass.run_pass(tcx, body);
+            }
 
             if dump_enabled {
-                dump_mir_for_pass(tcx, body, &name, true);
+                dump_mir_for_pass(tcx, body, name, true);
             }
             if validate {
-                validate_body(tcx, body, format!("after pass {}", name));
+                validate_body(tcx, body, format!("after pass {name}"));
             }
 
             body.pass_count += 1;

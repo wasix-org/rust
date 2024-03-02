@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use rustc_data_structures::snapshot_vec as sv;
 use rustc_data_structures::undo_log::{Rollback, UndoLogs};
 use rustc_data_structures::unify as ut;
-use rustc_middle::infer::unify_key::RegionVidKey;
+use rustc_middle::infer::unify_key::{ConstVidKey, EffectVidKey, RegionVidKey};
 use rustc_middle::ty::{self, OpaqueHiddenType, OpaqueTypeKey};
 
 use crate::{
@@ -21,9 +21,10 @@ pub struct Snapshot<'tcx> {
 pub(crate) enum UndoLog<'tcx> {
     OpaqueTypes(OpaqueTypeKey<'tcx>, Option<OpaqueHiddenType<'tcx>>),
     TypeVariables(type_variable::UndoLog<'tcx>),
-    ConstUnificationTable(sv::UndoLog<ut::Delegate<ty::ConstVid<'tcx>>>),
+    ConstUnificationTable(sv::UndoLog<ut::Delegate<ConstVidKey<'tcx>>>),
     IntUnificationTable(sv::UndoLog<ut::Delegate<ty::IntVid>>),
     FloatUnificationTable(sv::UndoLog<ut::Delegate<ty::FloatVid>>),
+    EffectUnificationTable(sv::UndoLog<ut::Delegate<EffectVidKey<'tcx>>>),
     RegionConstraintCollector(region_constraints::UndoLog<'tcx>),
     RegionUnificationTable(sv::UndoLog<ut::Delegate<RegionVidKey<'tcx>>>),
     ProjectionCache(traits::UndoLog<'tcx>),
@@ -31,7 +32,7 @@ pub(crate) enum UndoLog<'tcx> {
 }
 
 macro_rules! impl_from {
-    ($($ctor: ident ($ty: ty),)*) => {
+    ($($ctor:ident ($ty:ty),)*) => {
         $(
         impl<'tcx> From<$ty> for UndoLog<'tcx> {
             fn from(x: $ty) -> Self {
@@ -49,14 +50,13 @@ impl_from! {
 
     TypeVariables(sv::UndoLog<ut::Delegate<type_variable::TyVidEqKey<'tcx>>>),
     TypeVariables(sv::UndoLog<ut::Delegate<ty::TyVid>>),
-    TypeVariables(sv::UndoLog<type_variable::Delegate>),
-    TypeVariables(type_variable::Instantiate),
 
     IntUnificationTable(sv::UndoLog<ut::Delegate<ty::IntVid>>),
 
     FloatUnificationTable(sv::UndoLog<ut::Delegate<ty::FloatVid>>),
+    EffectUnificationTable(sv::UndoLog<ut::Delegate<EffectVidKey<'tcx>>>),
 
-    ConstUnificationTable(sv::UndoLog<ut::Delegate<ty::ConstVid<'tcx>>>),
+    ConstUnificationTable(sv::UndoLog<ut::Delegate<ConstVidKey<'tcx>>>),
 
     RegionUnificationTable(sv::UndoLog<ut::Delegate<RegionVidKey<'tcx>>>),
     ProjectionCache(traits::UndoLog<'tcx>),
@@ -71,6 +71,7 @@ impl<'tcx> Rollback<UndoLog<'tcx>> for InferCtxtInner<'tcx> {
             UndoLog::ConstUnificationTable(undo) => self.const_unification_storage.reverse(undo),
             UndoLog::IntUnificationTable(undo) => self.int_unification_storage.reverse(undo),
             UndoLog::FloatUnificationTable(undo) => self.float_unification_storage.reverse(undo),
+            UndoLog::EffectUnificationTable(undo) => self.effect_unification_storage.reverse(undo),
             UndoLog::RegionConstraintCollector(undo) => {
                 self.region_constraint_storage.as_mut().unwrap().reverse(undo)
             }
@@ -137,12 +138,12 @@ impl<'tcx> InferCtxtInner<'tcx> {
             self.reverse(undo);
         }
 
+        self.type_variable_storage.finalize_rollback();
+
         if self.undo_log.num_open_snapshots == 1 {
-            // The root snapshot. It's safe to clear the undo log because
-            // there's no snapshot further out that we might need to roll back
-            // to.
+            // After the root snapshot the undo log should be empty.
             assert!(snapshot.undo_len == 0);
-            self.undo_log.logs.clear();
+            assert!(self.undo_log.logs.is_empty());
         }
 
         self.undo_log.num_open_snapshots -= 1;
@@ -181,15 +182,6 @@ impl<'tcx> InferCtxtUndoLogs<'tcx> {
 
     pub(crate) fn opaque_types_in_snapshot(&self, s: &Snapshot<'tcx>) -> bool {
         self.logs[s.undo_len..].iter().any(|log| matches!(log, UndoLog::OpaqueTypes(..)))
-    }
-
-    pub(crate) fn region_constraints(
-        &self,
-    ) -> impl Iterator<Item = &'_ region_constraints::UndoLog<'tcx>> + Clone {
-        self.logs.iter().filter_map(|log| match log {
-            UndoLog::RegionConstraintCollector(log) => Some(log),
-            _ => None,
-        })
     }
 
     fn assert_open_snapshot(&self, snapshot: &Snapshot<'tcx>) {

@@ -5,26 +5,7 @@ use rustc_errors::AddToDiagnostic;
 use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_span::{symbol::Ident, Span, Symbol};
 
-use crate::ast_validation::ForbiddenLetReason;
 use crate::fluent_generated as fluent;
-
-#[derive(Diagnostic)]
-#[diag(ast_passes_forbidden_let)]
-#[note]
-pub struct ForbiddenLet {
-    #[primary_span]
-    pub span: Span,
-    #[subdiagnostic]
-    pub(crate) reason: ForbiddenLetReason,
-}
-
-#[derive(Diagnostic)]
-#[diag(ast_passes_forbidden_let_stable)]
-#[note]
-pub struct ForbiddenLetStable {
-    #[primary_span]
-    pub span: Span,
-}
 
 #[derive(Diagnostic)]
 #[diag(ast_passes_keyword_lifetime)]
@@ -42,18 +23,20 @@ pub struct InvalidLabel {
 }
 
 #[derive(Diagnostic)]
-#[diag(ast_passes_invalid_visibility, code = "E0449")]
-pub struct InvalidVisibility {
+#[diag(ast_passes_visibility_not_permitted, code = "E0449")]
+pub struct VisibilityNotPermitted {
     #[primary_span]
     pub span: Span,
-    #[label(ast_passes_implied)]
-    pub implied: Option<Span>,
     #[subdiagnostic]
-    pub note: Option<InvalidVisibilityNote>,
+    pub note: VisibilityNotPermittedNote,
 }
 
 #[derive(Subdiagnostic)]
-pub enum InvalidVisibilityNote {
+pub enum VisibilityNotPermittedNote {
+    #[note(ast_passes_enum_variant)]
+    EnumVariant,
+    #[note(ast_passes_trait_impl)]
+    TraitImpl,
     #[note(ast_passes_individual_impl_items)]
     IndividualImplItems,
     #[note(ast_passes_individual_foreign_items)]
@@ -71,13 +54,6 @@ pub struct TraitFnConst {
 #[derive(Diagnostic)]
 #[diag(ast_passes_forbidden_lifetime_bound)]
 pub struct ForbiddenLifetimeBound {
-    #[primary_span]
-    pub spans: Vec<Span>,
-}
-
-#[derive(Diagnostic)]
-#[diag(ast_passes_forbidden_non_lifetime_param)]
-pub struct ForbiddenNonLifetimeParam {
     #[primary_span]
     pub spans: Vec<Span>,
 }
@@ -295,7 +271,7 @@ pub struct ExternItemAscii {
 #[diag(ast_passes_bad_c_variadic)]
 pub struct BadCVariadic {
     #[primary_span]
-    pub span: Span,
+    pub span: Vec<Span>,
 }
 
 #[derive(Diagnostic)]
@@ -501,11 +477,37 @@ pub struct FieldlessUnion {
 }
 
 #[derive(Diagnostic)]
-#[diag(ast_passes_where_after_type_alias)]
+#[diag(ast_passes_where_clause_after_type_alias)]
 #[note]
-pub struct WhereAfterTypeAlias {
+pub struct WhereClauseAfterTypeAlias {
     #[primary_span]
     pub span: Span,
+    #[help]
+    pub help: Option<()>,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_where_clause_before_type_alias)]
+#[note]
+pub struct WhereClauseBeforeTypeAlias {
+    #[primary_span]
+    pub span: Span,
+    #[subdiagnostic]
+    pub sugg: WhereClauseBeforeTypeAliasSugg,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(
+    ast_passes_suggestion,
+    applicability = "machine-applicable",
+    style = "verbose"
+)]
+pub struct WhereClauseBeforeTypeAliasSugg {
+    #[suggestion_part(code = "")]
+    pub left: Span,
+    pub snippet: String,
+    #[suggestion_part(code = "{snippet}")]
+    pub right: Span,
 }
 
 #[derive(Diagnostic)]
@@ -549,8 +551,6 @@ pub struct TildeConstDisallowed {
 
 #[derive(Subdiagnostic)]
 pub enum TildeConstReason {
-    #[note(ast_passes_trait)]
-    TraitObject,
     #[note(ast_passes_closure)]
     Closure,
     #[note(ast_passes_function)]
@@ -558,6 +558,25 @@ pub enum TildeConstReason {
         #[primary_span]
         ident: Span,
     },
+    #[note(ast_passes_trait)]
+    Trait {
+        #[primary_span]
+        span: Span,
+    },
+    #[note(ast_passes_trait_impl)]
+    TraitImpl {
+        #[primary_span]
+        span: Span,
+    },
+    #[note(ast_passes_impl)]
+    Impl {
+        #[primary_span]
+        span: Span,
+    },
+    #[note(ast_passes_object)]
+    TraitObject,
+    #[note(ast_passes_item)]
+    Item,
 }
 
 #[derive(Diagnostic)]
@@ -565,6 +584,7 @@ pub enum TildeConstReason {
 pub struct OptionalConstExclusive {
     #[primary_span]
     pub span: Span,
+    pub modifier: &'static str,
 }
 
 #[derive(Diagnostic)]
@@ -578,6 +598,17 @@ pub struct ConstAndAsync {
     pub aspan: Span,
     #[label]
     pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_const_and_c_variadic)]
+pub struct ConstAndCVariadic {
+    #[primary_span]
+    pub spans: Vec<Span>,
+    #[label(ast_passes_const)]
+    pub const_span: Span,
+    #[label(ast_passes_variadic)]
+    pub variadic_spans: Vec<Span>,
 }
 
 #[derive(Diagnostic)]
@@ -675,7 +706,7 @@ impl AddToDiagnostic for StableFeature {
 }
 
 #[derive(Diagnostic)]
-#[diag(ast_passes_incompatbile_features)]
+#[diag(ast_passes_incompatible_features)]
 #[help]
 pub struct IncompatibleFeatures {
     #[primary_span]
@@ -690,4 +721,54 @@ pub struct ShowSpan {
     #[primary_span]
     pub span: Span,
     pub msg: &'static str,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_negative_bound_not_supported)]
+pub struct NegativeBoundUnsupported {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_constraint_on_negative_bound)]
+pub struct ConstraintOnNegativeBound {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_invalid_unnamed_field_ty)]
+pub struct InvalidUnnamedFieldTy {
+    #[primary_span]
+    pub span: Span,
+    #[label]
+    pub ty_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_invalid_unnamed_field)]
+pub struct InvalidUnnamedField {
+    #[primary_span]
+    pub span: Span,
+    #[label]
+    pub ident_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_anon_struct_or_union_not_allowed)]
+pub struct AnonStructOrUnionNotAllowed {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+    pub struct_or_union: &'static str,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_match_arm_with_no_body)]
+pub struct MatchArmWithNoBody {
+    #[primary_span]
+    pub span: Span,
+    #[suggestion(code = " => todo!(),", applicability = "has-placeholders")]
+    pub suggestion: Span,
 }

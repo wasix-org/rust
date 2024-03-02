@@ -8,7 +8,57 @@ use crate::unicode::{self, conversions};
 use super::*;
 
 impl char {
+    /// The lowest valid code point a `char` can have, `'\0'`.
+    ///
+    /// Unlike integer types, `char` actually has a gap in the middle,
+    /// meaning that the range of possible `char`s is smaller than you
+    /// might expect. Ranges of `char` will automatically hop this gap
+    /// for you:
+    ///
+    /// ```
+    /// #![feature(char_min)]
+    /// let dist = u32::from(char::MAX) - u32::from(char::MIN);
+    /// let size = (char::MIN..=char::MAX).count() as u32;
+    /// assert!(size < dist);
+    /// ```
+    ///
+    /// Despite this gap, the `MIN` and [`MAX`] values can be used as bounds for
+    /// all `char` values.
+    ///
+    /// [`MAX`]: char::MAX
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(char_min)]
+    /// # fn something_which_returns_char() -> char { 'a' }
+    /// let c: char = something_which_returns_char();
+    /// assert!(char::MIN <= c);
+    ///
+    /// let value_at_min = u32::from(char::MIN);
+    /// assert_eq!(char::from_u32(value_at_min), Some('\0'));
+    /// ```
+    #[unstable(feature = "char_min", issue = "114298")]
+    pub const MIN: char = '\0';
+
     /// The highest valid code point a `char` can have, `'\u{10FFFF}'`.
+    ///
+    /// Unlike integer types, `char` actually has a gap in the middle,
+    /// meaning that the range of possible `char`s is smaller than you
+    /// might expect. Ranges of `char` will automatically hop this gap
+    /// for you:
+    ///
+    /// ```
+    /// #![feature(char_min)]
+    /// let dist = u32::from(char::MAX) - u32::from(char::MIN);
+    /// let size = (char::MIN..=char::MAX).count() as u32;
+    /// assert!(size < dist);
+    /// ```
+    ///
+    /// Despite this gap, the [`MIN`] and `MAX` values can be used as bounds for
+    /// all `char` values.
+    ///
+    /// [`MIN`]: char::MIN
     ///
     /// # Examples
     ///
@@ -17,7 +67,7 @@ impl char {
     /// let c: char = something_which_returns_char();
     /// assert!(c <= char::MAX);
     ///
-    /// let value_at_max = char::MAX as u32;
+    /// let value_at_max = u32::from(char::MAX);
     /// assert_eq!(char::from_u32(value_at_max), Some('\u{10FFFF}'));
     /// assert_eq!(char::from_u32(value_at_max + 1), None);
     /// ```
@@ -380,20 +430,7 @@ impl char {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn escape_unicode(self) -> EscapeUnicode {
-        let c = self as u32;
-
-        // or-ing 1 ensures that for c==0 the code computes that one
-        // digit should be printed and (which is the same) avoids the
-        // (31 - 32) underflow
-        let msb = 31 - (c | 1).leading_zeros();
-
-        // the index of the most significant hex digit
-        let ms_hex_digit = msb / 4;
-        EscapeUnicode {
-            c: self,
-            state: EscapeUnicodeState::Backslash,
-            hex_digit_idx: ms_hex_digit as usize,
-        }
+        EscapeUnicode::new(self)
     }
 
     /// An extended version of `escape_debug` that optionally permits escaping
@@ -403,21 +440,20 @@ impl char {
     /// characters, and double quotes in strings.
     #[inline]
     pub(crate) fn escape_debug_ext(self, args: EscapeDebugExtArgs) -> EscapeDebug {
-        let init_state = match self {
-            '\0' => EscapeDefaultState::Backslash('0'),
-            '\t' => EscapeDefaultState::Backslash('t'),
-            '\r' => EscapeDefaultState::Backslash('r'),
-            '\n' => EscapeDefaultState::Backslash('n'),
-            '\\' => EscapeDefaultState::Backslash(self),
-            '"' if args.escape_double_quote => EscapeDefaultState::Backslash(self),
-            '\'' if args.escape_single_quote => EscapeDefaultState::Backslash(self),
+        match self {
+            '\0' => EscapeDebug::backslash(ascii::Char::Digit0),
+            '\t' => EscapeDebug::backslash(ascii::Char::SmallT),
+            '\r' => EscapeDebug::backslash(ascii::Char::SmallR),
+            '\n' => EscapeDebug::backslash(ascii::Char::SmallN),
+            '\\' => EscapeDebug::backslash(ascii::Char::ReverseSolidus),
+            '\"' if args.escape_double_quote => EscapeDebug::backslash(ascii::Char::QuotationMark),
+            '\'' if args.escape_single_quote => EscapeDebug::backslash(ascii::Char::Apostrophe),
             _ if args.escape_grapheme_extended && self.is_grapheme_extended() => {
-                EscapeDefaultState::Unicode(self.escape_unicode())
+                EscapeDebug::from_unicode(self.escape_unicode())
             }
-            _ if is_printable(self) => EscapeDefaultState::Char(self),
-            _ => EscapeDefaultState::Unicode(self.escape_unicode()),
-        };
-        EscapeDebug(EscapeDefault { state: init_state })
+            _ if is_printable(self) => EscapeDebug::printable(self),
+            _ => EscapeDebug::from_unicode(self.escape_unicode()),
+        }
     }
 
     /// Returns an iterator that yields the literal escape code of a character
@@ -515,15 +551,14 @@ impl char {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn escape_default(self) -> EscapeDefault {
-        let init_state = match self {
-            '\t' => EscapeDefaultState::Backslash('t'),
-            '\r' => EscapeDefaultState::Backslash('r'),
-            '\n' => EscapeDefaultState::Backslash('n'),
-            '\\' | '\'' | '"' => EscapeDefaultState::Backslash(self),
-            '\x20'..='\x7e' => EscapeDefaultState::Char(self),
-            _ => EscapeDefaultState::Unicode(self.escape_unicode()),
-        };
-        EscapeDefault { state: init_state }
+        match self {
+            '\t' => EscapeDefault::backslash(ascii::Char::SmallT),
+            '\r' => EscapeDefault::backslash(ascii::Char::SmallR),
+            '\n' => EscapeDefault::backslash(ascii::Char::SmallN),
+            '\\' | '\'' | '"' => EscapeDefault::backslash(self.as_ascii().unwrap()),
+            '\x20'..='\x7e' => EscapeDefault::printable(self.as_ascii().unwrap()),
+            _ => EscapeDefault::from_unicode(self.escape_unicode()),
+        }
     }
 
     /// Returns the number of bytes this `char` would need if encoded in UTF-8.
@@ -1116,6 +1151,24 @@ impl char {
         *self as u32 <= 0x7F
     }
 
+    /// Returns `Some` if the value is within the ASCII range,
+    /// or `None` if it's not.
+    ///
+    /// This is preferred to [`Self::is_ascii`] when you're passing the value
+    /// along to something else that can take [`ascii::Char`] rather than
+    /// needing to check again for itself whether the value is in ASCII.
+    #[must_use]
+    #[unstable(feature = "ascii_char", issue = "110998")]
+    #[inline]
+    pub const fn as_ascii(&self) -> Option<ascii::Char> {
+        if self.is_ascii() {
+            // SAFETY: Just checked that this is ASCII.
+            Some(unsafe { ascii::Char::from_u8_unchecked(*self as u8) })
+        } else {
+            None
+        }
+    }
+
     /// Makes a copy of the value in its ASCII upper case equivalent.
     ///
     /// ASCII letters 'a' to 'z' are mapped to 'A' to 'Z',
@@ -1396,7 +1449,7 @@ impl char {
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
     pub const fn is_ascii_alphanumeric(&self) -> bool {
-        matches!(*self, '0'..='9' | 'A'..='Z' | 'a'..='z')
+        matches!(*self, '0'..='9') | matches!(*self, 'A'..='Z') | matches!(*self, 'a'..='z')
     }
 
     /// Checks if the value is an ASCII decimal digit:
@@ -1499,7 +1552,7 @@ impl char {
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
     pub const fn is_ascii_hexdigit(&self) -> bool {
-        matches!(*self, '0'..='9' | 'A'..='F' | 'a'..='f')
+        matches!(*self, '0'..='9') | matches!(*self, 'A'..='F') | matches!(*self, 'a'..='f')
     }
 
     /// Checks if the value is an ASCII punctuation character:
@@ -1537,7 +1590,10 @@ impl char {
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
     pub const fn is_ascii_punctuation(&self) -> bool {
-        matches!(*self, '!'..='/' | ':'..='@' | '['..='`' | '{'..='~')
+        matches!(*self, '!'..='/')
+            | matches!(*self, ':'..='@')
+            | matches!(*self, '['..='`')
+            | matches!(*self, '{'..='~')
     }
 
     /// Checks if the value is an ASCII graphic character:

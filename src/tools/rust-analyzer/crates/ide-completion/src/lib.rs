@@ -1,6 +1,6 @@
 //! `completions` crate provides utilities for generating completions of user input.
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
 
 mod completions;
 mod config;
@@ -97,7 +97,7 @@ pub use crate::{
 
 /// Main entry point for completion. We run completion as a two-phase process.
 ///
-/// First, we look at the position and collect a so-called `CompletionContext.
+/// First, we look at the position and collect a so-called `CompletionContext`.
 /// This is a somewhat messy process, because, during completion, syntax tree is
 /// incomplete and can look really weird.
 ///
@@ -133,7 +133,7 @@ pub use crate::{
 ///
 /// Another case where this would be instrumental is macro expansion. We want to
 /// insert a fake ident and re-expand code. There's `expand_speculative` as a
-/// work-around for this.
+/// workaround for this.
 ///
 /// A different use-case is completion of injection (examples and links in doc
 /// comments). When computing completion for a path in a doc-comment, you want
@@ -167,6 +167,28 @@ pub fn completions(
             completions::vis::complete_vis_path(&mut completions, ctx, path_ctx, has_in_token);
         }
         return Some(completions.into());
+    }
+
+    // when the user types a bare `_` (that is it does not belong to an identifier)
+    // the user might just wanted to type a `_` for type inference or pattern discarding
+    // so try to suppress completions in those cases
+    if trigger_character == Some('_') && ctx.original_token.kind() == syntax::SyntaxKind::UNDERSCORE
+    {
+        if let CompletionAnalysis::NameRef(NameRefContext {
+            kind:
+                NameRefKind::Path(
+                    path_ctx @ PathCompletionCtx {
+                        kind: PathKind::Type { .. } | PathKind::Pat { .. },
+                        ..
+                    },
+                ),
+            ..
+        }) = analysis
+        {
+            if path_ctx.is_trivial_path() {
+                return None;
+            }
+        }
     }
 
     {
@@ -231,7 +253,7 @@ pub fn resolve_completion_edits(
             &sema,
             current_crate,
             NameToImport::exact_case_sensitive(imported_name),
-            items_locator::AssocItemSearch::Include,
+            items_locator::AssocSearchMode::Include,
             Some(items_locator::DEFAULT_QUERY_SEARCH_LIMIT.inner()),
         );
         let import = items_with_name
@@ -241,9 +263,10 @@ pub fn resolve_completion_edits(
                     candidate,
                     config.insert_use.prefix_kind,
                     config.prefer_no_std,
+                    config.prefer_prelude,
                 )
             })
-            .find(|mod_path| mod_path.to_string() == full_import_path);
+            .find(|mod_path| mod_path.display(db).to_string() == full_import_path);
         if let Some(import_path) = import {
             insert_use::insert_use(&new_ast, mod_path_to_ast(&import_path), &config.insert_use);
         }

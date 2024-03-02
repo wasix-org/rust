@@ -1,6 +1,5 @@
 // build-pass
 // compile-flags: -O
-// min-llvm-version: 14.0.5
 // needs-asm-support
 // only-x86_64
 // only-linux
@@ -12,7 +11,14 @@ use std::arch::global_asm;
 #[no_mangle]
 fn my_func() {}
 
-global_asm!("call_foobar: jmp {}", sym foobar);
+global_asm!("
+.globl call_foobar
+.type call_foobar,@function
+.pushsection .text.call_foobar,\"ax\",@progbits
+call_foobar: jmp {}
+.size call_foobar, .-call_foobar
+.popsection
+", sym foobar);
 
 fn foobar() {}
 

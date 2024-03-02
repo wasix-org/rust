@@ -7,15 +7,15 @@ use crate::type_of::LayoutLlvmExt;
 use crate::va_arg::emit_va_arg;
 use crate::value::Value;
 
-use rustc_codegen_ssa::base::{compare_simd_types, wants_msvc_seh};
+use rustc_codegen_ssa::base::{compare_simd_types, wants_msvc_seh, wants_wasm_eh};
 use rustc_codegen_ssa::common::{IntPredicate, TypeKind};
 use rustc_codegen_ssa::errors::{ExpectedPointerMutability, InvalidMonomorphization};
-use rustc_codegen_ssa::mir::operand::OperandRef;
+use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
 use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::*;
 use rustc_hir as hir;
 use rustc_middle::ty::layout::{FnAbiOf, HasTyCtxt, LayoutOf};
-use rustc_middle::ty::{self, Ty};
+use rustc_middle::ty::{self, GenericArgsRef, Ty};
 use rustc_middle::{bug, span_bug};
 use rustc_span::{sym, symbol::kw, Span, Symbol};
 use rustc_target::abi::{self, Align, HasDataLayout, Primitive};
@@ -71,6 +71,8 @@ fn get_simple_intrinsic<'ll>(
         sym::roundf32 => "llvm.round.f32",
         sym::roundf64 => "llvm.round.f64",
         sym::ptr_mask => "llvm.ptrmask",
+        sym::roundevenf32 => "llvm.roundeven.f32",
+        sym::roundevenf64 => "llvm.roundeven.f64",
         _ => return None,
     };
     Some(cx.get_intrinsic(llvm_name))
@@ -88,7 +90,7 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         let tcx = self.tcx;
         let callee_ty = instance.ty(tcx, ty::ParamEnv::reveal_all());
 
-        let ty::FnDef(def_id, substs) = *callee_ty.kind() else {
+        let ty::FnDef(def_id, fn_args) = *callee_ty.kind() else {
             bug!("expected fn item type, found {}", callee_ty);
         };
 
@@ -107,6 +109,7 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                 let (simple_ty, simple_fn) = simple.unwrap();
                 self.call(
                     simple_ty,
+                    None,
                     None,
                     simple_fn,
                     &args.iter().map(|arg| arg.immediate()).collect::<Vec<_>>(),
@@ -160,11 +163,10 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             }
 
             sym::volatile_load | sym::unaligned_volatile_load => {
-                let tp_ty = substs.type_at(0);
+                let tp_ty = fn_args.type_at(0);
                 let ptr = args[0].immediate();
-                let load = if let PassMode::Cast(ty, _) = &fn_abi.ret.mode {
+                let load = if let PassMode::Cast { cast: ty, pad_i32: _ } = &fn_abi.ret.mode {
                     let llty = ty.llvm_type(self);
-                    let ptr = self.pointercast(ptr, self.type_ptr_to(llty));
                     self.volatile_load(llty, ptr)
                 } else {
                     self.volatile_load(self.layout_of(tp_ty).llvm_type(self), ptr)
@@ -227,22 +229,22 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                         sym::ctlz | sym::cttz => {
                             let y = self.const_bool(false);
                             self.call_intrinsic(
-                                &format!("llvm.{}.i{}", name, width),
+                                &format!("llvm.{name}.i{width}"),
                                 &[args[0].immediate(), y],
                             )
                         }
                         sym::ctlz_nonzero => {
                             let y = self.const_bool(true);
-                            let llvm_name = &format!("llvm.ctlz.i{}", width);
+                            let llvm_name = &format!("llvm.ctlz.i{width}");
                             self.call_intrinsic(llvm_name, &[args[0].immediate(), y])
                         }
                         sym::cttz_nonzero => {
                             let y = self.const_bool(true);
-                            let llvm_name = &format!("llvm.cttz.i{}", width);
+                            let llvm_name = &format!("llvm.cttz.i{width}");
                             self.call_intrinsic(llvm_name, &[args[0].immediate(), y])
                         }
                         sym::ctpop => self.call_intrinsic(
-                            &format!("llvm.ctpop.i{}", width),
+                            &format!("llvm.ctpop.i{width}"),
                             &[args[0].immediate()],
                         ),
                         sym::bswap => {
@@ -250,13 +252,13 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                                 args[0].immediate() // byte swap a u8/i8 is just a no-op
                             } else {
                                 self.call_intrinsic(
-                                    &format!("llvm.bswap.i{}", width),
+                                    &format!("llvm.bswap.i{width}"),
                                     &[args[0].immediate()],
                                 )
                             }
                         }
                         sym::bitreverse => self.call_intrinsic(
-                            &format!("llvm.bitreverse.i{}", width),
+                            &format!("llvm.bitreverse.i{width}"),
                             &[args[0].immediate()],
                         ),
                         sym::rotate_left | sym::rotate_right => {
@@ -295,7 +297,7 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
 
             sym::raw_eq => {
                 use abi::Abi::*;
-                let tp_ty = substs.type_at(0);
+                let tp_ty = fn_args.type_at(0);
                 let layout = self.layout_of(tp_ty).layout;
                 let use_integer_compare = match layout.abi() {
                     Scalar(_) | ScalarPair(_, _) => true,
@@ -314,23 +316,27 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                     self.const_bool(true)
                 } else if use_integer_compare {
                     let integer_ty = self.type_ix(layout.size().bits());
-                    let ptr_ty = self.type_ptr_to(integer_ty);
-                    let a_ptr = self.bitcast(a, ptr_ty);
-                    let a_val = self.load(integer_ty, a_ptr, layout.align().abi);
-                    let b_ptr = self.bitcast(b, ptr_ty);
-                    let b_val = self.load(integer_ty, b_ptr, layout.align().abi);
+                    let a_val = self.load(integer_ty, a, layout.align().abi);
+                    let b_val = self.load(integer_ty, b, layout.align().abi);
                     self.icmp(IntPredicate::IntEQ, a_val, b_val)
                 } else {
-                    let i8p_ty = self.type_i8p();
-                    let a_ptr = self.bitcast(a, i8p_ty);
-                    let b_ptr = self.bitcast(b, i8p_ty);
                     let n = self.const_usize(layout.size().bytes());
-                    let cmp = self.call_intrinsic("memcmp", &[a_ptr, b_ptr, n]);
+                    let cmp = self.call_intrinsic("memcmp", &[a, b, n]);
                     match self.cx.sess().target.arch.as_ref() {
                         "avr" | "msp430" => self.icmp(IntPredicate::IntEQ, cmp, self.const_i16(0)),
                         _ => self.icmp(IntPredicate::IntEQ, cmp, self.const_i32(0)),
                     }
                 }
+            }
+
+            sym::compare_bytes => {
+                // Here we assume that the `memcmp` provided by the target is a NOP for size 0.
+                let cmp = self.call_intrinsic(
+                    "memcmp",
+                    &[args[0].immediate(), args[1].immediate(), args[2].immediate()],
+                );
+                // Some targets have `memcmp` returning `i16`, but the intrinsic is always `i32`.
+                self.sext(cmp, self.type_ix(32))
             }
 
             sym::black_box => {
@@ -370,20 +376,20 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             }
 
             _ if name.as_str().starts_with("simd_") => {
-                match generic_simd_intrinsic(self, name, callee_ty, args, ret_ty, llret_ty, span) {
+                match generic_simd_intrinsic(
+                    self, name, callee_ty, fn_args, args, ret_ty, llret_ty, span,
+                ) {
                     Ok(llval) => llval,
                     Err(()) => return,
                 }
             }
 
-            _ => bug!("unknown intrinsic '{}'", name),
+            _ => bug!("unknown intrinsic '{}' -- should it have been lowered earlier?", name),
         };
 
         if !fn_abi.ret.is_ignore() {
-            if let PassMode::Cast(ty, _) = &fn_abi.ret.mode {
-                let ptr_llty = self.type_ptr_to(ty.llvm_type(self));
-                let ptr = self.pointercast(result.llval, ptr_llty);
-                self.store(llval, ptr, result.align);
+            if let PassMode::Cast { .. } = &fn_abi.ret.mode {
+                self.store(llval, result.llval, result.align);
             } else {
                 OperandRef::from_immediate_or_packed_pair(self, llval, result.layout)
                     .val
@@ -407,9 +413,7 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
     fn type_test(&mut self, pointer: Self::Value, typeid: Self::Value) -> Self::Value {
         // Test the called operand using llvm.type.test intrinsic. The LowerTypeTests link-time
         // optimization pass replaces calls to this intrinsic with code to test type membership.
-        let i8p_ty = self.type_i8p();
-        let bitcast = self.bitcast(pointer, i8p_ty);
-        self.call_intrinsic("llvm.type.test", &[bitcast, typeid])
+        self.call_intrinsic("llvm.type.test", &[pointer, typeid])
     }
 
     fn type_checked_load(
@@ -441,14 +445,16 @@ fn try_intrinsic<'ll>(
     dest: &'ll Value,
 ) {
     if bx.sess().panic_strategy() == PanicStrategy::Abort {
-        let try_func_ty = bx.type_func(&[bx.type_i8p()], bx.type_void());
-        bx.call(try_func_ty, None, try_func, &[data], None);
+        let try_func_ty = bx.type_func(&[bx.type_ptr()], bx.type_void());
+        bx.call(try_func_ty, None, None, try_func, &[data], None);
         // Return 0 unconditionally from the intrinsic call;
         // we can never unwind.
         let ret_align = bx.tcx().data_layout.i32_align.abi;
         bx.store(bx.const_i32(0), dest, ret_align);
     } else if wants_msvc_seh(bx.sess()) {
         codegen_msvc_try(bx, try_func, data, catch_func, dest);
+    } else if wants_wasm_eh(bx.sess()) {
+        codegen_wasm_try(bx, try_func, data, catch_func, dest);
     } else if bx.sess().target.os == "emscripten" {
         codegen_emcc_try(bx, try_func, data, catch_func, dest);
     } else {
@@ -539,9 +545,9 @@ fn codegen_msvc_try<'ll>(
         //
         // More information can be found in libstd's seh.rs implementation.
         let ptr_align = bx.tcx().data_layout.pointer_align.abi;
-        let slot = bx.alloca(bx.type_i8p(), ptr_align);
-        let try_func_ty = bx.type_func(&[bx.type_i8p()], bx.type_void());
-        bx.invoke(try_func_ty, None, try_func, &[data], normal, catchswitch, None);
+        let slot = bx.alloca(bx.type_ptr(), ptr_align);
+        let try_func_ty = bx.type_func(&[bx.type_ptr()], bx.type_void());
+        bx.invoke(try_func_ty, None, None, try_func, &[data], normal, catchswitch, None);
 
         bx.switch_to_block(normal);
         bx.ret(bx.const_i32(0));
@@ -563,10 +569,10 @@ fn codegen_msvc_try<'ll>(
         //
         // When modifying, make sure that the type_name string exactly matches
         // the one used in library/panic_unwind/src/seh.rs.
-        let type_info_vtable = bx.declare_global("??_7type_info@@6B@", bx.type_i8p());
+        let type_info_vtable = bx.declare_global("??_7type_info@@6B@", bx.type_ptr());
         let type_name = bx.const_bytes(b"rust_panic\0");
         let type_info =
-            bx.const_struct(&[type_info_vtable, bx.const_null(bx.type_i8p()), type_name], false);
+            bx.const_struct(&[type_info_vtable, bx.const_null(bx.type_ptr()), type_name], false);
         let tydesc = bx.declare_global("__rust_panic_type_info", bx.val_ty(type_info));
         unsafe {
             llvm::LLVMRustSetLinkage(tydesc, llvm::Linkage::LinkOnceODRLinkage);
@@ -583,17 +589,17 @@ fn codegen_msvc_try<'ll>(
         bx.switch_to_block(catchpad_rust);
         let flags = bx.const_i32(8);
         let funclet = bx.catch_pad(cs, &[tydesc, flags, slot]);
-        let ptr = bx.load(bx.type_i8p(), slot, ptr_align);
-        let catch_ty = bx.type_func(&[bx.type_i8p(), bx.type_i8p()], bx.type_void());
-        bx.call(catch_ty, None, catch_func, &[data, ptr], Some(&funclet));
+        let ptr = bx.load(bx.type_ptr(), slot, ptr_align);
+        let catch_ty = bx.type_func(&[bx.type_ptr(), bx.type_ptr()], bx.type_void());
+        bx.call(catch_ty, None, None, catch_func, &[data, ptr], Some(&funclet));
         bx.catch_ret(&funclet, caught);
 
         // The flag value of 64 indicates a "catch-all".
         bx.switch_to_block(catchpad_foreign);
         let flags = bx.const_i32(64);
-        let null = bx.const_null(bx.type_i8p());
+        let null = bx.const_null(bx.type_ptr());
         let funclet = bx.catch_pad(cs, &[null, flags, null]);
-        bx.call(catch_ty, None, catch_func, &[data, null], Some(&funclet));
+        bx.call(catch_ty, None, None, catch_func, &[data, null], Some(&funclet));
         bx.catch_ret(&funclet, caught);
 
         bx.switch_to_block(caught);
@@ -602,7 +608,81 @@ fn codegen_msvc_try<'ll>(
 
     // Note that no invoke is used here because by definition this function
     // can't panic (that's what it's catching).
-    let ret = bx.call(llty, None, llfn, &[try_func, data, catch_func], None);
+    let ret = bx.call(llty, None, None, llfn, &[try_func, data, catch_func], None);
+    let i32_align = bx.tcx().data_layout.i32_align.abi;
+    bx.store(ret, dest, i32_align);
+}
+
+// WASM's definition of the `rust_try` function.
+fn codegen_wasm_try<'ll>(
+    bx: &mut Builder<'_, 'll, '_>,
+    try_func: &'ll Value,
+    data: &'ll Value,
+    catch_func: &'ll Value,
+    dest: &'ll Value,
+) {
+    let (llty, llfn) = get_rust_try_fn(bx, &mut |mut bx| {
+        bx.set_personality_fn(bx.eh_personality());
+
+        let normal = bx.append_sibling_block("normal");
+        let catchswitch = bx.append_sibling_block("catchswitch");
+        let catchpad = bx.append_sibling_block("catchpad");
+        let caught = bx.append_sibling_block("caught");
+
+        let try_func = llvm::get_param(bx.llfn(), 0);
+        let data = llvm::get_param(bx.llfn(), 1);
+        let catch_func = llvm::get_param(bx.llfn(), 2);
+
+        // We're generating an IR snippet that looks like:
+        //
+        //   declare i32 @rust_try(%try_func, %data, %catch_func) {
+        //      %slot = alloca i8*
+        //      invoke %try_func(%data) to label %normal unwind label %catchswitch
+        //
+        //   normal:
+        //      ret i32 0
+        //
+        //   catchswitch:
+        //      %cs = catchswitch within none [%catchpad] unwind to caller
+        //
+        //   catchpad:
+        //      %tok = catchpad within %cs [null]
+        //      %ptr = call @llvm.wasm.get.exception(token %tok)
+        //      %sel = call @llvm.wasm.get.ehselector(token %tok)
+        //      call %catch_func(%data, %ptr)
+        //      catchret from %tok to label %caught
+        //
+        //   caught:
+        //      ret i32 1
+        //   }
+        //
+        let try_func_ty = bx.type_func(&[bx.type_ptr()], bx.type_void());
+        bx.invoke(try_func_ty, None, None, try_func, &[data], normal, catchswitch, None);
+
+        bx.switch_to_block(normal);
+        bx.ret(bx.const_i32(0));
+
+        bx.switch_to_block(catchswitch);
+        let cs = bx.catch_switch(None, None, &[catchpad]);
+
+        bx.switch_to_block(catchpad);
+        let null = bx.const_null(bx.type_ptr());
+        let funclet = bx.catch_pad(cs, &[null]);
+
+        let ptr = bx.call_intrinsic("llvm.wasm.get.exception", &[funclet.cleanuppad()]);
+        let _sel = bx.call_intrinsic("llvm.wasm.get.ehselector", &[funclet.cleanuppad()]);
+
+        let catch_ty = bx.type_func(&[bx.type_ptr(), bx.type_ptr()], bx.type_void());
+        bx.call(catch_ty, None, None, catch_func, &[data, ptr], Some(&funclet));
+        bx.catch_ret(&funclet, caught);
+
+        bx.switch_to_block(caught);
+        bx.ret(bx.const_i32(1));
+    });
+
+    // Note that no invoke is used here because by definition this function
+    // can't panic (that's what it's catching).
+    let ret = bx.call(llty, None, None, llfn, &[try_func, data, catch_func], None);
     let i32_align = bx.tcx().data_layout.i32_align.abi;
     bx.store(ret, dest, i32_align);
 }
@@ -644,8 +724,8 @@ fn codegen_gnu_try<'ll>(
         let try_func = llvm::get_param(bx.llfn(), 0);
         let data = llvm::get_param(bx.llfn(), 1);
         let catch_func = llvm::get_param(bx.llfn(), 2);
-        let try_func_ty = bx.type_func(&[bx.type_i8p()], bx.type_void());
-        bx.invoke(try_func_ty, None, try_func, &[data], then, catch, None);
+        let try_func_ty = bx.type_func(&[bx.type_ptr()], bx.type_void());
+        bx.invoke(try_func_ty, None, None, try_func, &[data], then, catch, None);
 
         bx.switch_to_block(then);
         bx.ret(bx.const_i32(0));
@@ -657,19 +737,19 @@ fn codegen_gnu_try<'ll>(
         // the landing pad clauses the exception's type had been matched to.
         // rust_try ignores the selector.
         bx.switch_to_block(catch);
-        let lpad_ty = bx.type_struct(&[bx.type_i8p(), bx.type_i32()], false);
+        let lpad_ty = bx.type_struct(&[bx.type_ptr(), bx.type_i32()], false);
         let vals = bx.landing_pad(lpad_ty, bx.eh_personality(), 1);
-        let tydesc = bx.const_null(bx.type_i8p());
+        let tydesc = bx.const_null(bx.type_ptr());
         bx.add_clause(vals, tydesc);
         let ptr = bx.extract_value(vals, 0);
-        let catch_ty = bx.type_func(&[bx.type_i8p(), bx.type_i8p()], bx.type_void());
-        bx.call(catch_ty, None, catch_func, &[data, ptr], None);
+        let catch_ty = bx.type_func(&[bx.type_ptr(), bx.type_ptr()], bx.type_void());
+        bx.call(catch_ty, None, None, catch_func, &[data, ptr], None);
         bx.ret(bx.const_i32(1));
     });
 
     // Note that no invoke is used here because by definition this function
     // can't panic (that's what it's catching).
-    let ret = bx.call(llty, None, llfn, &[try_func, data, catch_func], None);
+    let ret = bx.call(llty, None, None, llfn, &[try_func, data, catch_func], None);
     let i32_align = bx.tcx().data_layout.i32_align.abi;
     bx.store(ret, dest, i32_align);
 }
@@ -708,8 +788,8 @@ fn codegen_emcc_try<'ll>(
         let try_func = llvm::get_param(bx.llfn(), 0);
         let data = llvm::get_param(bx.llfn(), 1);
         let catch_func = llvm::get_param(bx.llfn(), 2);
-        let try_func_ty = bx.type_func(&[bx.type_i8p()], bx.type_void());
-        bx.invoke(try_func_ty, None, try_func, &[data], then, catch, None);
+        let try_func_ty = bx.type_func(&[bx.type_ptr()], bx.type_void());
+        bx.invoke(try_func_ty, None, None, try_func, &[data], then, catch, None);
 
         bx.switch_to_block(then);
         bx.ret(bx.const_i32(0));
@@ -721,10 +801,10 @@ fn codegen_emcc_try<'ll>(
         // the landing pad clauses the exception's type had been matched to.
         bx.switch_to_block(catch);
         let tydesc = bx.eh_catch_typeinfo();
-        let lpad_ty = bx.type_struct(&[bx.type_i8p(), bx.type_i32()], false);
+        let lpad_ty = bx.type_struct(&[bx.type_ptr(), bx.type_i32()], false);
         let vals = bx.landing_pad(lpad_ty, bx.eh_personality(), 2);
         bx.add_clause(vals, tydesc);
-        bx.add_clause(vals, bx.const_null(bx.type_i8p()));
+        bx.add_clause(vals, bx.const_null(bx.type_ptr()));
         let ptr = bx.extract_value(vals, 0);
         let selector = bx.extract_value(vals, 1);
 
@@ -737,7 +817,7 @@ fn codegen_emcc_try<'ll>(
         // create an alloca and pass a pointer to that.
         let ptr_align = bx.tcx().data_layout.pointer_align.abi;
         let i8_align = bx.tcx().data_layout.i8_align.abi;
-        let catch_data_type = bx.type_struct(&[bx.type_i8p(), bx.type_bool()], false);
+        let catch_data_type = bx.type_struct(&[bx.type_ptr(), bx.type_bool()], false);
         let catch_data = bx.alloca(catch_data_type, ptr_align);
         let catch_data_0 =
             bx.inbounds_gep(catch_data_type, catch_data, &[bx.const_usize(0), bx.const_usize(0)]);
@@ -745,16 +825,15 @@ fn codegen_emcc_try<'ll>(
         let catch_data_1 =
             bx.inbounds_gep(catch_data_type, catch_data, &[bx.const_usize(0), bx.const_usize(1)]);
         bx.store(is_rust_panic, catch_data_1, i8_align);
-        let catch_data = bx.bitcast(catch_data, bx.type_i8p());
 
-        let catch_ty = bx.type_func(&[bx.type_i8p(), bx.type_i8p()], bx.type_void());
-        bx.call(catch_ty, None, catch_func, &[data, catch_data], None);
+        let catch_ty = bx.type_func(&[bx.type_ptr(), bx.type_ptr()], bx.type_void());
+        bx.call(catch_ty, None, None, catch_func, &[data, catch_data], None);
         bx.ret(bx.const_i32(1));
     });
 
     // Note that no invoke is used here because by definition this function
     // can't panic (that's what it's catching).
-    let ret = bx.call(llty, None, llfn, &[try_func, data, catch_func], None);
+    let ret = bx.call(llty, None, None, llfn, &[try_func, data, catch_func], None);
     let i32_align = bx.tcx().data_layout.i32_align.abi;
     bx.store(ret, dest, i32_align);
 }
@@ -769,7 +848,7 @@ fn gen_fn<'ll, 'tcx>(
 ) -> (&'ll Type, &'ll Value) {
     let fn_abi = cx.fn_abi_of_fn_ptr(rust_fn_sig, ty::List::empty());
     let llty = fn_abi.llvm_type(cx);
-    let llfn = cx.declare_fn(name, fn_abi);
+    let llfn = cx.declare_fn(name, fn_abi, None);
     cx.set_frame_pointer_type(llfn);
     cx.apply_target_cpu_attr(llfn);
     // FIXME(eddyb) find a nicer way to do this.
@@ -794,23 +873,29 @@ fn get_rust_try_fn<'ll, 'tcx>(
 
     // Define the type up front for the signature of the rust_try function.
     let tcx = cx.tcx;
-    let i8p = tcx.mk_mut_ptr(tcx.types.i8);
+    let i8p = Ty::new_mut_ptr(tcx, tcx.types.i8);
     // `unsafe fn(*mut i8) -> ()`
-    let try_fn_ty = tcx.mk_fn_ptr(ty::Binder::dummy(tcx.mk_fn_sig(
-        [i8p],
-        tcx.mk_unit(),
-        false,
-        hir::Unsafety::Unsafe,
-        Abi::Rust,
-    )));
+    let try_fn_ty = Ty::new_fn_ptr(
+        tcx,
+        ty::Binder::dummy(tcx.mk_fn_sig(
+            [i8p],
+            Ty::new_unit(tcx),
+            false,
+            hir::Unsafety::Unsafe,
+            Abi::Rust,
+        )),
+    );
     // `unsafe fn(*mut i8, *mut i8) -> ()`
-    let catch_fn_ty = tcx.mk_fn_ptr(ty::Binder::dummy(tcx.mk_fn_sig(
-        [i8p, i8p],
-        tcx.mk_unit(),
-        false,
-        hir::Unsafety::Unsafe,
-        Abi::Rust,
-    )));
+    let catch_fn_ty = Ty::new_fn_ptr(
+        tcx,
+        ty::Binder::dummy(tcx.mk_fn_sig(
+            [i8p, i8p],
+            Ty::new_unit(tcx),
+            false,
+            hir::Unsafety::Unsafe,
+            Abi::Rust,
+        )),
+    );
     // `unsafe fn(unsafe fn(*mut i8) -> (), *mut i8, unsafe fn(*mut i8, *mut i8) -> ()) -> i32`
     let rust_fn_sig = ty::Binder::dummy(cx.tcx.mk_fn_sig(
         [try_fn_ty, i8p, catch_fn_ty],
@@ -828,6 +913,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     name: Symbol,
     callee_ty: Ty<'tcx>,
+    fn_args: GenericArgsRef<'tcx>,
     args: &[OperandRef<'tcx, &'ll Value>],
     ret_ty: Ty<'tcx>,
     llret_ty: &'ll Type,
@@ -849,9 +935,10 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     }
 
     macro_rules! require_simd {
-        ($ty: expr, $diag: expr) => {
-            require!($ty.is_simd(), $diag)
-        };
+        ($ty: expr, $variant:ident) => {{
+            require!($ty.is_simd(), InvalidMonomorphization::$variant { span, name, ty: $ty });
+            $ty.simd_size_and_type(bx.tcx())
+        }};
     }
 
     let tcx = bx.tcx();
@@ -859,13 +946,15 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         tcx.normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), callee_ty.fn_sig(tcx));
     let arg_tys = sig.inputs();
 
-    if name == sym::simd_select_bitmask {
-        require_simd!(
-            arg_tys[1],
-            InvalidMonomorphization::SimdArgument { span, name, ty: arg_tys[1] }
-        );
+    // Vectors must be immediates (non-power-of-2 #[repr(packed)] are not)
+    for (ty, arg) in arg_tys.iter().zip(args) {
+        if ty.is_simd() && !matches!(arg.val, OperandValue::Immediate(_)) {
+            return_error!(InvalidMonomorphization::SimdArgument { span, name, ty: *ty });
+        }
+    }
 
-        let (len, _) = arg_tys[1].simd_size_and_type(bx.tcx());
+    if name == sym::simd_select_bitmask {
+        let (len, _) = require_simd!(arg_tys[1], SimdArgument);
 
         let expected_int_bits = (len.max(8) - 1).next_power_of_two();
         let expected_bytes = len / 8 + ((len % 8 > 0) as u64);
@@ -882,8 +971,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
                 let place = PlaceRef::alloca(bx, args[0].layout);
                 args[0].val.store(bx, place);
                 let int_ty = bx.type_ix(expected_bytes * 8);
-                let ptr = bx.pointercast(place.llval, bx.cx.type_ptr_to(int_ty));
-                bx.load(int_ty, ptr, Align::ONE)
+                bx.load(int_ty, place.llval, Align::ONE)
             }
             _ => return_error!(InvalidMonomorphization::InvalidBitmask {
                 span,
@@ -903,7 +991,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     }
 
     // every intrinsic below takes a SIMD vector as its first argument
-    require_simd!(arg_tys[0], InvalidMonomorphization::SimdInput { span, name, ty: arg_tys[0] });
+    let (in_len, in_elem) = require_simd!(arg_tys[0], SimdInput);
     let in_ty = arg_tys[0];
 
     let comparison = match name {
@@ -916,11 +1004,8 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         _ => None,
     };
 
-    let (in_len, in_elem) = arg_tys[0].simd_size_and_type(bx.tcx());
     if let Some(cmp_op) = comparison {
-        require_simd!(ret_ty, InvalidMonomorphization::SimdReturn { span, name, ty: ret_ty });
-
-        let (out_len, out_ty) = ret_ty.simd_size_and_type(bx.tcx());
+        let (out_len, out_ty) = require_simd!(ret_ty, SimdReturn);
 
         require!(
             in_len == out_len,
@@ -948,32 +1033,72 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         ));
     }
 
-    if let Some(stripped) = name.as_str().strip_prefix("simd_shuffle") {
-        // If this intrinsic is the older "simd_shuffleN" form, simply parse the integer.
-        // If there is no suffix, use the index array length.
-        let n: u64 = if stripped.is_empty() {
-            // Make sure this is actually an array, since typeck only checks the length-suffixed
-            // version of this intrinsic.
-            match args[2].layout.ty.kind() {
-                ty::Array(ty, len) if matches!(ty.kind(), ty::Uint(ty::UintTy::U32)) => {
-                    len.try_eval_target_usize(bx.cx.tcx, ty::ParamEnv::reveal_all()).unwrap_or_else(
-                        || span_bug!(span, "could not evaluate shuffle index array length"),
-                    )
+    if name == sym::simd_shuffle_generic {
+        let idx = fn_args[2]
+            .expect_const()
+            .eval(tcx, ty::ParamEnv::reveal_all(), Some(span))
+            .unwrap()
+            .unwrap_branch();
+        let n = idx.len() as u64;
+
+        let (out_len, out_ty) = require_simd!(ret_ty, SimdReturn);
+        require!(
+            out_len == n,
+            InvalidMonomorphization::ReturnLength { span, name, in_len: n, ret_ty, out_len }
+        );
+        require!(
+            in_elem == out_ty,
+            InvalidMonomorphization::ReturnElement { span, name, in_elem, in_ty, ret_ty, out_ty }
+        );
+
+        let total_len = in_len * 2;
+
+        let indices: Option<Vec<_>> = idx
+            .iter()
+            .enumerate()
+            .map(|(arg_idx, val)| {
+                let idx = val.unwrap_leaf().try_to_i32().unwrap();
+                if idx >= i32::try_from(total_len).unwrap() {
+                    bx.sess().emit_err(InvalidMonomorphization::ShuffleIndexOutOfBounds {
+                        span,
+                        name,
+                        arg_idx: arg_idx as u64,
+                        total_len: total_len.into(),
+                    });
+                    None
+                } else {
+                    Some(bx.const_i32(idx))
                 }
-                _ => return_error!(InvalidMonomorphization::SimdShuffle {
-                    span,
-                    name,
-                    ty: args[2].layout.ty
-                }),
-            }
-        } else {
-            stripped.parse().unwrap_or_else(|_| {
-                span_bug!(span, "bad `simd_shuffle` instruction only caught in codegen?")
             })
+            .collect();
+        let Some(indices) = indices else {
+            return Ok(bx.const_null(llret_ty));
         };
 
-        require_simd!(ret_ty, InvalidMonomorphization::SimdReturn { span, name, ty: ret_ty });
-        let (out_len, out_ty) = ret_ty.simd_size_and_type(bx.tcx());
+        return Ok(bx.shuffle_vector(
+            args[0].immediate(),
+            args[1].immediate(),
+            bx.const_vector(&indices),
+        ));
+    }
+
+    if name == sym::simd_shuffle {
+        // Make sure this is actually an array, since typeck only checks the length-suffixed
+        // version of this intrinsic.
+        let n: u64 = match args[2].layout.ty.kind() {
+            ty::Array(ty, len) if matches!(ty.kind(), ty::Uint(ty::UintTy::U32)) => {
+                len.try_eval_target_usize(bx.cx.tcx, ty::ParamEnv::reveal_all()).unwrap_or_else(
+                    || span_bug!(span, "could not evaluate shuffle index array length"),
+                )
+            }
+            _ => return_error!(InvalidMonomorphization::SimdShuffle {
+                span,
+                name,
+                ty: args[2].layout.ty
+            }),
+        };
+
+        let (out_len, out_ty) = require_simd!(ret_ty, SimdReturn);
         require!(
             out_len == n,
             InvalidMonomorphization::ReturnLength { span, name, in_len: n, ret_ty, out_len }
@@ -1052,11 +1177,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     if name == sym::simd_select {
         let m_elem_ty = in_elem;
         let m_len = in_len;
-        require_simd!(
-            arg_tys[1],
-            InvalidMonomorphization::SimdArgument { span, name, ty: arg_tys[1] }
-        );
-        let (v_len, _) = arg_tys[1].simd_size_and_type(bx.tcx());
+        let (v_len, _) = require_simd!(arg_tys[1], SimdArgument);
         require!(
             m_len == v_len,
             InvalidMonomorphization::MismatchedLengths { span, name, m_len, v_len }
@@ -1132,7 +1253,6 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
                 let ptr = bx.alloca(bx.type_ix(expected_bytes * 8), Align::ONE);
                 bx.store(ze, ptr, Align::ONE);
                 let array_ty = bx.type_array(bx.type_i8(), expected_bytes);
-                let ptr = bx.pointercast(ptr, bx.cx.type_ptr_to(array_ty));
                 return Ok(bx.load(array_ty, ptr, Align::ONE));
             }
             _ => return_error!(InvalidMonomorphization::CannotReturn {
@@ -1198,10 +1318,11 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
             sym::simd_trunc => ("trunc", bx.type_func(&[vec_ty], vec_ty)),
             _ => return_error!(InvalidMonomorphization::UnrecognizedIntrinsic { span, name }),
         };
-        let llvm_name = &format!("llvm.{0}.v{1}{2}", intr_name, in_len, elem_ty_str);
+        let llvm_name = &format!("llvm.{intr_name}.v{in_len}{elem_ty_str}");
         let f = bx.declare_cfn(llvm_name, llvm::UnnamedAddr::No, fn_ty);
         let c = bx.call(
             fn_ty,
+            None,
             None,
             f,
             &args.iter().map(|arg| arg.immediate()).collect::<Vec<_>>(),
@@ -1235,50 +1356,34 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     // FIXME: use:
     //  https://github.com/llvm-mirror/llvm/blob/master/include/llvm/IR/Function.h#L182
     //  https://github.com/llvm-mirror/llvm/blob/master/include/llvm/IR/Intrinsics.h#L81
-    fn llvm_vector_str(
-        elem_ty: Ty<'_>,
-        vec_len: u64,
-        no_pointers: usize,
-        bx: &Builder<'_, '_, '_>,
-    ) -> String {
-        let p0s: String = "p0".repeat(no_pointers);
+    fn llvm_vector_str(bx: &Builder<'_, '_, '_>, elem_ty: Ty<'_>, vec_len: u64) -> String {
         match *elem_ty.kind() {
             ty::Int(v) => format!(
-                "v{}{}i{}",
+                "v{}i{}",
                 vec_len,
-                p0s,
                 // Normalize to prevent crash if v: IntTy::Isize
                 v.normalize(bx.target_spec().pointer_width).bit_width().unwrap()
             ),
             ty::Uint(v) => format!(
-                "v{}{}i{}",
+                "v{}i{}",
                 vec_len,
-                p0s,
                 // Normalize to prevent crash if v: UIntTy::Usize
                 v.normalize(bx.target_spec().pointer_width).bit_width().unwrap()
             ),
-            ty::Float(v) => format!("v{}{}f{}", vec_len, p0s, v.bit_width()),
+            ty::Float(v) => format!("v{}f{}", vec_len, v.bit_width()),
+            ty::RawPtr(_) => format!("v{}p0", vec_len),
             _ => unreachable!(),
         }
     }
 
-    fn llvm_vector_ty<'ll>(
-        cx: &CodegenCx<'ll, '_>,
-        elem_ty: Ty<'_>,
-        vec_len: u64,
-        mut no_pointers: usize,
-    ) -> &'ll Type {
-        // FIXME: use cx.layout_of(ty).llvm_type() ?
-        let mut elem_ty = match *elem_ty.kind() {
+    fn llvm_vector_ty<'ll>(cx: &CodegenCx<'ll, '_>, elem_ty: Ty<'_>, vec_len: u64) -> &'ll Type {
+        let elem_ty = match *elem_ty.kind() {
             ty::Int(v) => cx.type_int_from_ty(v),
             ty::Uint(v) => cx.type_uint_from_ty(v),
             ty::Float(v) => cx.type_float_from_ty(v),
+            ty::RawPtr(_) => cx.type_ptr(),
             _ => unreachable!(),
         };
-        while no_pointers > 0 {
-            elem_ty = cx.type_ptr_to(elem_ty);
-            no_pointers -= 1;
-        }
         cx.type_vector(elem_ty, vec_len)
     }
 
@@ -1290,20 +1395,16 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         // * M: any integer width is supported, will be truncated to i1
 
         // All types must be simd vector types
-        require_simd!(in_ty, InvalidMonomorphization::SimdFirst { span, name, ty: in_ty });
-        require_simd!(
-            arg_tys[1],
-            InvalidMonomorphization::SimdSecond { span, name, ty: arg_tys[1] }
-        );
-        require_simd!(
-            arg_tys[2],
-            InvalidMonomorphization::SimdThird { span, name, ty: arg_tys[2] }
-        );
-        require_simd!(ret_ty, InvalidMonomorphization::SimdReturn { span, name, ty: ret_ty });
+
+        // The second argument must be a simd vector with an element type that's a pointer
+        // to the element type of the first argument
+        let (_, element_ty0) = require_simd!(in_ty, SimdFirst);
+        let (out_len, element_ty1) = require_simd!(arg_tys[1], SimdSecond);
+        // The element type of the third argument must be a signed integer type of any width:
+        let (out_len2, element_ty2) = require_simd!(arg_tys[2], SimdThird);
+        require_simd!(ret_ty, SimdReturn);
 
         // Of the same length:
-        let (out_len, _) = arg_tys[1].simd_size_and_type(bx.tcx());
-        let (out_len2, _) = arg_tys[2].simd_size_and_type(bx.tcx());
         require!(
             in_len == out_len,
             InvalidMonomorphization::SecondArgumentLength {
@@ -1333,62 +1434,31 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
             InvalidMonomorphization::ExpectedReturnType { span, name, in_ty, ret_ty }
         );
 
-        // This counts how many pointers
-        fn ptr_count(t: Ty<'_>) -> usize {
-            match t.kind() {
-                ty::RawPtr(p) => 1 + ptr_count(p.ty),
-                _ => 0,
+        require!(
+            matches!(
+                element_ty1.kind(),
+                ty::RawPtr(p) if p.ty == in_elem && p.ty.kind() == element_ty0.kind()
+            ),
+            InvalidMonomorphization::ExpectedElementType {
+                span,
+                name,
+                expected_element: element_ty1,
+                second_arg: arg_tys[1],
+                in_elem,
+                in_ty,
+                mutability: ExpectedPointerMutability::Not,
             }
-        }
+        );
 
-        // Non-ptr type
-        fn non_ptr(t: Ty<'_>) -> Ty<'_> {
-            match t.kind() {
-                ty::RawPtr(p) => non_ptr(p.ty),
-                _ => t,
-            }
-        }
-
-        // The second argument must be a simd vector with an element type that's a pointer
-        // to the element type of the first argument
-        let (_, element_ty0) = arg_tys[0].simd_size_and_type(bx.tcx());
-        let (_, element_ty1) = arg_tys[1].simd_size_and_type(bx.tcx());
-        let (pointer_count, underlying_ty) = match element_ty1.kind() {
-            ty::RawPtr(p) if p.ty == in_elem => (ptr_count(element_ty1), non_ptr(element_ty1)),
-            _ => {
-                require!(
-                    false,
-                    InvalidMonomorphization::ExpectedElementType {
-                        span,
-                        name,
-                        expected_element: element_ty1,
-                        second_arg: arg_tys[1],
-                        in_elem,
-                        in_ty,
-                        mutability: ExpectedPointerMutability::Not,
-                    }
-                );
-                unreachable!();
-            }
-        };
-        assert!(pointer_count > 0);
-        assert_eq!(pointer_count - 1, ptr_count(element_ty0));
-        assert_eq!(underlying_ty, non_ptr(element_ty0));
-
-        // The element type of the third argument must be a signed integer type of any width:
-        let (_, element_ty2) = arg_tys[2].simd_size_and_type(bx.tcx());
         match element_ty2.kind() {
             ty::Int(_) => (),
             _ => {
-                require!(
-                    false,
-                    InvalidMonomorphization::ThirdArgElementType {
-                        span,
-                        name,
-                        expected_element: element_ty2,
-                        third_arg: arg_tys[2]
-                    }
-                );
+                return_error!(InvalidMonomorphization::ThirdArgElementType {
+                    span,
+                    name,
+                    expected_element: element_ty2,
+                    third_arg: arg_tys[2]
+                });
             }
         }
 
@@ -1404,15 +1474,15 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         };
 
         // Type of the vector of pointers:
-        let llvm_pointer_vec_ty = llvm_vector_ty(bx, underlying_ty, in_len, pointer_count);
-        let llvm_pointer_vec_str = llvm_vector_str(underlying_ty, in_len, pointer_count, bx);
+        let llvm_pointer_vec_ty = llvm_vector_ty(bx, element_ty1, in_len);
+        let llvm_pointer_vec_str = llvm_vector_str(bx, element_ty1, in_len);
 
         // Type of the vector of elements:
-        let llvm_elem_vec_ty = llvm_vector_ty(bx, underlying_ty, in_len, pointer_count - 1);
-        let llvm_elem_vec_str = llvm_vector_str(underlying_ty, in_len, pointer_count - 1, bx);
+        let llvm_elem_vec_ty = llvm_vector_ty(bx, element_ty0, in_len);
+        let llvm_elem_vec_str = llvm_vector_str(bx, element_ty0, in_len);
 
         let llvm_intrinsic =
-            format!("llvm.masked.gather.{}.{}", llvm_elem_vec_str, llvm_pointer_vec_str);
+            format!("llvm.masked.gather.{llvm_elem_vec_str}.{llvm_pointer_vec_str}");
         let fn_ty = bx.type_func(
             &[llvm_pointer_vec_ty, alignment_ty, mask_ty, llvm_elem_vec_ty],
             llvm_elem_vec_ty,
@@ -1421,8 +1491,201 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         let v = bx.call(
             fn_ty,
             None,
+            None,
             f,
             &[args[1].immediate(), alignment, mask, args[0].immediate()],
+            None,
+        );
+        return Ok(v);
+    }
+
+    if name == sym::simd_masked_load {
+        // simd_masked_load(mask: <N x i{M}>, pointer: *_ T, values: <N x T>) -> <N x T>
+        // * N: number of elements in the input vectors
+        // * T: type of the element to load
+        // * M: any integer width is supported, will be truncated to i1
+        // Loads contiguous elements from memory behind `pointer`, but only for
+        // those lanes whose `mask` bit is enabled.
+        // The memory addresses corresponding to the “off” lanes are not accessed.
+
+        // The element type of the "mask" argument must be a signed integer type of any width
+        let mask_ty = in_ty;
+        let (mask_len, mask_elem) = (in_len, in_elem);
+
+        // The second argument must be a pointer matching the element type
+        let pointer_ty = arg_tys[1];
+
+        // The last argument is a passthrough vector providing values for disabled lanes
+        let values_ty = arg_tys[2];
+        let (values_len, values_elem) = require_simd!(values_ty, SimdThird);
+
+        require_simd!(ret_ty, SimdReturn);
+
+        // Of the same length:
+        require!(
+            values_len == mask_len,
+            InvalidMonomorphization::ThirdArgumentLength {
+                span,
+                name,
+                in_len: mask_len,
+                in_ty: mask_ty,
+                arg_ty: values_ty,
+                out_len: values_len
+            }
+        );
+
+        // The return type must match the last argument type
+        require!(
+            ret_ty == values_ty,
+            InvalidMonomorphization::ExpectedReturnType { span, name, in_ty: values_ty, ret_ty }
+        );
+
+        require!(
+            matches!(
+                pointer_ty.kind(),
+                ty::RawPtr(p) if p.ty == values_elem && p.ty.kind() == values_elem.kind()
+            ),
+            InvalidMonomorphization::ExpectedElementType {
+                span,
+                name,
+                expected_element: values_elem,
+                second_arg: pointer_ty,
+                in_elem: values_elem,
+                in_ty: values_ty,
+                mutability: ExpectedPointerMutability::Not,
+            }
+        );
+
+        require!(
+            matches!(mask_elem.kind(), ty::Int(_)),
+            InvalidMonomorphization::ThirdArgElementType {
+                span,
+                name,
+                expected_element: values_elem,
+                third_arg: mask_ty,
+            }
+        );
+
+        // Alignment of T, must be a constant integer value:
+        let alignment_ty = bx.type_i32();
+        let alignment = bx.const_i32(bx.align_of(values_elem).bytes() as i32);
+
+        // Truncate the mask vector to a vector of i1s:
+        let (mask, mask_ty) = {
+            let i1 = bx.type_i1();
+            let i1xn = bx.type_vector(i1, mask_len);
+            (bx.trunc(args[0].immediate(), i1xn), i1xn)
+        };
+
+        let llvm_pointer = bx.type_ptr();
+
+        // Type of the vector of elements:
+        let llvm_elem_vec_ty = llvm_vector_ty(bx, values_elem, values_len);
+        let llvm_elem_vec_str = llvm_vector_str(bx, values_elem, values_len);
+
+        let llvm_intrinsic = format!("llvm.masked.load.{llvm_elem_vec_str}.p0");
+        let fn_ty = bx
+            .type_func(&[llvm_pointer, alignment_ty, mask_ty, llvm_elem_vec_ty], llvm_elem_vec_ty);
+        let f = bx.declare_cfn(&llvm_intrinsic, llvm::UnnamedAddr::No, fn_ty);
+        let v = bx.call(
+            fn_ty,
+            None,
+            None,
+            f,
+            &[args[1].immediate(), alignment, mask, args[2].immediate()],
+            None,
+        );
+        return Ok(v);
+    }
+
+    if name == sym::simd_masked_store {
+        // simd_masked_store(mask: <N x i{M}>, pointer: *mut T, values: <N x T>) -> ()
+        // * N: number of elements in the input vectors
+        // * T: type of the element to load
+        // * M: any integer width is supported, will be truncated to i1
+        // Stores contiguous elements to memory behind `pointer`, but only for
+        // those lanes whose `mask` bit is enabled.
+        // The memory addresses corresponding to the “off” lanes are not accessed.
+
+        // The element type of the "mask" argument must be a signed integer type of any width
+        let mask_ty = in_ty;
+        let (mask_len, mask_elem) = (in_len, in_elem);
+
+        // The second argument must be a pointer matching the element type
+        let pointer_ty = arg_tys[1];
+
+        // The last argument specifies the values to store to memory
+        let values_ty = arg_tys[2];
+        let (values_len, values_elem) = require_simd!(values_ty, SimdThird);
+
+        // Of the same length:
+        require!(
+            values_len == mask_len,
+            InvalidMonomorphization::ThirdArgumentLength {
+                span,
+                name,
+                in_len: mask_len,
+                in_ty: mask_ty,
+                arg_ty: values_ty,
+                out_len: values_len
+            }
+        );
+
+        // The second argument must be a mutable pointer type matching the element type
+        require!(
+            matches!(
+                pointer_ty.kind(),
+                ty::RawPtr(p) if p.ty == values_elem && p.ty.kind() == values_elem.kind() && p.mutbl.is_mut()
+            ),
+            InvalidMonomorphization::ExpectedElementType {
+                span,
+                name,
+                expected_element: values_elem,
+                second_arg: pointer_ty,
+                in_elem: values_elem,
+                in_ty: values_ty,
+                mutability: ExpectedPointerMutability::Mut,
+            }
+        );
+
+        require!(
+            matches!(mask_elem.kind(), ty::Int(_)),
+            InvalidMonomorphization::ThirdArgElementType {
+                span,
+                name,
+                expected_element: values_elem,
+                third_arg: mask_ty,
+            }
+        );
+
+        // Alignment of T, must be a constant integer value:
+        let alignment_ty = bx.type_i32();
+        let alignment = bx.const_i32(bx.align_of(values_elem).bytes() as i32);
+
+        // Truncate the mask vector to a vector of i1s:
+        let (mask, mask_ty) = {
+            let i1 = bx.type_i1();
+            let i1xn = bx.type_vector(i1, in_len);
+            (bx.trunc(args[0].immediate(), i1xn), i1xn)
+        };
+
+        let ret_t = bx.type_void();
+
+        let llvm_pointer = bx.type_ptr();
+
+        // Type of the vector of elements:
+        let llvm_elem_vec_ty = llvm_vector_ty(bx, values_elem, values_len);
+        let llvm_elem_vec_str = llvm_vector_str(bx, values_elem, values_len);
+
+        let llvm_intrinsic = format!("llvm.masked.store.{llvm_elem_vec_str}.p0");
+        let fn_ty = bx.type_func(&[llvm_elem_vec_ty, llvm_pointer, alignment_ty, mask_ty], ret_t);
+        let f = bx.declare_cfn(&llvm_intrinsic, llvm::UnnamedAddr::No, fn_ty);
+        let v = bx.call(
+            fn_ty,
+            None,
+            None,
+            f,
+            &[args[2].immediate(), args[1].immediate(), alignment, mask],
             None,
         );
         return Ok(v);
@@ -1436,19 +1699,13 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         // * M: any integer width is supported, will be truncated to i1
 
         // All types must be simd vector types
-        require_simd!(in_ty, InvalidMonomorphization::SimdFirst { span, name, ty: in_ty });
-        require_simd!(
-            arg_tys[1],
-            InvalidMonomorphization::SimdSecond { span, name, ty: arg_tys[1] }
-        );
-        require_simd!(
-            arg_tys[2],
-            InvalidMonomorphization::SimdThird { span, name, ty: arg_tys[2] }
-        );
+        // The second argument must be a simd vector with an element type that's a pointer
+        // to the element type of the first argument
+        let (_, element_ty0) = require_simd!(in_ty, SimdFirst);
+        let (element_len1, element_ty1) = require_simd!(arg_tys[1], SimdSecond);
+        let (element_len2, element_ty2) = require_simd!(arg_tys[2], SimdThird);
 
         // Of the same length:
-        let (element_len1, _) = arg_tys[1].simd_size_and_type(bx.tcx());
-        let (element_len2, _) = arg_tys[2].simd_size_and_type(bx.tcx());
         require!(
             in_len == element_len1,
             InvalidMonomorphization::SecondArgumentLength {
@@ -1472,64 +1729,33 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
             }
         );
 
-        // This counts how many pointers
-        fn ptr_count(t: Ty<'_>) -> usize {
-            match t.kind() {
-                ty::RawPtr(p) => 1 + ptr_count(p.ty),
-                _ => 0,
+        require!(
+            matches!(
+                element_ty1.kind(),
+                ty::RawPtr(p)
+                    if p.ty == in_elem && p.mutbl.is_mut() && p.ty.kind() == element_ty0.kind()
+            ),
+            InvalidMonomorphization::ExpectedElementType {
+                span,
+                name,
+                expected_element: element_ty1,
+                second_arg: arg_tys[1],
+                in_elem,
+                in_ty,
+                mutability: ExpectedPointerMutability::Mut,
             }
-        }
-
-        // Non-ptr type
-        fn non_ptr(t: Ty<'_>) -> Ty<'_> {
-            match t.kind() {
-                ty::RawPtr(p) => non_ptr(p.ty),
-                _ => t,
-            }
-        }
-
-        // The second argument must be a simd vector with an element type that's a pointer
-        // to the element type of the first argument
-        let (_, element_ty0) = arg_tys[0].simd_size_and_type(bx.tcx());
-        let (_, element_ty1) = arg_tys[1].simd_size_and_type(bx.tcx());
-        let (_, element_ty2) = arg_tys[2].simd_size_and_type(bx.tcx());
-        let (pointer_count, underlying_ty) = match element_ty1.kind() {
-            ty::RawPtr(p) if p.ty == in_elem && p.mutbl.is_mut() => {
-                (ptr_count(element_ty1), non_ptr(element_ty1))
-            }
-            _ => {
-                require!(
-                    false,
-                    InvalidMonomorphization::ExpectedElementType {
-                        span,
-                        name,
-                        expected_element: element_ty1,
-                        second_arg: arg_tys[1],
-                        in_elem,
-                        in_ty,
-                        mutability: ExpectedPointerMutability::Mut,
-                    }
-                );
-                unreachable!();
-            }
-        };
-        assert!(pointer_count > 0);
-        assert_eq!(pointer_count - 1, ptr_count(element_ty0));
-        assert_eq!(underlying_ty, non_ptr(element_ty0));
+        );
 
         // The element type of the third argument must be a signed integer type of any width:
         match element_ty2.kind() {
             ty::Int(_) => (),
             _ => {
-                require!(
-                    false,
-                    InvalidMonomorphization::ThirdArgElementType {
-                        span,
-                        name,
-                        expected_element: element_ty2,
-                        third_arg: arg_tys[2]
-                    }
-                );
+                return_error!(InvalidMonomorphization::ThirdArgElementType {
+                    span,
+                    name,
+                    expected_element: element_ty2,
+                    third_arg: arg_tys[2]
+                });
             }
         }
 
@@ -1547,20 +1773,21 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         let ret_t = bx.type_void();
 
         // Type of the vector of pointers:
-        let llvm_pointer_vec_ty = llvm_vector_ty(bx, underlying_ty, in_len, pointer_count);
-        let llvm_pointer_vec_str = llvm_vector_str(underlying_ty, in_len, pointer_count, bx);
+        let llvm_pointer_vec_ty = llvm_vector_ty(bx, element_ty1, in_len);
+        let llvm_pointer_vec_str = llvm_vector_str(bx, element_ty1, in_len);
 
         // Type of the vector of elements:
-        let llvm_elem_vec_ty = llvm_vector_ty(bx, underlying_ty, in_len, pointer_count - 1);
-        let llvm_elem_vec_str = llvm_vector_str(underlying_ty, in_len, pointer_count - 1, bx);
+        let llvm_elem_vec_ty = llvm_vector_ty(bx, element_ty0, in_len);
+        let llvm_elem_vec_str = llvm_vector_str(bx, element_ty0, in_len);
 
         let llvm_intrinsic =
-            format!("llvm.masked.scatter.{}.{}", llvm_elem_vec_str, llvm_pointer_vec_str);
+            format!("llvm.masked.scatter.{llvm_elem_vec_str}.{llvm_pointer_vec_str}");
         let fn_ty =
             bx.type_func(&[llvm_elem_vec_ty, llvm_pointer_vec_ty, alignment_ty, mask_ty], ret_t);
         let f = bx.declare_cfn(&llvm_intrinsic, llvm::UnnamedAddr::No, fn_ty);
         let v = bx.call(
             fn_ty,
+            None,
             None,
             f,
             &[args[0].immediate(), args[1].immediate(), alignment, mask],
@@ -1724,8 +1951,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     bitwise_red!(simd_reduce_any: vector_reduce_or, true);
 
     if name == sym::simd_cast_ptr {
-        require_simd!(ret_ty, InvalidMonomorphization::SimdReturn { span, name, ty: ret_ty });
-        let (out_len, out_elem) = ret_ty.simd_size_and_type(bx.tcx());
+        let (out_len, out_elem) = require_simd!(ret_ty, SimdReturn);
         require!(
             in_len == out_len,
             InvalidMonomorphization::ReturnLengthInputType {
@@ -1769,16 +1995,11 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
             }
         }
 
-        if in_elem == out_elem {
-            return Ok(args[0].immediate());
-        } else {
-            return Ok(bx.pointercast(args[0].immediate(), llret_ty));
-        }
+        return Ok(args[0].immediate());
     }
 
     if name == sym::simd_expose_addr {
-        require_simd!(ret_ty, InvalidMonomorphization::SimdReturn { span, name, ty: ret_ty });
-        let (out_len, out_elem) = ret_ty.simd_size_and_type(bx.tcx());
+        let (out_len, out_elem) = require_simd!(ret_ty, SimdReturn);
         require!(
             in_len == out_len,
             InvalidMonomorphization::ReturnLengthInputType {
@@ -1806,8 +2027,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     }
 
     if name == sym::simd_from_exposed_addr {
-        require_simd!(ret_ty, InvalidMonomorphization::SimdReturn { span, name, ty: ret_ty });
-        let (out_len, out_elem) = ret_ty.simd_size_and_type(bx.tcx());
+        let (out_len, out_elem) = require_simd!(ret_ty, SimdReturn);
         require!(
             in_len == out_len,
             InvalidMonomorphization::ReturnLengthInputType {
@@ -1835,8 +2055,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     }
 
     if name == sym::simd_cast || name == sym::simd_as {
-        require_simd!(ret_ty, InvalidMonomorphization::SimdReturn { span, name, ty: ret_ty });
-        let (out_len, out_elem) = ret_ty.simd_size_and_type(bx.tcx());
+        let (out_len, out_elem) = require_simd!(ret_ty, SimdReturn);
         require!(
             in_len == out_len,
             InvalidMonomorphization::ReturnLengthInputType {
@@ -1923,17 +2142,14 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
             }
             _ => { /* Unsupported. Fallthrough. */ }
         }
-        require!(
-            false,
-            InvalidMonomorphization::UnsupportedCast {
-                span,
-                name,
-                in_ty,
-                in_elem,
-                ret_ty,
-                out_elem
-            }
-        );
+        return_error!(InvalidMonomorphization::UnsupportedCast {
+            span,
+            name,
+            in_ty,
+            in_elem,
+            ret_ty,
+            out_elem
+        });
     }
     macro_rules! arith_binary {
         ($($name: ident: $($($p: ident),* => $call: ident),*;)*) => {
@@ -1944,8 +2160,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
                     })*
                     _ => {},
                 }
-                require!(
-                    false,
+                return_error!(
                     InvalidMonomorphization::UnsupportedOperation { span, name, in_ty, in_elem }
                 );
             })*
@@ -1975,8 +2190,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
                     })*
                     _ => {},
                 }
-                require!(
-                    false,
+                return_error!(
                     InvalidMonomorphization::UnsupportedOperation { span, name, in_ty, in_elem }
                 );
             })*
@@ -1984,6 +2198,52 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     }
     arith_unary! {
         simd_neg: Int => neg, Float => fneg;
+    }
+
+    // Unary integer intrinsics
+    if matches!(name, sym::simd_bswap | sym::simd_bitreverse | sym::simd_ctlz | sym::simd_cttz) {
+        let vec_ty = bx.cx.type_vector(
+            match *in_elem.kind() {
+                ty::Int(i) => bx.cx.type_int_from_ty(i),
+                ty::Uint(i) => bx.cx.type_uint_from_ty(i),
+                _ => return_error!(InvalidMonomorphization::UnsupportedOperation {
+                    span,
+                    name,
+                    in_ty,
+                    in_elem
+                }),
+            },
+            in_len as u64,
+        );
+        let intrinsic_name = match name {
+            sym::simd_bswap => "bswap",
+            sym::simd_bitreverse => "bitreverse",
+            sym::simd_ctlz => "ctlz",
+            sym::simd_cttz => "cttz",
+            _ => unreachable!(),
+        };
+        let int_size = in_elem.int_size_and_signed(bx.tcx()).0.bits();
+        let llvm_intrinsic = &format!("llvm.{}.v{}i{}", intrinsic_name, in_len, int_size,);
+
+        return if name == sym::simd_bswap && int_size == 8 {
+            // byte swap is no-op for i8/u8
+            Ok(args[0].immediate())
+        } else if matches!(name, sym::simd_ctlz | sym::simd_cttz) {
+            let fn_ty = bx.type_func(&[vec_ty, bx.type_i1()], vec_ty);
+            let f = bx.declare_cfn(llvm_intrinsic, llvm::UnnamedAddr::No, fn_ty);
+            Ok(bx.call(
+                fn_ty,
+                None,
+                None,
+                f,
+                &[args[0].immediate(), bx.const_int(bx.type_i1(), 0)],
+                None,
+            ))
+        } else {
+            let fn_ty = bx.type_func(&[vec_ty], vec_ty);
+            let f = bx.declare_cfn(llvm_intrinsic, llvm::UnnamedAddr::No, fn_ty);
+            Ok(bx.call(fn_ty, None, None, f, &[args[0].immediate()], None))
+        };
     }
 
     if name == sym::simd_arith_offset {
@@ -2035,7 +2295,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
 
         let fn_ty = bx.type_func(&[vec_ty, vec_ty], vec_ty);
         let f = bx.declare_cfn(llvm_intrinsic, llvm::UnnamedAddr::No, fn_ty);
-        let v = bx.call(fn_ty, None, f, &[lhs, rhs], None);
+        let v = bx.call(fn_ty, None, None, f, &[lhs, rhs], None);
         return Ok(v);
     }
 

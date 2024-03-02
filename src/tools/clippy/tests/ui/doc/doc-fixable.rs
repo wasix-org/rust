@@ -1,4 +1,4 @@
-// run-rustfix
+
 //! This file tests for the `DOC_MARKDOWN` lint.
 
 #![allow(dead_code, incomplete_features)]
@@ -60,6 +60,7 @@ fn test_units() {
 /// GitHub GitLab
 /// IPv4 IPv6
 /// ClojureScript CoffeeScript JavaScript PureScript TypeScript
+/// WebAssembly
 /// NaN NaNs
 /// OAuth GraphQL
 /// OCaml
@@ -197,6 +198,16 @@ fn pulldown_cmark_crash() {}
 /// [plain text][path::to::item]
 fn intra_doc_link() {}
 
+/// Ignore escaped\_underscores
+///
+/// \\[
+///     \\prod\_{x\\in X} p\_x
+/// \\]
+fn issue_2581() {}
+
+/// Foo \[bar\] \[baz\] \[qux\]. DocMarkdownLint
+fn lint_after_escaped_chars() {}
+
 // issue #7033 - generic_const_exprs ICE
 struct S<T, const N: usize>
 where [(); N.checked_next_power_of_two().unwrap()]: {
@@ -213,3 +224,9 @@ where [(); N.checked_next_power_of_two().unwrap()]: {
         }
     }
 }
+
+/// this checks if the lowerCamelCase issue is fixed
+fn issue_11568() {}
+
+/// There is no try (do() or do_not()).
+fn parenthesized_word() {}

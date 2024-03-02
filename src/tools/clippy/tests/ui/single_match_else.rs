@@ -1,9 +1,8 @@
-// aux-build: proc_macro_with_span.rs
+//@aux-build: proc_macros.rs
 #![warn(clippy::single_match_else)]
-#![allow(clippy::needless_return, clippy::no_effect, clippy::uninlined_format_args)]
-
-extern crate proc_macro_with_span;
-use proc_macro_with_span::with_span;
+#![allow(unused, clippy::needless_return, clippy::no_effect, clippy::uninlined_format_args)]
+extern crate proc_macros;
+use proc_macros::with_span;
 
 enum ExprNode {
     ExprAddrOf,
@@ -113,5 +112,89 @@ fn main() {
             println!("else block");
             return;
         }
+    }
+}
+
+fn issue_10808(bar: Option<i32>) {
+    match bar {
+        Some(v) => unsafe {
+            let r = &v as *const i32;
+            println!("{}", *r);
+        },
+        None => {
+            println!("None1");
+            println!("None2");
+        },
+    }
+
+    match bar {
+        Some(v) => {
+            println!("Some");
+            println!("{v}");
+        },
+        None => unsafe {
+            let v = 0;
+            let r = &v as *const i32;
+            println!("{}", *r);
+        },
+    }
+
+    match bar {
+        Some(v) => unsafe {
+            let r = &v as *const i32;
+            println!("{}", *r);
+        },
+        None => unsafe {
+            let v = 0;
+            let r = &v as *const i32;
+            println!("{}", *r);
+        },
+    }
+
+    match bar {
+        #[rustfmt::skip]
+        Some(v) => {
+            unsafe {
+                let r = &v as *const i32;
+                println!("{}", *r);
+            }
+        },
+        None => {
+            println!("None");
+            println!("None");
+        },
+    }
+
+    match bar {
+        Some(v) => {
+            println!("Some");
+            println!("{v}");
+        },
+        #[rustfmt::skip]
+        None => {
+            unsafe {
+                let v = 0;
+                let r = &v as *const i32;
+                println!("{}", *r);
+            }
+        },
+    }
+
+    match bar {
+        #[rustfmt::skip]
+        Some(v) => {
+            unsafe {
+                let r = &v as *const i32;
+                println!("{}", *r);
+            }
+        },
+        #[rustfmt::skip]
+        None => {
+            unsafe {
+                let v = 0;
+                let r = &v as *const i32;
+                println!("{}", *r);
+            }
+        },
     }
 }

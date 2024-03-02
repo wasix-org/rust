@@ -14,6 +14,8 @@ pub mod alloc;
 
 pub mod cvt;
 pub mod small_c_string;
+#[allow(unused_imports)]
+pub mod thread_local;
 
 #[cfg(test)]
 mod tests;

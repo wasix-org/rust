@@ -143,7 +143,7 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         (Paren(l), _) => eq_expr(l, r),
         (_, Paren(r)) => eq_expr(l, r),
         (Err, Err) => true,
-        (Box(l), Box(r)) | (Try(l), Try(r)) | (Await(l), Await(r)) => eq_expr(l, r),
+        (Try(l), Try(r)) | (Await(l, _), Await(r, _)) => eq_expr(l, r),
         (Array(l), Array(r)) => over(l, r, |l, r| eq_expr(l, r)),
         (Tup(l), Tup(r)) => over(l, r, |l, r| eq_expr(l, r)),
         (Repeat(le, ls), Repeat(re, rs)) => eq_expr(le, re) && eq_expr(&ls.value, &rs.value),
@@ -166,7 +166,7 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         (Unary(lo, l), Unary(ro, r)) => mem::discriminant(lo) == mem::discriminant(ro) && eq_expr(l, r),
         (Lit(l), Lit(r)) => l == r,
         (Cast(l, lt), Cast(r, rt)) | (Type(l, lt), Type(r, rt)) => eq_expr(l, r) && eq_ty(lt, rt),
-        (Let(lp, le, _), Let(rp, re, _)) => eq_pat(lp, rp) && eq_expr(le, re),
+        (Let(lp, le, _, _), Let(rp, re, _, _)) => eq_pat(lp, rp) && eq_expr(le, re),
         (If(lc, lt, le), If(rc, rt, re)) => eq_expr(lc, rc) && eq_block(lt, rt) && eq_expr_opt(le, re),
         (While(lc, lt, ll), While(rc, rt, rl)) => eq_label(ll, rl) && eq_expr(lc, rc) && eq_block(lt, rt),
         (ForLoop(lp, li, lt, ll), ForLoop(rp, ri, rt, rl)) => {
@@ -178,7 +178,9 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         (Yield(l), Yield(r)) | (Ret(l), Ret(r)) => eq_expr_opt(l, r),
         (Break(ll, le), Break(rl, re)) => eq_label(ll, rl) && eq_expr_opt(le, re),
         (Continue(ll), Continue(rl)) => eq_label(ll, rl),
-        (Assign(l1, l2, _), Assign(r1, r2, _)) | (Index(l1, l2), Index(r1, r2)) => eq_expr(l1, r1) && eq_expr(l2, r2),
+        (Assign(l1, l2, _), Assign(r1, r2, _)) | (Index(l1, l2, _), Index(r1, r2, _)) => {
+            eq_expr(l1, r1) && eq_expr(l2, r2)
+        },
         (AssignOp(lo, lp, lv), AssignOp(ro, rp, rv)) => lo.node == ro.node && eq_expr(lp, rp) && eq_expr(lv, rv),
         (Field(lp, lf), Field(rp, rf)) => eq_id(*lf, *rf) && eq_expr(lp, rp),
         (Match(ls, la), Match(rs, ra)) => eq_expr(ls, rs) && over(la, ra, eq_arm),
@@ -186,7 +188,7 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
             Closure(box ast::Closure {
                 binder: lb,
                 capture_clause: lc,
-                asyncness: la,
+                coroutine_kind: la,
                 movability: lm,
                 fn_decl: lf,
                 body: le,
@@ -195,7 +197,7 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
             Closure(box ast::Closure {
                 binder: rb,
                 capture_clause: rc,
-                asyncness: ra,
+                coroutine_kind: ra,
                 movability: rm,
                 fn_decl: rf,
                 body: re,
@@ -204,12 +206,12 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         ) => {
             eq_closure_binder(lb, rb)
                 && lc == rc
-                && la.is_async() == ra.is_async()
+                && la.map_or(false, CoroutineKind::is_async) == ra.map_or(false, CoroutineKind::is_async)
                 && lm == rm
                 && eq_fn_decl(lf, rf)
                 && eq_expr(le, re)
         },
-        (Async(lc, _, lb), Async(rc, _, rb)) => lc == rc && eq_block(lb, rb),
+        (Gen(lc, lb, lk), Gen(rc, rb, rk)) => lc == rc && eq_block(lb, rb) && lk == rk,
         (Range(lf, lt, ll), Range(rf, rt, rl)) => ll == rl && eq_expr_opt(lf, rf) && eq_expr_opt(lt, rt),
         (AddrOf(lbk, lm, le), AddrOf(rbk, rm, re)) => lbk == rbk && lm == rm && eq_expr(le, re),
         (Path(lq, lp), Path(rq, rp)) => both(lq, rq, eq_qself) && eq_path(lp, rp),
@@ -234,7 +236,7 @@ pub fn eq_field(l: &ExprField, r: &ExprField) -> bool {
 pub fn eq_arm(l: &Arm, r: &Arm) -> bool {
     l.is_placeholder == r.is_placeholder
         && eq_pat(&l.pat, &r.pat)
-        && eq_expr(&l.body, &r.body)
+        && eq_expr_opt(&l.body, &r.body)
         && eq_expr_opt(&l.guard, &r.guard)
         && over(&l.attrs, &r.attrs, eq_attr)
 }
@@ -286,8 +288,32 @@ pub fn eq_item_kind(l: &ItemKind, r: &ItemKind) -> bool {
     match (l, r) {
         (ExternCrate(l), ExternCrate(r)) => l == r,
         (Use(l), Use(r)) => eq_use_tree(l, r),
-        (Static(lt, lm, le), Static(rt, rm, re)) => lm == rm && eq_ty(lt, rt) && eq_expr_opt(le, re),
-        (Const(ld, lt, le), Const(rd, rt, re)) => eq_defaultness(*ld, *rd) && eq_ty(lt, rt) && eq_expr_opt(le, re),
+        (
+            Static(box ast::StaticItem {
+                ty: lt,
+                mutability: lm,
+                expr: le,
+            }),
+            Static(box ast::StaticItem {
+                ty: rt,
+                mutability: rm,
+                expr: re,
+            }),
+        ) => lm == rm && eq_ty(lt, rt) && eq_expr_opt(le, re),
+        (
+            Const(box ast::ConstItem {
+                defaultness: ld,
+                generics: lg,
+                ty: lt,
+                expr: le,
+            }),
+            Const(box ast::ConstItem {
+                defaultness: rd,
+                generics: rg,
+                ty: rt,
+                expr: re,
+            }),
+        ) => eq_defaultness(*ld, *rd) && eq_generics(lg, rg) && eq_ty(lt, rt) && eq_expr_opt(le, re),
         (
             Fn(box ast::Fn {
                 defaultness: ld,
@@ -451,7 +477,20 @@ pub fn eq_foreign_item_kind(l: &ForeignItemKind, r: &ForeignItemKind) -> bool {
 pub fn eq_assoc_item_kind(l: &AssocItemKind, r: &AssocItemKind) -> bool {
     use AssocItemKind::*;
     match (l, r) {
-        (Const(ld, lt, le), Const(rd, rt, re)) => eq_defaultness(*ld, *rd) && eq_ty(lt, rt) && eq_expr_opt(le, re),
+        (
+            Const(box ast::ConstItem {
+                defaultness: ld,
+                generics: lg,
+                ty: lt,
+                expr: le,
+            }),
+            Const(box ast::ConstItem {
+                defaultness: rd,
+                generics: rg,
+                ty: rt,
+                expr: re,
+            }),
+        ) => eq_defaultness(*ld, *rd) && eq_generics(lg, rg) && eq_ty(lt, rt) && eq_expr_opt(le, re),
         (
             Fn(box ast::Fn {
                 defaultness: ld,
@@ -507,7 +546,9 @@ pub fn eq_variant_data(l: &VariantData, r: &VariantData) -> bool {
     use VariantData::*;
     match (l, r) {
         (Unit(_), Unit(_)) => true,
-        (Struct(l, _), Struct(r, _)) | (Tuple(l, _), Tuple(r, _)) => over(l, r, eq_struct_field),
+        (Struct { fields: l, .. }, Struct { fields: r, .. }) | (Tuple(l, _), Tuple(r, _)) => {
+            over(l, r, eq_struct_field)
+        },
         _ => false,
     }
 }
@@ -524,9 +565,22 @@ pub fn eq_fn_sig(l: &FnSig, r: &FnSig) -> bool {
     eq_fn_decl(&l.decl, &r.decl) && eq_fn_header(&l.header, &r.header)
 }
 
+fn eq_opt_coroutine_kind(l: Option<CoroutineKind>, r: Option<CoroutineKind>) -> bool {
+    matches!(
+        (l, r),
+        (Some(CoroutineKind::Async { .. }), Some(CoroutineKind::Async { .. }))
+            | (Some(CoroutineKind::Gen { .. }), Some(CoroutineKind::Gen { .. }))
+            | (
+                Some(CoroutineKind::AsyncGen { .. }),
+                Some(CoroutineKind::AsyncGen { .. })
+            )
+            | (None, None)
+    )
+}
+
 pub fn eq_fn_header(l: &FnHeader, r: &FnHeader) -> bool {
     matches!(l.unsafety, Unsafe::No) == matches!(r.unsafety, Unsafe::No)
-        && l.asyncness.is_async() == r.asyncness.is_async()
+        && eq_opt_coroutine_kind(l.coroutine_kind, r.coroutine_kind)
         && matches!(l.constness, Const::No) == matches!(r.constness, Const::No)
         && eq_ext(&l.ext, &r.ext)
 }

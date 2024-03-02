@@ -20,7 +20,7 @@ use crate::{
 pub(crate) fn incremental_reparse(
     node: &SyntaxNode,
     edit: &Indel,
-    errors: Vec<SyntaxError>,
+    errors: impl IntoIterator<Item = SyntaxError>,
 ) -> Option<(GreenNode, Vec<SyntaxError>, TextRange)> {
     if let Some((green, new_errors, old_range)) = reparse_token(node, edit) {
         return Some((green, merge_errors(errors, new_errors, old_range, edit), old_range));
@@ -39,7 +39,7 @@ fn reparse_token(
     let prev_token = root.covering_element(edit.delete).as_token()?.clone();
     let prev_token_kind = prev_token.kind();
     match prev_token_kind {
-        WHITESPACE | COMMENT | IDENT | STRING => {
+        WHITESPACE | COMMENT | IDENT | STRING | BYTE_STRING | C_STRING => {
             if prev_token_kind == WHITESPACE || prev_token_kind == COMMENT {
                 // removing a new line may extends previous token
                 let deleted_range = edit.delete - prev_token.text_range().start();
@@ -147,7 +147,7 @@ fn is_balanced(lexed: &parser::LexedStr<'_>) -> bool {
 }
 
 fn merge_errors(
-    old_errors: Vec<SyntaxError>,
+    old_errors: impl IntoIterator<Item = SyntaxError>,
     new_errors: Vec<SyntaxError>,
     range_before_reparse: TextRange,
     edit: &Indel,
@@ -166,8 +166,8 @@ fn merge_errors(
     }
     res.extend(new_errors.into_iter().map(|new_err| {
         // fighting borrow checker with a variable ;)
-        let offseted_range = new_err.range() + range_before_reparse.start();
-        new_err.with_range(offseted_range)
+        let offsetted_range = new_err.range() + range_before_reparse.start();
+        new_err.with_range(offsetted_range)
     }));
     res
 }
@@ -191,8 +191,12 @@ mod tests {
         let fully_reparsed = SourceFile::parse(&after);
         let incrementally_reparsed: Parse<SourceFile> = {
             let before = SourceFile::parse(&before);
-            let (green, new_errors, range) =
-                incremental_reparse(before.tree().syntax(), &edit, before.errors.to_vec()).unwrap();
+            let (green, new_errors, range) = incremental_reparse(
+                before.tree().syntax(),
+                &edit,
+                before.errors.as_deref().unwrap_or_default().iter().cloned(),
+            )
+            .unwrap();
             assert_eq!(range.len(), reparsed_len.into(), "reparsed fragment has wrong length");
             Parse::new(green, new_errors)
         };
@@ -408,7 +412,7 @@ enum Foo {
 
     #[test]
     fn reparse_str_token_with_error_fixed() {
-        do_check(r#""unterinated$0$0"#, "\"", 12);
+        do_check(r#""unterminated$0$0"#, "\"", 13);
     }
 
     #[test]

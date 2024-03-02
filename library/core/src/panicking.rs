@@ -29,6 +29,9 @@
 use crate::fmt;
 use crate::panic::{Location, PanicInfo};
 
+#[cfg(feature = "panic_immediate_abort")]
+const _: () = assert!(cfg!(panic = "abort"), "panic_immediate_abort requires -C panic=abort");
+
 // First we define the two main entry points that all panics go through.
 // In the end both are just convenience wrappers around `panic_impl`.
 
@@ -58,7 +61,12 @@ pub const fn panic_fmt(fmt: fmt::Arguments<'_>) -> ! {
         fn panic_impl(pi: &PanicInfo<'_>) -> !;
     }
 
-    let pi = PanicInfo::internal_constructor(Some(&fmt), Location::caller(), true);
+    let pi = PanicInfo::internal_constructor(
+        Some(&fmt),
+        Location::caller(),
+        /* can_unwind */ true,
+        /* force_no_backtrace */ false,
+    );
 
     // SAFETY: `panic_impl` is defined in safe Rust code and thus is safe to call.
     unsafe { panic_impl(&pi) }
@@ -74,23 +82,45 @@ pub const fn panic_fmt(fmt: fmt::Arguments<'_>) -> ! {
 // and unwinds anyway, we will hit the "unwinding out of nounwind function" guard,
 // which causes a "panic in a function that cannot unwind".
 #[rustc_nounwind]
-pub fn panic_nounwind_fmt(fmt: fmt::Arguments<'_>) -> ! {
-    if cfg!(feature = "panic_immediate_abort") {
-        super::intrinsics::abort()
+#[rustc_const_unstable(feature = "core_panic", issue = "none")]
+pub const fn panic_nounwind_fmt(fmt: fmt::Arguments<'_>, force_no_backtrace: bool) -> ! {
+    #[inline] // this should always be inlined into `panic_nounwind_fmt`
+    #[track_caller]
+    fn runtime(fmt: fmt::Arguments<'_>, force_no_backtrace: bool) -> ! {
+        if cfg!(feature = "panic_immediate_abort") {
+            super::intrinsics::abort()
+        }
+
+        // NOTE This function never crosses the FFI boundary; it's a Rust-to-Rust call
+        // that gets resolved to the `#[panic_handler]` function.
+        extern "Rust" {
+            #[lang = "panic_impl"]
+            fn panic_impl(pi: &PanicInfo<'_>) -> !;
+        }
+
+        // PanicInfo with the `can_unwind` flag set to false forces an abort.
+        let pi = PanicInfo::internal_constructor(
+            Some(&fmt),
+            Location::caller(),
+            /* can_unwind */ false,
+            force_no_backtrace,
+        );
+
+        // SAFETY: `panic_impl` is defined in safe Rust code and thus is safe to call.
+        unsafe { panic_impl(&pi) }
     }
 
-    // NOTE This function never crosses the FFI boundary; it's a Rust-to-Rust call
-    // that gets resolved to the `#[panic_handler]` function.
-    extern "Rust" {
-        #[lang = "panic_impl"]
-        fn panic_impl(pi: &PanicInfo<'_>) -> !;
+    #[inline]
+    #[track_caller]
+    const fn comptime(fmt: fmt::Arguments<'_>, _force_no_backtrace: bool) -> ! {
+        // We don't unwind anyway at compile-time so we can call the regular `panic_fmt`.
+        panic_fmt(fmt);
     }
 
-    // PanicInfo with the `can_unwind` flag set to false forces an abort.
-    let pi = PanicInfo::internal_constructor(Some(&fmt), Location::caller(), false);
-
-    // SAFETY: `panic_impl` is defined in safe Rust code and thus is safe to call.
-    unsafe { panic_impl(&pi) }
+    // SAFETY: const panic does not care about unwinding
+    unsafe {
+        super::intrinsics::const_eval_select((fmt, force_no_backtrace), comptime, runtime);
+    }
 }
 
 // Next we define a bunch of higher-level wrappers that all bottom out in the two core functions
@@ -111,16 +141,26 @@ pub const fn panic(expr: &'static str) -> ! {
     // truncation and padding (even though none is used here). Using
     // Arguments::new_v1 may allow the compiler to omit Formatter::pad from the
     // output binary, saving up to a few kilobytes.
-    panic_fmt(fmt::Arguments::new_v1(&[expr], &[]));
+    panic_fmt(fmt::Arguments::new_const(&[expr]));
 }
 
-/// Like `panic`, but without unwinding and track_caller to reduce the impact on codesize.
+/// Like `panic`, but without unwinding and track_caller to reduce the impact on codesize on the caller.
+/// If you want `#[track_caller]` for nicer errors, call `panic_nounwind_fmt` directly.
 #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
 #[cfg_attr(feature = "panic_immediate_abort", inline)]
 #[lang = "panic_nounwind"] // needed by codegen for non-unwinding panics
 #[rustc_nounwind]
-pub fn panic_nounwind(expr: &'static str) -> ! {
-    panic_nounwind_fmt(fmt::Arguments::new_v1(&[expr], &[]));
+#[rustc_const_unstable(feature = "core_panic", issue = "none")]
+pub const fn panic_nounwind(expr: &'static str) -> ! {
+    panic_nounwind_fmt(fmt::Arguments::new_const(&[expr]), /* force_no_backtrace */ false);
+}
+
+/// Like `panic_nounwind`, but also inhibits showing a backtrace.
+#[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
+#[cfg_attr(feature = "panic_immediate_abort", inline)]
+#[rustc_nounwind]
+pub fn panic_nounwind_nobacktrace(expr: &'static str) -> ! {
+    panic_nounwind_fmt(fmt::Arguments::new_const(&[expr]), /* force_no_backtrace */ true);
 }
 
 #[inline]
@@ -129,6 +169,14 @@ pub fn panic_nounwind(expr: &'static str) -> ! {
 #[rustc_const_unstable(feature = "core_panic", issue = "none")]
 pub const fn panic_str(expr: &str) -> ! {
     panic_display(&expr);
+}
+
+#[track_caller]
+#[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
+#[cfg_attr(feature = "panic_immediate_abort", inline)]
+#[rustc_const_unstable(feature = "core_panic", issue = "none")]
+pub const fn panic_explicit() -> ! {
+    panic_display(&"explicit panic");
 }
 
 #[inline]
@@ -140,8 +188,9 @@ pub fn unreachable_display<T: fmt::Display>(x: &T) -> ! {
 
 #[inline]
 #[track_caller]
-#[lang = "panic_display"] // needed for const-evaluated panics
 #[rustc_do_not_const_check] // hooked by const-eval
+// enforce a &&str argument in const-check and hook this by const-eval
+#[rustc_const_panic_str]
 #[rustc_const_unstable(feature = "core_panic", issue = "none")]
 pub const fn panic_display<T: fmt::Display>(x: &T) -> ! {
     panic_fmt(format_args!("{}", *x));
@@ -159,8 +208,28 @@ fn panic_bounds_check(index: usize, len: usize) -> ! {
     panic!("index out of bounds: the len is {len} but the index is {index}")
 }
 
+#[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
+#[cfg_attr(feature = "panic_immediate_abort", inline)]
+#[track_caller]
+#[lang = "panic_misaligned_pointer_dereference"] // needed by codegen for panic on misaligned pointer deref
+#[rustc_nounwind] // `CheckAlignment` MIR pass requires this function to never unwind
+fn panic_misaligned_pointer_dereference(required: usize, found: usize) -> ! {
+    if cfg!(feature = "panic_immediate_abort") {
+        super::intrinsics::abort()
+    }
+
+    panic_nounwind_fmt(
+        format_args!(
+            "misaligned pointer dereference: address must be a multiple of {required:#x} but is {found:#x}"
+        ),
+        /* force_no_backtrace */ false,
+    )
+}
+
 /// Panic because we cannot unwind out of a function.
 ///
+/// This is a separate function to avoid the codesize impact of each crate containing the string to
+/// pass to `panic_nounwind`.
 /// This function is called directly by the codegen backend, and must not have
 /// any extra arguments (including those synthesized by track_caller).
 #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
@@ -168,7 +237,23 @@ fn panic_bounds_check(index: usize, len: usize) -> ! {
 #[lang = "panic_cannot_unwind"] // needed by codegen for panic in nounwind function
 #[rustc_nounwind]
 fn panic_cannot_unwind() -> ! {
+    // Keep the text in sync with `UnwindTerminateReason::as_str` in `rustc_middle`.
     panic_nounwind("panic in a function that cannot unwind")
+}
+
+/// Panic because we are unwinding out of a destructor during cleanup.
+///
+/// This is a separate function to avoid the codesize impact of each crate containing the string to
+/// pass to `panic_nounwind`.
+/// This function is called directly by the codegen backend, and must not have
+/// any extra arguments (including those synthesized by track_caller).
+#[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
+#[cfg_attr(feature = "panic_immediate_abort", inline)]
+#[lang = "panic_in_cleanup"] // needed by codegen for panic in nounwind function
+#[rustc_nounwind]
+fn panic_in_cleanup() -> ! {
+    // Keep the text in sync with `UnwindTerminateReason::as_str` in `rustc_middle`.
+    panic_nounwind_nobacktrace("panic in a destructor during cleanup")
 }
 
 /// This function is used instead of panic_fmt in const eval.
@@ -176,7 +261,8 @@ fn panic_cannot_unwind() -> ! {
 #[rustc_const_unstable(feature = "core_panic", issue = "none")]
 pub const fn const_panic_fmt(fmt: fmt::Arguments<'_>) -> ! {
     if let Some(msg) = fmt.as_str() {
-        panic_str(msg);
+        // The panic_display function is hooked by const eval.
+        panic_display(&msg);
     } else {
         // SAFETY: This is only evaluated at compile time, which reliably
         // handles this UB (in case this branch turns out to be reachable
@@ -249,16 +335,14 @@ fn assert_failed_inner(
 
     match args {
         Some(args) => panic!(
-            r#"assertion failed: `(left {} right)`
-  left: `{:?}`,
- right: `{:?}`: {}"#,
-            op, left, right, args
+            r#"assertion `left {op} right` failed: {args}
+  left: {left:?}
+ right: {right:?}"#
         ),
         None => panic!(
-            r#"assertion failed: `(left {} right)`
-  left: `{:?}`,
- right: `{:?}`"#,
-            op, left, right,
+            r#"assertion `left {op} right` failed
+  left: {left:?}
+ right: {right:?}"#
         ),
     }
 }

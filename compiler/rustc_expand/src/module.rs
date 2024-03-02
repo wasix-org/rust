@@ -57,7 +57,7 @@ pub(crate) fn parse_external_mod(
     // We bail on the first error, but that error does not cause a fatal error... (1)
     let result: Result<_, ModError<'_>> = try {
         // Extract the file path and the new ownership.
-        let mp = mod_file_path(sess, ident, &attrs, &module.dir_path, dir_ownership)?;
+        let mp = mod_file_path(sess, ident, attrs, &module.dir_path, dir_ownership)?;
         dir_ownership = mp.dir_ownership;
 
         // Ensure file paths are acyclic.
@@ -91,7 +91,9 @@ pub(crate) fn mod_dir_path(
     inline: Inline,
 ) -> (PathBuf, DirOwnership) {
     match inline {
-        Inline::Yes if let Some(file_path) = mod_file_path_from_attr(sess, attrs, &module.dir_path) => {
+        Inline::Yes
+            if let Some(file_path) = mod_file_path_from_attr(sess, attrs, &module.dir_path) =>
+        {
             // For inline modules file path from `#[path]` is actually the directory path
             // for historical reasons, so we don't pop the last segment here.
             (file_path, DirOwnership::Owned { relative: None })
@@ -117,7 +119,7 @@ pub(crate) fn mod_dir_path(
         Inline::No => {
             // FIXME: This is a subset of `parse_external_mod` without actual parsing,
             // check whether the logic for unloaded, loaded and inline modules can be unified.
-            let file_path = mod_file_path(sess, ident, &attrs, &module.dir_path, dir_ownership)
+            let file_path = mod_file_path(sess, ident, attrs, &module.dir_path, dir_ownership)
                 .map(|mp| {
                     dir_ownership = mp.dir_ownership;
                     mp.file_path

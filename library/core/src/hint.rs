@@ -73,8 +73,8 @@ use crate::intrinsics;
 /// ```
 ///
 /// While using `unreachable_unchecked()` is perfectly sound in the following
-/// example, the compiler is able to prove that a division by zero is not
-/// possible. Benchmarking reveals that `unreachable_unchecked()` provides
+/// example, as the compiler is able to prove that a division by zero is not
+/// possible, benchmarking reveals that `unreachable_unchecked()` provides
 /// no benefit over using [`unreachable!`], while the latter does not introduce
 /// the possibility of Undefined Behavior.
 ///
@@ -175,34 +175,27 @@ pub fn spin_loop() {
         unsafe { crate::arch::x86_64::_mm_pause() };
     }
 
-    // RISC-V platform spin loop hint implementation
+    #[cfg(target_arch = "riscv32")]
     {
-        // RISC-V RV32 and RV64 share the same PAUSE instruction, but they are located in different
-        // modules in `core::arch`.
-        // In this case, here we call `pause` function in each core arch module.
-        #[cfg(target_arch = "riscv32")]
-        {
-            crate::arch::riscv32::pause();
-        }
-        #[cfg(target_arch = "riscv64")]
-        {
-            crate::arch::riscv64::pause();
-        }
+        crate::arch::riscv32::pause();
     }
 
-    #[cfg(any(target_arch = "aarch64", all(target_arch = "arm", target_feature = "v6")))]
+    #[cfg(target_arch = "riscv64")]
     {
-        #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: the `cfg` attr ensures that we only execute this on aarch64 targets.
-            unsafe { crate::arch::aarch64::__isb(crate::arch::aarch64::SY) };
-        }
-        #[cfg(target_arch = "arm")]
-        {
-            // SAFETY: the `cfg` attr ensures that we only execute this on arm targets
-            // with support for the v6 feature.
-            unsafe { crate::arch::arm::__yield() };
-        }
+        crate::arch::riscv64::pause();
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: the `cfg` attr ensures that we only execute this on aarch64 targets.
+        unsafe { crate::arch::aarch64::__isb(crate::arch::aarch64::SY) };
+    }
+
+    #[cfg(all(target_arch = "arm", target_feature = "v6"))]
+    {
+        // SAFETY: the `cfg` attr ensures that we only execute this on arm targets
+        // with support for the v6 feature.
+        unsafe { crate::arch::arm::__yield() };
     }
 }
 
@@ -217,18 +210,15 @@ pub fn spin_loop() {
 /// Note however, that `black_box` is only (and can only be) provided on a "best-effort" basis. The
 /// extent to which it can block optimisations may vary depending upon the platform and code-gen
 /// backend used. Programs cannot rely on `black_box` for *correctness*, beyond it behaving as the
-/// identity function.
+/// identity function. As such, it **must not be relied upon to control critical program behavior.**
+/// This _immediately_ precludes any direct use of this function for cryptographic or security
+/// purposes.
 ///
 /// [`std::convert::identity`]: crate::convert::identity
 ///
 /// # When is this useful?
 ///
-/// First and foremost: `black_box` does _not_ guarantee any exact behavior and, in some cases, may
-/// do nothing at all. As such, it **must not be relied upon to control critical program behavior.**
-/// This _immediately_ precludes any direct use of this function for cryptographic or security
-/// purposes.
-///
-/// While not suitable in those mission-critical cases, `back_box`'s functionality can generally be
+/// While not suitable in those mission-critical cases, `black_box`'s functionality can generally be
 /// relied upon for benchmarking, and should be used there. It will try to ensure that the
 /// compiler doesn't optimize away part of the intended test code based on context. For
 /// example:
@@ -287,7 +277,7 @@ pub fn spin_loop() {
 /// - Treats the call to `contains` and its result as volatile: the body of `benchmark` cannot
 ///   optimize this away
 ///
-/// This makes our benchmark much more realistic to how the function would be used in situ, where
+/// This makes our benchmark much more realistic to how the function would actually be used, where
 /// arguments are usually not known at compile time and the result is used in some way.
 #[inline]
 #[stable(feature = "bench_black_box", since = "1.66.0")]

@@ -64,6 +64,48 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                 rhs_then_block.unit()
             }
+            ExprKind::LogicalOp { op: LogicalOp::Or, lhs, rhs } => {
+                let local_scope = this.local_scope();
+                let (lhs_success_block, failure_block) =
+                    this.in_if_then_scope(local_scope, expr_span, |this| {
+                        this.then_else_break(
+                            block,
+                            &this.thir[lhs],
+                            temp_scope_override,
+                            local_scope,
+                            variable_source_info,
+                        )
+                    });
+                let rhs_success_block = unpack!(this.then_else_break(
+                    failure_block,
+                    &this.thir[rhs],
+                    temp_scope_override,
+                    break_scope,
+                    variable_source_info,
+                ));
+                this.cfg.goto(lhs_success_block, variable_source_info, rhs_success_block);
+                rhs_success_block.unit()
+            }
+            ExprKind::Unary { op: UnOp::Not, arg } => {
+                let local_scope = this.local_scope();
+                let (success_block, failure_block) =
+                    this.in_if_then_scope(local_scope, expr_span, |this| {
+                        // Help out coverage instrumentation by injecting a dummy statement with
+                        // the original condition's span (including `!`). This fixes #115468.
+                        if this.tcx.sess.instrument_coverage() {
+                            this.cfg.push_coverage_span_marker(block, this.source_info(expr_span));
+                        }
+                        this.then_else_break(
+                            block,
+                            &this.thir[arg],
+                            temp_scope_override,
+                            local_scope,
+                            variable_source_info,
+                        )
+                    });
+                this.break_for_else(success_block, break_scope, variable_source_info);
+                failure_block.unit()
+            }
             ExprKind::Scope { region_scope, lint_level, value } => {
                 let region_scope = (region_scope, this.source_info(expr_span));
                 this.in_scope(region_scope, lint_level, |this| {
@@ -76,6 +118,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     )
                 })
             }
+            ExprKind::Use { source } => this.then_else_break(
+                block,
+                &this.thir[source],
+                temp_scope_override,
+                break_scope,
+                variable_source_info,
+            ),
             ExprKind::Let { expr, ref pat } => this.lower_let_expr(
                 block,
                 &this.thir[expr],
@@ -113,7 +162,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// [ 0. Pre-match ]
     ///        |
     /// [ 1. Evaluate Scrutinee (expression being matched on) ]
-    /// [ (fake read of scrutinee) ]
+    /// [ (PlaceMention of scrutinee) ]
     ///        |
     /// [ 2. Decision tree -- check discriminants ] <--------+
     ///        |                                             |
@@ -140,7 +189,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     ///
     /// We generate MIR in the following steps:
     ///
-    /// 1. Evaluate the scrutinee and add the fake read of it ([Builder::lower_scrutinee]).
+    /// 1. Evaluate the scrutinee and add the PlaceMention of it ([Builder::lower_scrutinee]).
     /// 2. Create the decision tree ([Builder::lower_match_tree]).
     /// 3. Determine the fake borrows that are needed from the places that were
     ///    matched against and create the required temporaries for them
@@ -168,7 +217,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let scrutinee_place =
             unpack!(block = self.lower_scrutinee(block, scrutinee, scrutinee_span,));
 
-        let mut arm_candidates = self.create_match_candidates(&scrutinee_place, &arms);
+        let mut arm_candidates = self.create_match_candidates(&scrutinee_place, arms);
 
         let match_has_guard = arm_candidates.iter().any(|(_, candidate)| candidate.has_guard);
         let mut candidates =
@@ -179,6 +228,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let fake_borrow_temps = self.lower_match_tree(
             block,
             scrutinee_span,
+            &scrutinee_place,
             match_start_span,
             match_has_guard,
             &mut candidates,
@@ -194,7 +244,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         )
     }
 
-    /// Evaluate the scrutinee and add the fake read of it.
+    /// Evaluate the scrutinee and add the PlaceMention for it.
     fn lower_scrutinee(
         &mut self,
         mut block: BasicBlock,
@@ -202,26 +252,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         scrutinee_span: Span,
     ) -> BlockAnd<PlaceBuilder<'tcx>> {
         let scrutinee_place_builder = unpack!(block = self.as_place_builder(block, scrutinee));
-        // Matching on a `scrutinee_place` with an uninhabited type doesn't
-        // generate any memory reads by itself, and so if the place "expression"
-        // contains unsafe operations like raw pointer dereferences or union
-        // field projections, we wouldn't know to require an `unsafe` block
-        // around a `match` equivalent to `std::intrinsics::unreachable()`.
-        // See issue #47412 for this hole being discovered in the wild.
-        //
-        // HACK(eddyb) Work around the above issue by adding a dummy inspection
-        // of `scrutinee_place`, specifically by applying `ReadForMatch`.
-        //
-        // NOTE: ReadForMatch also checks that the scrutinee is initialized.
-        // This is currently needed to not allow matching on an uninitialized,
-        // uninhabited value. If we get never patterns, those will check that
-        // the place is initialized, and so this read would only be used to
-        // check safety.
-        let cause_matched_place = FakeReadCause::ForMatchedPlace(None);
-        let source_info = self.source_info(scrutinee_span);
-
         if let Some(scrutinee_place) = scrutinee_place_builder.try_to_place(self) {
-            self.cfg.push_fake_read(block, source_info, cause_matched_place, scrutinee_place);
+            let source_info = self.source_info(scrutinee_span);
+            self.cfg.push_place_mention(block, source_info, scrutinee_place);
         }
 
         block.and(scrutinee_place_builder)
@@ -260,6 +293,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         &mut self,
         block: BasicBlock,
         scrutinee_span: Span,
+        scrutinee_place_builder: &PlaceBuilder<'tcx>,
         match_start_span: Span,
         match_has_guard: bool,
         candidates: &mut [&mut Candidate<'pat, 'tcx>],
@@ -287,6 +321,33 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             // otherwise block. Match checking will ensure this is actually
             // unreachable.
             let source_info = self.source_info(scrutinee_span);
+
+            // Matching on a `scrutinee_place` with an uninhabited type doesn't
+            // generate any memory reads by itself, and so if the place "expression"
+            // contains unsafe operations like raw pointer dereferences or union
+            // field projections, we wouldn't know to require an `unsafe` block
+            // around a `match` equivalent to `std::intrinsics::unreachable()`.
+            // See issue #47412 for this hole being discovered in the wild.
+            //
+            // HACK(eddyb) Work around the above issue by adding a dummy inspection
+            // of `scrutinee_place`, specifically by applying `ReadForMatch`.
+            //
+            // NOTE: ReadForMatch also checks that the scrutinee is initialized.
+            // This is currently needed to not allow matching on an uninitialized,
+            // uninhabited value. If we get never patterns, those will check that
+            // the place is initialized, and so this read would only be used to
+            // check safety.
+            let cause_matched_place = FakeReadCause::ForMatchedPlace(None);
+
+            if let Some(scrutinee_place) = scrutinee_place_builder.try_to_place(self) {
+                self.cfg.push_fake_read(
+                    otherwise_block,
+                    source_info,
+                    cause_matched_place,
+                    scrutinee_place,
+                );
+            }
+
             self.cfg.terminate(otherwise_block, source_info, TerminatorKind::Unreachable);
         }
 
@@ -368,7 +429,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         this.source_scope = source_scope;
                     }
 
-                    this.expr_into_dest(destination, arm_block, &&this.thir[arm.body])
+                    this.expr_into_dest(destination, arm_block, &this.thir[arm.body])
                 })
             })
             .collect();
@@ -449,7 +510,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     let binding_end = self.bind_and_guard_matched_candidate(
                         leaf_candidate,
                         parent_bindings,
-                        &fake_borrow_temps,
+                        fake_borrow_temps,
                         scrutinee_span,
                         arm_match_scope,
                         schedule_drops,
@@ -555,8 +616,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
 
             _ => {
-                let place_builder = unpack!(block = self.as_place_builder(block, initializer));
-                self.place_into_pattern(block, &irrefutable_pat, place_builder, true)
+                let place_builder =
+                    unpack!(block = self.lower_scrutinee(block, initializer, initializer.span));
+                self.place_into_pattern(block, irrefutable_pat, place_builder, true)
             }
         }
     }
@@ -568,21 +630,23 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         initializer: PlaceBuilder<'tcx>,
         set_match_place: bool,
     ) -> BlockAnd<()> {
-        let mut candidate = Candidate::new(initializer.clone(), &irrefutable_pat, false, self);
+        let mut candidate = Candidate::new(initializer.clone(), irrefutable_pat, false, self);
         let fake_borrow_temps = self.lower_match_tree(
             block,
             irrefutable_pat.span,
+            &initializer,
             irrefutable_pat.span,
             false,
             &mut [&mut candidate],
         );
+
         // For matches and function arguments, the place that is being matched
         // can be set when creating the variables. But the place for
         // let PATTERN = ... might not even exist until we do the assignment.
         // so we set it here instead.
         if set_match_place {
-            let mut candidate_ref = &candidate;
-            while let Some(next) = {
+            let mut next = Some(&candidate);
+            while let Some(candidate_ref) = next.take() {
                 for binding in &candidate_ref.bindings {
                     let local = self.var_local_id(binding.var_id, OutsideGuard);
                     // `try_to_place` may fail if it is unable to resolve the given
@@ -600,9 +664,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     // };
                     // ```
                     if let Some(place) = initializer.try_to_place(self) {
-                        let Some(box LocalInfo::User(ClearCrossCrate::Set(BindingForm::Var(
-                            VarBindingForm { opt_match_place: Some((ref mut match_place, _)), .. },
-                        )))) = self.local_decls[local].local_info else {
+                        let LocalInfo::User(BindingForm::Var(VarBindingForm {
+                            opt_match_place: Some((ref mut match_place, _)),
+                            ..
+                        })) = **self.local_decls[local].local_info.as_mut().assert_crate_local()
+                        else {
                             bug!("Let binding to non-user variable.")
                         };
                         *match_place = Some(place);
@@ -610,9 +676,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 }
                 // All of the subcandidates should bind the same locals, so we
                 // only visit the first one.
-                candidate_ref.subcandidates.get(0)
-            } {
-                candidate_ref = next;
+                next = candidate_ref.subcandidates.get(0)
             }
         }
 
@@ -641,7 +705,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         opt_match_place: Option<(Option<&Place<'tcx>>, Span)>,
     ) -> Option<SourceScope> {
         self.visit_primary_bindings(
-            &pattern,
+            pattern,
             UserTypeProjections::none(),
             &mut |this, mutability, name, mode, var, span, ty, user_ty| {
                 if visibility_scope.is_none() {
@@ -685,7 +749,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         self.cfg.push(block, Statement { source_info, kind: StatementKind::StorageLive(local_id) });
         // Although there is almost always scope for given variable in corner cases
         // like #92893 we might get variable with no scope.
-        if let Some(region_scope) = self.region_scope_tree.var_scope(var.0.local_id) && schedule_drop {
+        if let Some(region_scope) = self.region_scope_tree.var_scope(var.0.local_id)
+            && schedule_drop
+        {
             self.schedule_drop(span, region_scope, local_id, DropKind::Storage);
         }
         Place::from(local_id)
@@ -763,7 +829,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 }
             }
 
-            PatKind::Constant { .. } | PatKind::Range { .. } | PatKind::Wild => {}
+            PatKind::Constant { .. }
+            | PatKind::Range { .. }
+            | PatKind::Wild
+            | PatKind::Never
+            | PatKind::Error(_) => {}
 
             PatKind::Deref { ref subpattern } => {
                 self.visit_primary_bindings(subpattern, pattern_user_ty.deref(), f);
@@ -791,6 +861,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 self.visit_primary_bindings(subpattern, subpattern_user_ty, f)
             }
 
+            PatKind::InlineConstant { ref subpattern, .. } => {
+                self.visit_primary_bindings(subpattern, pattern_user_ty, f)
+            }
+
             PatKind::Leaf { ref subpatterns } => {
                 for subpattern in subpatterns {
                     let subpattern_user_ty = pattern_user_ty.clone().leaf(subpattern.field);
@@ -799,7 +873,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 }
             }
 
-            PatKind::Variant { adt_def, substs: _, variant_index, ref subpatterns } => {
+            PatKind::Variant { adt_def, args: _, variant_index, ref subpatterns } => {
                 for subpattern in subpatterns {
                     let subpattern_user_ty =
                         pattern_user_ty.clone().variant(adt_def, variant_index, subpattern.field);
@@ -954,20 +1028,20 @@ enum TestKind<'tcx> {
         ///
         /// For `bool` we always generate two edges, one for `true` and one for
         /// `false`.
-        options: FxIndexMap<ConstantKind<'tcx>, u128>,
+        options: FxIndexMap<Const<'tcx>, u128>,
     },
 
     /// Test for equality with value, possibly after an unsizing coercion to
     /// `ty`,
     Eq {
-        value: ConstantKind<'tcx>,
+        value: Const<'tcx>,
         // Integer types are handled by `SwitchInt`, and constants with ADT
         // types are converted back into patterns, so this can only be `&str`,
         // `&[T]`, `f32` or `f64`.
         ty: Ty<'tcx>,
     },
 
-    /// Test whether the value falls within an inclusive or exclusive range
+    /// Test whether the value falls within an inclusive or exclusive range.
     Range(Box<PatRange<'tcx>>),
 
     /// Test that the length of the slice is equal to `len`.
@@ -1571,9 +1645,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // may want to add cases based on the candidates that are
         // available
         match test.kind {
-            TestKind::SwitchInt { switch_ty, ref mut options } => {
+            TestKind::SwitchInt { switch_ty: _, ref mut options } => {
                 for candidate in candidates.iter() {
-                    if !self.add_cases_to_switch(&match_place, candidate, switch_ty, options) {
+                    if !self.add_cases_to_switch(&match_place, candidate, options) {
                         break;
                     }
                 }
@@ -1620,66 +1694,56 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // at least the first candidate ought to be tested
         assert!(
             total_candidate_count > candidates.len(),
-            "{}, {:#?}",
-            total_candidate_count,
-            candidates
+            "{total_candidate_count}, {candidates:#?}"
         );
         debug!("tested_candidates: {}", total_candidate_count - candidates.len());
         debug!("untested_candidates: {}", candidates.len());
 
-        // HACK(matthewjasper) This is a closure so that we can let the test
-        // create its blocks before the rest of the match. This currently
-        // improves the speed of llvm when optimizing long string literal
-        // matches
-        let make_target_blocks = move |this: &mut Self| -> Vec<BasicBlock> {
-            // The block that we should branch to if none of the
-            // `target_candidates` match. This is either the block where we
-            // start matching the untested candidates if there are any,
-            // otherwise it's the `otherwise_block`.
-            let remainder_start = &mut None;
-            let remainder_start =
-                if candidates.is_empty() { &mut *otherwise_block } else { remainder_start };
+        // The block that we should branch to if none of the
+        // `target_candidates` match. This is either the block where we
+        // start matching the untested candidates if there are any,
+        // otherwise it's the `otherwise_block`.
+        let remainder_start = &mut None;
+        let remainder_start =
+            if candidates.is_empty() { &mut *otherwise_block } else { remainder_start };
 
-            // For each outcome of test, process the candidates that still
-            // apply. Collect a list of blocks where control flow will
-            // branch if one of the `target_candidate` sets is not
-            // exhaustive.
-            let target_blocks: Vec<_> = target_candidates
-                .into_iter()
-                .map(|mut candidates| {
-                    if !candidates.is_empty() {
-                        let candidate_start = this.cfg.start_new_block();
-                        this.match_candidates(
-                            span,
-                            scrutinee_span,
-                            candidate_start,
-                            remainder_start,
-                            &mut *candidates,
-                            fake_borrows,
-                        );
-                        candidate_start
-                    } else {
-                        *remainder_start.get_or_insert_with(|| this.cfg.start_new_block())
-                    }
-                })
-                .collect();
+        // For each outcome of test, process the candidates that still
+        // apply. Collect a list of blocks where control flow will
+        // branch if one of the `target_candidate` sets is not
+        // exhaustive.
+        let target_blocks: Vec<_> = target_candidates
+            .into_iter()
+            .map(|mut candidates| {
+                if !candidates.is_empty() {
+                    let candidate_start = self.cfg.start_new_block();
+                    self.match_candidates(
+                        span,
+                        scrutinee_span,
+                        candidate_start,
+                        remainder_start,
+                        &mut *candidates,
+                        fake_borrows,
+                    );
+                    candidate_start
+                } else {
+                    *remainder_start.get_or_insert_with(|| self.cfg.start_new_block())
+                }
+            })
+            .collect();
 
-            if !candidates.is_empty() {
-                let remainder_start = remainder_start.unwrap_or_else(|| this.cfg.start_new_block());
-                this.match_candidates(
-                    span,
-                    scrutinee_span,
-                    remainder_start,
-                    otherwise_block,
-                    candidates,
-                    fake_borrows,
-                );
-            };
+        if !candidates.is_empty() {
+            let remainder_start = remainder_start.unwrap_or_else(|| self.cfg.start_new_block());
+            self.match_candidates(
+                span,
+                scrutinee_span,
+                remainder_start,
+                otherwise_block,
+                candidates,
+                fake_borrows,
+            );
+        }
 
-            target_blocks
-        };
-
-        self.perform_test(span, scrutinee_span, block, &match_place, &test, make_target_blocks);
+        self.perform_test(span, scrutinee_span, block, &match_place, &test, target_blocks);
     }
 
     /// Determine the fake borrows that are needed from a set of places that
@@ -1746,10 +1810,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     projection: tcx.mk_place_elems(matched_place_ref.projection),
                 };
                 let fake_borrow_deref_ty = matched_place.ty(&self.local_decls, tcx).ty;
-                let fake_borrow_ty = tcx.mk_imm_ref(tcx.lifetimes.re_erased, fake_borrow_deref_ty);
+                let fake_borrow_ty =
+                    Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, fake_borrow_deref_ty);
                 let mut fake_borrow_temp = LocalDecl::new(fake_borrow_ty, temp_span);
-                fake_borrow_temp.internal = self.local_decls[matched_place.local].internal;
-                fake_borrow_temp.local_info = Some(Box::new(LocalInfo::FakeBorrow));
+                fake_borrow_temp.local_info = ClearCrossCrate::Set(Box::new(LocalInfo::FakeBorrow));
                 let fake_borrow_temp = self.local_decls.push(fake_borrow_temp);
 
                 (matched_place, fake_borrow_temp)
@@ -1777,12 +1841,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let expr_span = expr.span;
         let expr_place_builder = unpack!(block = self.lower_scrutinee(block, expr, expr_span));
         let wildcard = Pat::wildcard_from_ty(pat.ty);
-        let mut guard_candidate = Candidate::new(expr_place_builder.clone(), &pat, false, self);
+        let mut guard_candidate = Candidate::new(expr_place_builder.clone(), pat, false, self);
         let mut otherwise_candidate =
             Candidate::new(expr_place_builder.clone(), &wildcard, false, self);
         let fake_borrow_temps = self.lower_match_tree(
             block,
             pat.span,
+            &expr_place_builder,
             pat.span,
             false,
             &mut [&mut guard_candidate, &mut otherwise_candidate],
@@ -1881,6 +1946,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // let place = Foo::new();
         // match place { Foo { .. } if { let tmp1 = &place; inspect(*tmp1) }
         //     => { let tmp2 = place; feed(tmp2) }, ... }
+        // ```
         //
         // And an input like:
         //
@@ -1953,7 +2019,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             let re_erased = tcx.lifetimes.re_erased;
             let scrutinee_source_info = self.source_info(scrutinee_span);
             for &(place, temp) in fake_borrows {
-                let borrow = Rvalue::Ref(re_erased, BorrowKind::Shallow, place);
+                let borrow = Rvalue::Ref(re_erased, BorrowKind::Fake, place);
                 self.cfg.push_assign(block, scrutinee_source_info, Place::from(temp), borrow);
             }
 
@@ -2217,9 +2283,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             ty: var_ty,
             user_ty: if user_ty.is_empty() { None } else { Some(Box::new(user_ty)) },
             source_info,
-            internal: false,
-            is_block_tail: None,
-            local_info: Some(Box::new(LocalInfo::User(ClearCrossCrate::Set(BindingForm::Var(
+            local_info: ClearCrossCrate::Set(Box::new(LocalInfo::User(BindingForm::Var(
                 VarBindingForm {
                     binding_mode,
                     // hypothetically, `visit_primary_bindings` could try to unzip
@@ -2230,32 +2294,34 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     opt_match_place,
                     pat_span,
                 },
-            ))))),
+            )))),
         };
         let for_arm_body = self.local_decls.push(local);
         self.var_debug_info.push(VarDebugInfo {
             name,
             source_info: debug_source_info,
             value: VarDebugInfoContents::Place(for_arm_body.into()),
+            composite: None,
+            argument_index: None,
         });
         let locals = if has_guard.0 {
             let ref_for_guard = self.local_decls.push(LocalDecl::<'tcx> {
                 // This variable isn't mutated but has a name, so has to be
                 // immutable to avoid the unused mut lint.
                 mutability: Mutability::Not,
-                ty: tcx.mk_imm_ref(tcx.lifetimes.re_erased, var_ty),
+                ty: Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, var_ty),
                 user_ty: None,
                 source_info,
-                internal: false,
-                is_block_tail: None,
-                local_info: Some(Box::new(LocalInfo::User(ClearCrossCrate::Set(
+                local_info: ClearCrossCrate::Set(Box::new(LocalInfo::User(
                     BindingForm::RefForGuard,
-                )))),
+                ))),
             });
             self.var_debug_info.push(VarDebugInfo {
                 name,
                 source_info: debug_source_info,
                 value: VarDebugInfoContents::Place(ref_for_guard.into()),
+                composite: None,
+                argument_index: None,
             });
             LocalsForNode::ForGuard { ref_for_guard, for_arm_body }
         } else {
@@ -2283,6 +2349,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             let fake_borrow_temps = this.lower_match_tree(
                 block,
                 initializer_span,
+                &scrutinee,
                 pattern.span,
                 false,
                 &mut [&mut candidate, &mut wildcard],

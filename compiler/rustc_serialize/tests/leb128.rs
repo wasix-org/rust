@@ -1,8 +1,5 @@
-#![feature(maybe_uninit_slice)]
-#![feature(maybe_uninit_uninit_array)]
-
 use rustc_serialize::leb128::*;
-use std::mem::MaybeUninit;
+use rustc_serialize::Decoder;
 
 macro_rules! impl_test_unsigned_leb128 {
     ($test_name:ident, $write_fn_name:ident, $read_fn_name:ident, $int_ty:ident) => {
@@ -23,17 +20,18 @@ macro_rules! impl_test_unsigned_leb128 {
 
             let mut stream = Vec::new();
 
+            let mut buf = Default::default();
             for &x in &values {
-                let mut buf = MaybeUninit::uninit_array();
-                stream.extend($write_fn_name(&mut buf, x));
+                let n = $write_fn_name(&mut buf, x);
+                stream.extend(&buf[..n]);
             }
 
-            let mut position = 0;
+            let mut decoder = rustc_serialize::opaque::MemDecoder::new(&stream, 0);
             for &expected in &values {
-                let actual = $read_fn_name(&stream, &mut position);
+                let actual = $read_fn_name(&mut decoder);
                 assert_eq!(expected, actual);
             }
-            assert_eq!(stream.len(), position);
+            assert_eq!(stream.len(), decoder.position());
         }
     };
 }
@@ -69,17 +67,18 @@ macro_rules! impl_test_signed_leb128 {
 
             let mut stream = Vec::new();
 
+            let mut buf = Default::default();
             for &x in &values {
-                let mut buf = MaybeUninit::uninit_array();
-                stream.extend($write_fn_name(&mut buf, x));
+                let n = $write_fn_name(&mut buf, x);
+                stream.extend(&buf[..n]);
             }
 
-            let mut position = 0;
+            let mut decoder = rustc_serialize::opaque::MemDecoder::new(&stream, 0);
             for &expected in &values {
-                let actual = $read_fn_name(&stream, &mut position);
+                let actual = $read_fn_name(&mut decoder);
                 assert_eq!(expected, actual);
             }
-            assert_eq!(stream.len(), position);
+            assert_eq!(stream.len(), decoder.position());
         }
     };
 }

@@ -1,4 +1,4 @@
-use hir::{HasSource, InFile, Semantics};
+use hir::{HasSource, InFile, InRealFile, Semantics};
 use ide_db::{
     base_db::{FileId, FilePosition, FileRange},
     defs::Definition,
@@ -94,10 +94,9 @@ pub(crate) fn annotations(
                         enum_
                             .variants(db)
                             .into_iter()
-                            .map(|variant| {
+                            .filter_map(|variant| {
                                 variant.source(db).and_then(|node| name_range(db, node, file_id))
                             })
-                            .flatten()
                             .for_each(|range| {
                                 let (annotation_range, target_position) = mk_ranges(range);
                                 annotations.push(Annotation {
@@ -150,8 +149,8 @@ pub(crate) fn annotations(
             node: InFile<T>,
             source_file_id: FileId,
         ) -> Option<(TextRange, Option<TextRange>)> {
-            if let Some(InFile { file_id, value }) = node.original_ast_node(db) {
-                if file_id == source_file_id.into() {
+            if let Some(InRealFile { file_id, value }) = node.original_ast_node(db) {
+                if file_id == source_file_id {
                     return Some((
                         value.syntax().text_range(),
                         value.name().map(|name| name.syntax().text_range()),

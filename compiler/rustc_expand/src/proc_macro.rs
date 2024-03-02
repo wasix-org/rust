@@ -54,7 +54,7 @@ impl base::BangProcMacro for BangProcMacro {
     ) -> Result<TokenStream, ErrorGuaranteed> {
         let _timer =
             ecx.sess.prof.generic_activity_with_arg_recorder("expand_proc_macro", |recorder| {
-                recorder.record_arg_with_span(ecx.expansion_descr(), span);
+                recorder.record_arg_with_span(ecx.sess.source_map(), ecx.expansion_descr(), span);
             });
 
         let proc_macro_backtrace = ecx.ecfg.proc_macro_backtrace;
@@ -85,7 +85,7 @@ impl base::AttrProcMacro for AttrProcMacro {
     ) -> Result<TokenStream, ErrorGuaranteed> {
         let _timer =
             ecx.sess.prof.generic_activity_with_arg_recorder("expand_proc_macro", |recorder| {
-                recorder.record_arg_with_span(ecx.expansion_descr(), span);
+                recorder.record_arg_with_span(ecx.sess.source_map(), ecx.expansion_descr(), span);
             });
 
         let proc_macro_backtrace = ecx.ecfg.proc_macro_backtrace;
@@ -95,7 +95,7 @@ impl base::AttrProcMacro for AttrProcMacro {
             |e| {
                 let mut err = ecx.struct_span_err(span, "custom attribute panicked");
                 if let Some(s) = e.as_str() {
-                    err.help(&format!("message: {}", s));
+                    err.help(format!("message: {s}"));
                 }
                 err.emit()
             },
@@ -126,7 +126,7 @@ impl MultiItemModifier for DeriveProcMacro {
                 Annotatable::Stmt(stmt) => token::NtStmt(stmt),
                 _ => unreachable!(),
             };
-            TokenStream::token_alone(token::Interpolated(Lrc::new(nt)), DUMMY_SP)
+            TokenStream::token_alone(token::Interpolated(Lrc::new((nt, span))), DUMMY_SP)
         } else {
             item.to_tokens()
         };
@@ -134,7 +134,11 @@ impl MultiItemModifier for DeriveProcMacro {
         let stream = {
             let _timer =
                 ecx.sess.prof.generic_activity_with_arg_recorder("expand_proc_macro", |recorder| {
-                    recorder.record_arg_with_span(ecx.expansion_descr(), span);
+                    recorder.record_arg_with_span(
+                        ecx.sess.source_map(),
+                        ecx.expansion_descr(),
+                        span,
+                    );
                 });
             let proc_macro_backtrace = ecx.ecfg.proc_macro_backtrace;
             let strategy = exec_strategy(ecx);
@@ -144,7 +148,7 @@ impl MultiItemModifier for DeriveProcMacro {
                 Err(e) => {
                     let mut err = ecx.struct_span_err(span, "proc-macro derive panicked");
                     if let Some(s) = e.as_str() {
-                        err.help(&format!("message: {}", s));
+                        err.help(format!("message: {s}"));
                     }
                     err.emit();
                     return ExpandResult::Ready(vec![]);
@@ -152,7 +156,7 @@ impl MultiItemModifier for DeriveProcMacro {
             }
         };
 
-        let error_count_before = ecx.sess.parse_sess.span_diagnostic.err_count();
+        let error_count_before = ecx.sess.dcx().err_count();
         let mut parser =
             rustc_parse::stream_to_parser(&ecx.sess.parse_sess, stream, Some("proc-macro derive"));
         let mut items = vec![];
@@ -175,7 +179,7 @@ impl MultiItemModifier for DeriveProcMacro {
         }
 
         // fail if there have been errors emitted
-        if ecx.sess.parse_sess.span_diagnostic.err_count() > error_count_before {
+        if ecx.sess.dcx().err_count() > error_count_before {
             ecx.sess.emit_err(errors::ProcMacroDeriveTokens { span });
         }
 

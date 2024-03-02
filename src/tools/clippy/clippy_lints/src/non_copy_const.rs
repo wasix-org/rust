@@ -1,26 +1,26 @@
-//! Checks for uses of const which the type is not `Freeze` (`Cell`-free).
+//! Checks for usage of const which the type is not `Freeze` (`Cell`-free).
 //!
 //! This lint is **warn** by default.
 
 use std::ptr;
 
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::in_constant;
 use clippy_utils::macros::macro_backtrace;
-use if_chain::if_chain;
+use clippy_utils::{def_path_def_ids, in_constant};
+use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_hir::{
     BodyId, Expr, ExprKind, HirId, Impl, ImplItem, ImplItemKind, Item, ItemKind, Node, TraitItem, TraitItemKind, UnOp,
 };
-use rustc_hir_analysis::hir_ty_to_ty;
 use rustc_lint::{LateContext, LateLintPass, Lint};
-use rustc_middle::mir;
-use rustc_middle::mir::interpret::{ConstValue, ErrorHandled};
+use rustc_middle::mir::interpret::{ErrorHandled, EvalToValTreeResult, GlobalId};
+use rustc_middle::query::Key;
 use rustc_middle::ty::adjustment::Adjust;
-use rustc_middle::ty::{self, Ty};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_session::impl_lint_pass;
 use rustc_span::{sym, InnerSpan, Span};
+use rustc_target::abi::VariantIdx;
 
 // FIXME: this is a correctness problem but there's no suitable
 // warn-by-default category.
@@ -57,7 +57,7 @@ declare_clippy_lint! {
     /// [#5812](https://github.com/rust-lang/rust-clippy/issues/5812) and
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     ///
     /// const CONST_ATOM: AtomicUsize = AtomicUsize::new(12);
@@ -66,7 +66,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     /// static STATIC_ATOM: AtomicUsize = AtomicUsize::new(15);
     /// STATIC_ATOM.store(9, SeqCst);
@@ -104,7 +104,7 @@ declare_clippy_lint! {
     /// [#3825](https://github.com/rust-lang/rust-clippy/issues/3825)
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     /// const CONST_ATOM: AtomicUsize = AtomicUsize::new(12);
     ///
@@ -113,7 +113,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     /// const CONST_ATOM: AtomicUsize = AtomicUsize::new(12);
     ///
@@ -125,83 +125,6 @@ declare_clippy_lint! {
     pub BORROW_INTERIOR_MUTABLE_CONST,
     style,
     "referencing `const` with interior mutability"
-}
-
-fn is_unfrozen<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
-    // Ignore types whose layout is unknown since `is_freeze` reports every generic types as `!Freeze`,
-    // making it indistinguishable from `UnsafeCell`. i.e. it isn't a tool to prove a type is
-    // 'unfrozen'. However, this code causes a false negative in which
-    // a type contains a layout-unknown type, but also an unsafe cell like `const CELL: Cell<T>`.
-    // Yet, it's better than `ty.has_type_flags(TypeFlags::HAS_TY_PARAM | TypeFlags::HAS_PROJECTION)`
-    // since it works when a pointer indirection involves (`Cell<*const T>`).
-    // Making up a `ParamEnv` where every generic params and assoc types are `Freeze`is another option;
-    // but I'm not sure whether it's a decent way, if possible.
-    cx.tcx.layout_of(cx.param_env.and(ty)).is_ok() && !ty.is_freeze(cx.tcx, cx.param_env)
-}
-
-fn is_value_unfrozen_raw<'tcx>(
-    cx: &LateContext<'tcx>,
-    result: Result<ConstValue<'tcx>, ErrorHandled>,
-    ty: Ty<'tcx>,
-) -> bool {
-    fn inner<'tcx>(cx: &LateContext<'tcx>, val: mir::ConstantKind<'tcx>) -> bool {
-        match val.ty().kind() {
-            // the fact that we have to dig into every structs to search enums
-            // leads us to the point checking `UnsafeCell` directly is the only option.
-            ty::Adt(ty_def, ..) if ty_def.is_unsafe_cell() => true,
-            // As of 2022-09-08 miri doesn't track which union field is active so there's no safe way to check the
-            // contained value.
-            ty::Adt(def, ..) if def.is_union() => false,
-            ty::Array(..) | ty::Adt(..) | ty::Tuple(..) => {
-                let val = cx.tcx.destructure_mir_constant(cx.param_env, val);
-                val.fields.iter().any(|field| inner(cx, *field))
-            },
-            _ => false,
-        }
-    }
-    result.map_or_else(
-        |err| {
-            // Consider `TooGeneric` cases as being unfrozen.
-            // This causes a false positive where an assoc const whose type is unfrozen
-            // have a value that is a frozen variant with a generic param (an example is
-            // `declare_interior_mutable_const::enums::BothOfCellAndGeneric::GENERIC_VARIANT`).
-            // However, it prevents a number of false negatives that is, I think, important:
-            // 1. assoc consts in trait defs referring to consts of themselves
-            //    (an example is `declare_interior_mutable_const::traits::ConcreteTypes::ANOTHER_ATOMIC`).
-            // 2. a path expr referring to assoc consts whose type is doesn't have
-            //    any frozen variants in trait defs (i.e. without substitute for `Self`).
-            //    (e.g. borrowing `borrow_interior_mutable_const::trait::ConcreteTypes::ATOMIC`)
-            // 3. similar to the false positive above;
-            //    but the value is an unfrozen variant, or the type has no enums. (An example is
-            //    `declare_interior_mutable_const::enums::BothOfCellAndGeneric::UNFROZEN_VARIANT`
-            //    and `declare_interior_mutable_const::enums::BothOfCellAndGeneric::NO_ENUM`).
-            // One might be able to prevent these FNs correctly, and replace this with `false`;
-            // e.g. implementing `has_frozen_variant` described above, and not running this function
-            // when the type doesn't have any frozen variants would be the 'correct' way for the 2nd
-            // case (that actually removes another suboptimal behavior (I won't say 'false positive') where,
-            // similar to 2., but with the a frozen variant) (e.g. borrowing
-            // `borrow_interior_mutable_const::enums::AssocConsts::TO_BE_FROZEN_VARIANT`).
-            // I chose this way because unfrozen enums as assoc consts are rare (or, hopefully, none).
-            err == ErrorHandled::TooGeneric
-        },
-        |val| inner(cx, mir::ConstantKind::from_value(val, ty)),
-    )
-}
-
-fn is_value_unfrozen_poly<'tcx>(cx: &LateContext<'tcx>, body_id: BodyId, ty: Ty<'tcx>) -> bool {
-    let result = cx.tcx.const_eval_poly(body_id.hir_id.owner.to_def_id());
-    is_value_unfrozen_raw(cx, result, ty)
-}
-
-fn is_value_unfrozen_expr<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId, def_id: DefId, ty: Ty<'tcx>) -> bool {
-    let substs = cx.typeck_results().node_substs(hir_id);
-
-    let result = cx.tcx.const_eval_resolve(
-        cx.param_env,
-        mir::UnevaluatedConst::new(ty::WithOptConstParam::unknown(def_id), substs),
-        None,
-    );
-    is_value_unfrozen_raw(cx, result, ty)
 }
 
 #[derive(Copy, Clone)]
@@ -248,26 +171,191 @@ fn lint(cx: &LateContext<'_>, source: Source) {
     });
 }
 
-declare_lint_pass!(NonCopyConst => [DECLARE_INTERIOR_MUTABLE_CONST, BORROW_INTERIOR_MUTABLE_CONST]);
+#[derive(Clone)]
+pub struct NonCopyConst {
+    ignore_interior_mutability: Vec<String>,
+    ignore_mut_def_ids: FxHashSet<DefId>,
+}
+
+impl_lint_pass!(NonCopyConst => [DECLARE_INTERIOR_MUTABLE_CONST, BORROW_INTERIOR_MUTABLE_CONST]);
+
+impl NonCopyConst {
+    pub fn new(ignore_interior_mutability: Vec<String>) -> Self {
+        Self {
+            ignore_interior_mutability,
+            ignore_mut_def_ids: FxHashSet::default(),
+        }
+    }
+
+    fn is_ty_ignored(&self, ty: Ty<'_>) -> bool {
+        matches!(ty.ty_adt_id(), Some(adt_id) if self.ignore_mut_def_ids.contains(&adt_id))
+    }
+
+    fn is_unfrozen<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
+        // Ignore types whose layout is unknown since `is_freeze` reports every generic types as `!Freeze`,
+        // making it indistinguishable from `UnsafeCell`. i.e. it isn't a tool to prove a type is
+        // 'unfrozen'. However, this code causes a false negative in which
+        // a type contains a layout-unknown type, but also an unsafe cell like `const CELL: Cell<T>`.
+        // Yet, it's better than `ty.has_type_flags(TypeFlags::HAS_TY_PARAM | TypeFlags::HAS_PROJECTION)`
+        // since it works when a pointer indirection involves (`Cell<*const T>`).
+        // Making up a `ParamEnv` where every generic params and assoc types are `Freeze`is another option;
+        // but I'm not sure whether it's a decent way, if possible.
+        cx.tcx.layout_of(cx.param_env.and(ty)).is_ok() && !ty.is_freeze(cx.tcx, cx.param_env)
+    }
+
+    fn is_value_unfrozen_raw_inner<'tcx>(&self, cx: &LateContext<'tcx>, val: ty::ValTree<'tcx>, ty: Ty<'tcx>) -> bool {
+        if self.is_ty_ignored(ty) {
+            return false;
+        }
+        match *ty.kind() {
+            // the fact that we have to dig into every structs to search enums
+            // leads us to the point checking `UnsafeCell` directly is the only option.
+            ty::Adt(ty_def, ..) if ty_def.is_unsafe_cell() => true,
+            // As of 2022-09-08 miri doesn't track which union field is active so there's no safe way to check the
+            // contained value.
+            ty::Adt(def, ..) if def.is_union() => false,
+            ty::Array(ty, _) => val
+                .unwrap_branch()
+                .iter()
+                .any(|field| self.is_value_unfrozen_raw_inner(cx, *field, ty)),
+            ty::Adt(def, _) if def.is_union() => false,
+            ty::Adt(def, args) if def.is_enum() => {
+                let (&variant_index, fields) = val.unwrap_branch().split_first().unwrap();
+                let variant_index = VariantIdx::from_u32(variant_index.unwrap_leaf().try_to_u32().ok().unwrap());
+                fields
+                    .iter()
+                    .copied()
+                    .zip(
+                        def.variants()[variant_index]
+                            .fields
+                            .iter()
+                            .map(|field| field.ty(cx.tcx, args)),
+                    )
+                    .any(|(field, ty)| self.is_value_unfrozen_raw_inner(cx, field, ty))
+            },
+            ty::Adt(def, args) => val
+                .unwrap_branch()
+                .iter()
+                .zip(def.non_enum_variant().fields.iter().map(|field| field.ty(cx.tcx, args)))
+                .any(|(field, ty)| self.is_value_unfrozen_raw_inner(cx, *field, ty)),
+            ty::Tuple(tys) => val
+                .unwrap_branch()
+                .iter()
+                .zip(tys)
+                .any(|(field, ty)| self.is_value_unfrozen_raw_inner(cx, *field, ty)),
+            _ => false,
+        }
+    }
+
+    fn is_value_unfrozen_raw<'tcx>(
+        &self,
+        cx: &LateContext<'tcx>,
+        result: Result<Option<ty::ValTree<'tcx>>, ErrorHandled>,
+        ty: Ty<'tcx>,
+    ) -> bool {
+        result.map_or_else(
+            |err| {
+                // Consider `TooGeneric` cases as being unfrozen.
+                // This causes a false positive where an assoc const whose type is unfrozen
+                // have a value that is a frozen variant with a generic param (an example is
+                // `declare_interior_mutable_const::enums::BothOfCellAndGeneric::GENERIC_VARIANT`).
+                // However, it prevents a number of false negatives that is, I think, important:
+                // 1. assoc consts in trait defs referring to consts of themselves (an example is
+                //    `declare_interior_mutable_const::traits::ConcreteTypes::ANOTHER_ATOMIC`).
+                // 2. a path expr referring to assoc consts whose type is doesn't have any frozen variants in trait
+                //    defs (i.e. without substitute for `Self`). (e.g. borrowing
+                //    `borrow_interior_mutable_const::trait::ConcreteTypes::ATOMIC`)
+                // 3. similar to the false positive above; but the value is an unfrozen variant, or the type has no
+                //    enums. (An example is
+                //    `declare_interior_mutable_const::enums::BothOfCellAndGeneric::UNFROZEN_VARIANT` and
+                //    `declare_interior_mutable_const::enums::BothOfCellAndGeneric::NO_ENUM`).
+                // One might be able to prevent these FNs correctly, and replace this with `false`;
+                // e.g. implementing `has_frozen_variant` described above, and not running this function
+                // when the type doesn't have any frozen variants would be the 'correct' way for the 2nd
+                // case (that actually removes another suboptimal behavior (I won't say 'false positive') where,
+                // similar to 2., but with the a frozen variant) (e.g. borrowing
+                // `borrow_interior_mutable_const::enums::AssocConsts::TO_BE_FROZEN_VARIANT`).
+                // I chose this way because unfrozen enums as assoc consts are rare (or, hopefully, none).
+                matches!(err, ErrorHandled::TooGeneric(..))
+            },
+            |val| val.map_or(true, |val| self.is_value_unfrozen_raw_inner(cx, val, ty)),
+        )
+    }
+
+    fn is_value_unfrozen_poly<'tcx>(&self, cx: &LateContext<'tcx>, body_id: BodyId, ty: Ty<'tcx>) -> bool {
+        let def_id = body_id.hir_id.owner.to_def_id();
+        let args = ty::GenericArgs::identity_for_item(cx.tcx, def_id);
+        let instance = ty::Instance::new(def_id, args);
+        let cid = rustc_middle::mir::interpret::GlobalId {
+            instance,
+            promoted: None,
+        };
+        let param_env = cx.tcx.param_env(def_id).with_reveal_all_normalized(cx.tcx);
+        let result = cx.tcx.const_eval_global_id_for_typeck(param_env, cid, None);
+        self.is_value_unfrozen_raw(cx, result, ty)
+    }
+
+    fn is_value_unfrozen_expr<'tcx>(&self, cx: &LateContext<'tcx>, hir_id: HirId, def_id: DefId, ty: Ty<'tcx>) -> bool {
+        let args = cx.typeck_results().node_args(hir_id);
+
+        let result = Self::const_eval_resolve(cx.tcx, cx.param_env, ty::UnevaluatedConst::new(def_id, args), None);
+        self.is_value_unfrozen_raw(cx, result, ty)
+    }
+
+    pub fn const_eval_resolve<'tcx>(
+        tcx: TyCtxt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+        ct: ty::UnevaluatedConst<'tcx>,
+        span: Option<Span>,
+    ) -> EvalToValTreeResult<'tcx> {
+        match ty::Instance::resolve(tcx, param_env, ct.def, ct.args) {
+            Ok(Some(instance)) => {
+                let cid = GlobalId {
+                    instance,
+                    promoted: None,
+                };
+                tcx.const_eval_global_id_for_typeck(param_env, cid, span)
+            },
+            Ok(None) => Err(ErrorHandled::TooGeneric(span.unwrap_or(rustc_span::DUMMY_SP))),
+            Err(err) => Err(ErrorHandled::Reported(err.into(), span.unwrap_or(rustc_span::DUMMY_SP))),
+        }
+    }
+}
 
 impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
+    fn check_crate(&mut self, cx: &LateContext<'tcx>) {
+        self.ignore_mut_def_ids.clear();
+        let mut path = Vec::new();
+        for ty in &self.ignore_interior_mutability {
+            path.extend(ty.split("::"));
+            for id in def_path_def_ids(cx, &path[..]) {
+                self.ignore_mut_def_ids.insert(id);
+            }
+            path.clear();
+        }
+    }
+
     fn check_item(&mut self, cx: &LateContext<'tcx>, it: &'tcx Item<'_>) {
-        if let ItemKind::Const(hir_ty, body_id) = it.kind {
-            let ty = hir_ty_to_ty(cx.tcx, hir_ty);
-            if !ignored_macro(cx, it) && is_unfrozen(cx, ty) && is_value_unfrozen_poly(cx, body_id, ty) {
+        if let ItemKind::Const(.., body_id) = it.kind {
+            let ty = cx.tcx.type_of(it.owner_id).instantiate_identity();
+            if !ignored_macro(cx, it)
+                && !self.is_ty_ignored(ty)
+                && Self::is_unfrozen(cx, ty)
+                && self.is_value_unfrozen_poly(cx, body_id, ty)
+            {
                 lint(cx, Source::Item { item: it.span });
             }
         }
     }
 
     fn check_trait_item(&mut self, cx: &LateContext<'tcx>, trait_item: &'tcx TraitItem<'_>) {
-        if let TraitItemKind::Const(hir_ty, body_id_opt) = &trait_item.kind {
-            let ty = hir_ty_to_ty(cx.tcx, hir_ty);
+        if let TraitItemKind::Const(_, body_id_opt) = &trait_item.kind {
+            let ty = cx.tcx.type_of(trait_item.owner_id).instantiate_identity();
 
             // Normalize assoc types because ones originated from generic params
             // bounded other traits could have their bound.
             let normalized = cx.tcx.normalize_erasing_regions(cx.param_env, ty);
-            if is_unfrozen(cx, normalized)
+            if !self.is_ty_ignored(ty) && Self::is_unfrozen(cx, normalized)
                 // When there's no default value, lint it only according to its type;
                 // in other words, lint consts whose value *could* be unfrozen, not definitely is.
                 // This feels inconsistent with how the lint treats generic types,
@@ -280,7 +368,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                 // i.e. having an enum doesn't necessary mean a type has a frozen variant.
                 // And, implementing it isn't a trivial task; it'll probably end up
                 // re-implementing the trait predicate evaluation specific to `Freeze`.
-                && body_id_opt.map_or(true, |body_id| is_value_unfrozen_poly(cx, body_id, normalized))
+                && body_id_opt.map_or(true, |body_id| self.is_value_unfrozen_poly(cx, body_id, normalized))
             {
                 lint(cx, Source::Assoc { item: trait_item.span });
             }
@@ -288,7 +376,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
     }
 
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, impl_item: &'tcx ImplItem<'_>) {
-        if let ImplItemKind::Const(hir_ty, body_id) = &impl_item.kind {
+        if let ImplItemKind::Const(_, body_id) = &impl_item.kind {
             let item_def_id = cx.tcx.hir().get_parent_item(impl_item.hir_id()).def_id;
             let item = cx.tcx.hir().expect_item(item_def_id);
 
@@ -297,15 +385,14 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                     of_trait: Some(of_trait_ref),
                     ..
                 }) => {
-                    if_chain! {
+                    if let Some(of_trait_def_id) = of_trait_ref.trait_def_id()
                         // Lint a trait impl item only when the definition is a generic type,
                         // assuming an assoc const is not meant to be an interior mutable type.
-                        if let Some(of_trait_def_id) = of_trait_ref.trait_def_id();
-                        if let Some(of_assoc_item) = cx
+                        && let Some(of_assoc_item) = cx
                             .tcx
                             .associated_item(impl_item.owner_id)
-                            .trait_item_def_id;
-                        if cx
+                            .trait_item_def_id
+                        && cx
                             .tcx
                             .layout_of(cx.tcx.param_env(of_trait_def_id).and(
                                 // Normalize assoc types because ones originated from generic params
@@ -313,34 +400,31 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                                 // and, in that case, the definition is *not* generic.
                                 cx.tcx.normalize_erasing_regions(
                                     cx.tcx.param_env(of_trait_def_id),
-                                    cx.tcx.type_of(of_assoc_item).subst_identity(),
+                                    cx.tcx.type_of(of_assoc_item).instantiate_identity(),
                                 ),
                             ))
-                            .is_err();
+                            .is_err()
                             // If there were a function like `has_frozen_variant` described above,
                             // we should use here as a frozen variant is a potential to be frozen
                             // similar to unknown layouts.
                             // e.g. `layout_of(...).is_err() || has_frozen_variant(...);`
-                        let ty = hir_ty_to_ty(cx.tcx, hir_ty);
-                        let normalized = cx.tcx.normalize_erasing_regions(cx.param_env, ty);
-                        if is_unfrozen(cx, normalized);
-                        if is_value_unfrozen_poly(cx, *body_id, normalized);
-                        then {
-                            lint(
-                               cx,
-                               Source::Assoc {
-                                   item: impl_item.span,
-                                },
-                            );
-                        }
+                        && let ty = cx.tcx.type_of(impl_item.owner_id).instantiate_identity()
+                        && let normalized = cx.tcx.normalize_erasing_regions(cx.param_env, ty)
+                        && !self.is_ty_ignored(ty) && Self::is_unfrozen(cx, normalized)
+                        && self.is_value_unfrozen_poly(cx, *body_id, normalized)
+                    {
+                        lint(cx, Source::Assoc { item: impl_item.span });
                     }
                 },
                 ItemKind::Impl(Impl { of_trait: None, .. }) => {
-                    let ty = hir_ty_to_ty(cx.tcx, hir_ty);
+                    let ty = cx.tcx.type_of(impl_item.owner_id).instantiate_identity();
                     // Normalize assoc types originated from generic params.
                     let normalized = cx.tcx.normalize_erasing_regions(cx.param_env, ty);
 
-                    if is_unfrozen(cx, ty) && is_value_unfrozen_poly(cx, *body_id, normalized) {
+                    if !self.is_ty_ignored(ty)
+                        && Self::is_unfrozen(cx, ty)
+                        && self.is_value_unfrozen_poly(cx, *body_id, normalized)
+                    {
                         lint(cx, Source::Assoc { item: impl_item.span });
                     }
                 },
@@ -358,7 +442,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
 
             // Make sure it is a const item.
             let Res::Def(DefKind::Const | DefKind::AssocConst, item_def_id) = cx.qpath_res(qpath, expr.hir_id) else {
-                return
+                return;
             };
 
             // Climb up to resolve any field access and explicit referencing.
@@ -370,7 +454,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                 if parent_id == cur_expr.hir_id {
                     break;
                 }
-                if let Some(Node::Expr(parent_expr)) = cx.tcx.hir().find(parent_id) {
+                if let Some(Node::Expr(parent_expr)) = cx.tcx.opt_hir_node(parent_id) {
                     match &parent_expr.kind {
                         ExprKind::AddrOf(..) => {
                             // `&e` => `e` must be referenced.
@@ -393,7 +477,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
 
                             dereferenced_expr = parent_expr;
                         },
-                        ExprKind::Index(e, _) if ptr::eq(&**e, cur_expr) => {
+                        ExprKind::Index(e, _, _) if ptr::eq(&**e, cur_expr) => {
                             // `e[i]` => desugared to `*Index::index(&e, i)`,
                             // meaning `e` must be referenced.
                             // no need to go further up since a method call is involved now.
@@ -434,7 +518,10 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                 cx.typeck_results().expr_ty(dereferenced_expr)
             };
 
-            if is_unfrozen(cx, ty) && is_value_unfrozen_expr(cx, expr.hir_id, item_def_id, ty) {
+            if !self.is_ty_ignored(ty)
+                && Self::is_unfrozen(cx, ty)
+                && self.is_value_unfrozen_expr(cx, expr.hir_id, item_def_id, ty)
+            {
                 lint(cx, Source::Expr { expr: expr.span });
             }
         }

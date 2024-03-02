@@ -1,7 +1,10 @@
 use crate::fluent_generated as fluent;
-use rustc_errors::{ErrorGuaranteed, Handler, IntoDiagnostic};
+use rustc_errors::{
+    AddToDiagnostic, Applicability, DiagCtxt, Diagnostic, ErrorGuaranteed, IntoDiagnostic,
+    SubdiagnosticMessage,
+};
 use rustc_macros::Diagnostic;
-use rustc_middle::ty::{self, PolyTraitRef, Ty};
+use rustc_middle::ty::{self, ClosureKind, PolyTraitRef, Ty};
 use rustc_span::{Span, Symbol};
 
 #[derive(Diagnostic)]
@@ -58,9 +61,9 @@ impl IntoDiagnostic<'_> for NegativePositiveConflict<'_> {
     #[track_caller]
     fn into_diagnostic(
         self,
-        handler: &Handler,
+        dcx: &DiagCtxt,
     ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = handler.struct_err(fluent::trait_selection_negative_positive_conflict);
+        let mut diag = dcx.struct_err(fluent::trait_selection_negative_positive_conflict);
         diag.set_arg("trait_desc", self.trait_desc.print_only_trait_path().to_string());
         diag.set_arg(
             "self_desc",
@@ -88,4 +91,77 @@ impl IntoDiagnostic<'_> for NegativePositiveConflict<'_> {
         }
         diag
     }
+}
+
+#[derive(Diagnostic)]
+#[diag(trait_selection_inherent_projection_normalization_overflow)]
+pub struct InherentProjectionNormalizationOverflow {
+    #[primary_span]
+    pub span: Span,
+    pub ty: String,
+}
+
+pub enum AdjustSignatureBorrow {
+    Borrow { to_borrow: Vec<(Span, String)> },
+    RemoveBorrow { remove_borrow: Vec<(Span, String)> },
+}
+
+impl AddToDiagnostic for AdjustSignatureBorrow {
+    fn add_to_diagnostic_with<F>(self, diag: &mut Diagnostic, _: F)
+    where
+        F: Fn(&mut Diagnostic, SubdiagnosticMessage) -> SubdiagnosticMessage,
+    {
+        match self {
+            AdjustSignatureBorrow::Borrow { to_borrow } => {
+                diag.set_arg("len", to_borrow.len());
+                diag.multipart_suggestion_verbose(
+                    fluent::trait_selection_adjust_signature_borrow,
+                    to_borrow,
+                    Applicability::MaybeIncorrect,
+                );
+            }
+            AdjustSignatureBorrow::RemoveBorrow { remove_borrow } => {
+                diag.set_arg("len", remove_borrow.len());
+                diag.multipart_suggestion_verbose(
+                    fluent::trait_selection_adjust_signature_remove_borrow,
+                    remove_borrow,
+                    Applicability::MaybeIncorrect,
+                );
+            }
+        }
+    }
+}
+
+#[derive(Diagnostic)]
+#[diag(trait_selection_closure_kind_mismatch, code = "E0525")]
+pub struct ClosureKindMismatch {
+    #[primary_span]
+    #[label]
+    pub closure_span: Span,
+    pub expected: ClosureKind,
+    pub found: ClosureKind,
+    #[label(trait_selection_closure_kind_requirement)]
+    pub cause_span: Span,
+
+    #[subdiagnostic]
+    pub fn_once_label: Option<ClosureFnOnceLabel>,
+
+    #[subdiagnostic]
+    pub fn_mut_label: Option<ClosureFnMutLabel>,
+}
+
+#[derive(Subdiagnostic)]
+#[label(trait_selection_closure_fn_once_label)]
+pub struct ClosureFnOnceLabel {
+    #[primary_span]
+    pub span: Span,
+    pub place: String,
+}
+
+#[derive(Subdiagnostic)]
+#[label(trait_selection_closure_fn_mut_label)]
+pub struct ClosureFnMutLabel {
+    #[primary_span]
+    pub span: Span,
+    pub place: String,
 }

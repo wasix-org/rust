@@ -1,19 +1,29 @@
 use super::FnCtxt;
 
-use crate::errors::{AddReturnTypeSuggestion, ExpectedReturnTypeLabel};
+use crate::errors;
 use crate::fluent_generated as fluent;
+use crate::fn_ctxt::rustc_span::BytePos;
+use crate::hir::is_range_literal;
+use crate::method::probe;
 use crate::method::probe::{IsSuggestion, Mode, ProbeScope};
+use crate::rustc_middle::ty::Article;
+use crate::ty::TypeAndMut;
+use core::cmp::min;
+use core::iter;
 use rustc_ast::util::parser::{ExprPrecedence, PREC_POSTFIX};
 use rustc_errors::{Applicability, Diagnostic, MultiSpan};
 use rustc_hir as hir;
+use rustc_hir::def::Res;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind};
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{
-    Expr, ExprKind, GenericBound, Node, Path, QPath, Stmt, StmtKind, TyKind, WherePredicate,
+    CoroutineKind, CoroutineSource, Expr, ExprKind, GenericBound, HirId, Node, Path, QPath, Stmt,
+    StmtKind, TyKind, WherePredicate,
 };
 use rustc_hir_analysis::astconv::AstConv;
 use rustc_infer::traits::{self, StatementAsExpression};
 use rustc_middle::lint::in_external_macro;
+use rustc_middle::middle::stability::EvalResult;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{
     self, suggest_constraining_type_params, Binder, IsSuggestable, ToPredicate, Ty,
@@ -33,7 +43,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         self.typeck_results
             .borrow()
             .liberated_fn_sigs()
-            .get(self.tcx.hir().local_def_id_to_hir_id(self.body_id))
+            .get(self.tcx.local_def_id_to_hir_id(self.body_id))
             .copied()
     }
 
@@ -62,20 +72,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         blk_id: hir::HirId,
     ) -> bool {
         let expr = expr.peel_drop_temps();
-        self.suggest_missing_semicolon(err, expr, expected, false);
         let mut pointing_at_return_type = false;
-        if let Some((fn_decl, can_suggest)) = self.get_fn_decl(blk_id) {
-            let fn_id = self.tcx.hir().get_return_block(blk_id).unwrap();
-            pointing_at_return_type = self.suggest_missing_return_type(
-                err,
-                &fn_decl,
-                expected,
-                found,
-                can_suggest,
-                fn_id,
-            );
+        if let hir::ExprKind::Break(..) = expr.kind {
+            // `break` type mismatches provide better context for tail `loop` expressions.
+            return false;
+        }
+        if let Some((fn_id, fn_decl, can_suggest)) = self.get_fn_decl(blk_id) {
+            pointing_at_return_type =
+                self.suggest_missing_return_type(err, fn_decl, expected, found, can_suggest, fn_id);
             self.suggest_missing_break_or_return_expr(
-                err, expr, &fn_decl, expected, found, blk_id, fn_id,
+                err, expr, fn_decl, expected, found, blk_id, fn_id,
             );
         }
         pointing_at_return_type
@@ -95,8 +101,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         found: Ty<'tcx>,
         can_satisfy: impl FnOnce(Ty<'tcx>) -> bool,
     ) -> bool {
-        let Some((def_id_or_name, output, inputs)) = self.extract_callable_info(found)
-            else { return false; };
+        let Some((def_id_or_name, output, inputs)) = self.extract_callable_info(found) else {
+            return false;
+        };
         if can_satisfy(output) {
             let (sugg_call, mut applicability) = match inputs.len() {
                 0 => ("".to_string(), Applicability::MachineApplicable),
@@ -166,8 +173,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         ty: Ty<'tcx>,
     ) -> Option<(DefIdOrName, Ty<'tcx>, Vec<Ty<'tcx>>)> {
-        let body_hir_id = self.tcx.hir().local_def_id_to_hir_id(self.body_id);
-        self.err_ctxt().extract_callable_info(body_hir_id, self.param_env, ty)
+        self.err_ctxt().extract_callable_info(self.body_id, self.param_env, ty)
     }
 
     pub fn suggest_two_fn_call(
@@ -179,10 +185,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         rhs_ty: Ty<'tcx>,
         can_satisfy: impl FnOnce(Ty<'tcx>, Ty<'tcx>) -> bool,
     ) -> bool {
-        let Some((_, lhs_output_ty, lhs_inputs)) = self.extract_callable_info(lhs_ty)
-            else { return false; };
-        let Some((_, rhs_output_ty, rhs_inputs)) = self.extract_callable_info(rhs_ty)
-            else { return false; };
+        let Some((_, lhs_output_ty, lhs_inputs)) = self.extract_callable_info(lhs_ty) else {
+            return false;
+        };
+        let Some((_, rhs_output_ty, rhs_inputs)) = self.extract_callable_info(rhs_ty) else {
+            return false;
+        };
 
         if can_satisfy(lhs_output_ty, rhs_output_ty) {
             let mut sugg = vec![];
@@ -248,22 +256,24 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expr: &hir::Expr<'tcx>,
         expected: Ty<'tcx>,
     ) -> bool {
-        if let hir::ExprKind::MethodCall(hir::PathSegment { ident: method, .. }, recv_expr, &[], _) = expr.kind &&
-            let Some(recv_ty) = self.typeck_results.borrow().expr_ty_opt(recv_expr) &&
-            self.can_coerce(recv_ty, expected) {
-                let span = if let Some(recv_span) = recv_expr.span.find_ancestor_inside(expr.span) {
-                    expr.span.with_lo(recv_span.hi())
-                } else {
-                    expr.span.with_lo(method.span.lo() - rustc_span::BytePos(1))
-                };
-                err.span_suggestion_verbose(
-                    span,
-                    "try removing the method call",
-                    "",
-                    Applicability::MachineApplicable,
-                );
-                return true;
-            }
+        if let hir::ExprKind::MethodCall(hir::PathSegment { ident: method, .. }, recv_expr, &[], _) =
+            expr.kind
+            && let Some(recv_ty) = self.typeck_results.borrow().expr_ty_opt(recv_expr)
+            && self.can_coerce(recv_ty, expected)
+        {
+            let span = if let Some(recv_span) = recv_expr.span.find_ancestor_inside(expr.span) {
+                expr.span.with_lo(recv_span.hi())
+            } else {
+                expr.span.with_lo(method.span.lo() - rustc_span::BytePos(1))
+            };
+            err.span_suggestion_verbose(
+                span,
+                "try removing the method call",
+                "",
+                Applicability::MachineApplicable,
+            );
+            return true;
+        }
         false
     }
 
@@ -276,13 +286,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected_ty_expr: Option<&'tcx hir::Expr<'tcx>>,
     ) -> bool {
         let expr = expr.peel_blocks();
-        if let Some((sp, msg, suggestion, applicability, verbose, annotation)) =
-            self.check_ref(expr, found, expected)
+        let methods = self.get_conversion_methods(expr.span, expected, found, expr.hir_id);
+
+        if let Some((suggestion, msg, applicability, verbose, annotation)) =
+            self.suggest_deref_or_ref(expr, found, expected)
         {
             if verbose {
-                err.span_suggestion_verbose(sp, &msg, suggestion, applicability);
+                err.multipart_suggestion_verbose(msg, suggestion, applicability);
             } else {
-                err.span_suggestion(sp, &msg, suggestion, applicability);
+                err.multipart_suggestion(msg, suggestion, applicability);
             }
             if annotation {
                 let suggest_annotation = match expr.peel_drop_temps().kind {
@@ -326,113 +338,193 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             }
             return true;
-        } else if self.suggest_else_fn_with_closure(err, expr, found, expected) {
+        }
+
+        if self.suggest_else_fn_with_closure(err, expr, found, expected) {
             return true;
-        } else if self.suggest_fn_call(err, expr, found, |output| self.can_coerce(output, expected))
+        }
+
+        if self.suggest_fn_call(err, expr, found, |output| self.can_coerce(output, expected))
             && let ty::FnDef(def_id, ..) = *found.kind()
             && let Some(sp) = self.tcx.hir().span_if_local(def_id)
         {
             let name = self.tcx.item_name(def_id);
             let kind = self.tcx.def_kind(def_id);
             if let DefKind::Ctor(of, CtorKind::Fn) = kind {
-                err.span_label(sp, format!("`{name}` defines {} constructor here, which should be called", match of {
-                    CtorOf::Struct => "a struct",
-                    CtorOf::Variant => "an enum variant",
-                }));
+                err.span_label(
+                    sp,
+                    format!(
+                        "`{name}` defines {} constructor here, which should be called",
+                        match of {
+                            CtorOf::Struct => "a struct",
+                            CtorOf::Variant => "an enum variant",
+                        }
+                    ),
+                );
             } else {
                 let descr = self.tcx.def_kind_descr(kind, def_id);
                 err.span_label(sp, format!("{descr} `{name}` defined here"));
             }
             return true;
-        } else if self.check_for_cast(err, expr, found, expected, expected_ty_expr) {
-            return true;
-        } else {
-            let methods = self.get_conversion_methods(expr.span, expected, found, expr.hir_id);
-            if !methods.is_empty() {
-                let mut suggestions = methods.iter()
-                    .filter_map(|conversion_method| {
-                        let receiver_method_ident = expr.method_ident();
-                        if let Some(method_ident) = receiver_method_ident
-                            && method_ident.name == conversion_method.name
-                        {
-                            return None // do not suggest code that is already there (#53348)
-                        }
+        }
 
-                        let method_call_list = [sym::to_vec, sym::to_string];
-                        let mut sugg = if let ExprKind::MethodCall(receiver_method, ..) = expr.kind
-                            && receiver_method.ident.name == sym::clone
-                            && method_call_list.contains(&conversion_method.name)
-                            // If receiver is `.clone()` and found type has one of those methods,
-                            // we guess that the user wants to convert from a slice type (`&[]` or `&str`)
-                            // to an owned type (`Vec` or `String`). These conversions clone internally,
-                            // so we remove the user's `clone` call.
-                        {
-                            vec![(
-                                receiver_method.ident.span,
-                                conversion_method.name.to_string()
-                            )]
-                        } else if expr.precedence().order()
-                            < ExprPrecedence::MethodCall.order()
-                        {
-                            vec![
-                                (expr.span.shrink_to_lo(), "(".to_string()),
-                                (expr.span.shrink_to_hi(), format!(").{}()", conversion_method.name)),
-                            ]
-                        } else {
-                            vec![(expr.span.shrink_to_hi(), format!(".{}()", conversion_method.name))]
-                        };
-                        let struct_pat_shorthand_field = self.maybe_get_struct_pattern_shorthand_field(expr);
-                        if let Some(name) = struct_pat_shorthand_field {
-                            sugg.insert(
-                                0,
-                                (expr.span.shrink_to_lo(), format!("{}: ", name)),
-                            );
-                        }
-                        Some(sugg)
-                    })
-                    .peekable();
-                if suggestions.peek().is_some() {
-                    err.multipart_suggestions(
-                        "try using a conversion method",
-                        suggestions,
-                        Applicability::MaybeIncorrect,
-                    );
-                    return true;
-                }
-            } else if let ty::Adt(found_adt, found_substs) = found.kind()
-                && self.tcx.is_diagnostic_item(sym::Option, found_adt.did())
-                && let ty::Adt(expected_adt, expected_substs) = expected.kind()
-                && self.tcx.is_diagnostic_item(sym::Option, expected_adt.did())
-                && let ty::Ref(_, inner_ty, _) = expected_substs.type_at(0).kind()
-                && inner_ty.is_str()
-            {
-                let ty = found_substs.type_at(0);
-                let mut peeled = ty;
-                let mut ref_cnt = 0;
-                while let ty::Ref(_, inner, _) = peeled.kind() {
-                    peeled = *inner;
-                    ref_cnt += 1;
-                }
-                if let ty::Adt(adt, _) = peeled.kind()
-                    && Some(adt.did()) == self.tcx.lang_items().string()
-                {
-                    let sugg = if ref_cnt == 0 {
-                        ".as_deref()"
+        if self.suggest_cast(err, expr, found, expected, expected_ty_expr) {
+            return true;
+        }
+
+        if !methods.is_empty() {
+            let mut suggestions = methods
+                .iter()
+                .filter_map(|conversion_method| {
+                    let receiver_method_ident = expr.method_ident();
+                    if let Some(method_ident) = receiver_method_ident
+                        && method_ident.name == conversion_method.name
+                    {
+                        return None; // do not suggest code that is already there (#53348)
+                    }
+
+                    let method_call_list = [sym::to_vec, sym::to_string];
+                    let mut sugg = if let ExprKind::MethodCall(receiver_method, ..) = expr.kind
+                        && receiver_method.ident.name == sym::clone
+                        && method_call_list.contains(&conversion_method.name)
+                    // If receiver is `.clone()` and found type has one of those methods,
+                    // we guess that the user wants to convert from a slice type (`&[]` or `&str`)
+                    // to an owned type (`Vec` or `String`). These conversions clone internally,
+                    // so we remove the user's `clone` call.
+                    {
+                        vec![(receiver_method.ident.span, conversion_method.name.to_string())]
+                    } else if expr.precedence().order() < ExprPrecedence::MethodCall.order() {
+                        vec![
+                            (expr.span.shrink_to_lo(), "(".to_string()),
+                            (expr.span.shrink_to_hi(), format!(").{}()", conversion_method.name)),
+                        ]
                     } else {
-                        ".map(|x| x.as_str())"
+                        vec![(expr.span.shrink_to_hi(), format!(".{}()", conversion_method.name))]
                     };
-                    err.span_suggestion_verbose(
-                        expr.span.shrink_to_hi(),
-                        fluent::hir_typeck_convert_to_str,
-                        sugg,
-                        Applicability::MachineApplicable,
-                    );
-                    return true;
+                    let struct_pat_shorthand_field =
+                        self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr);
+                    if let Some(name) = struct_pat_shorthand_field {
+                        sugg.insert(0, (expr.span.shrink_to_lo(), format!("{name}: ")));
+                    }
+                    Some(sugg)
+                })
+                .peekable();
+            if suggestions.peek().is_some() {
+                err.multipart_suggestions(
+                    "try using a conversion method",
+                    suggestions,
+                    Applicability::MaybeIncorrect,
+                );
+                return true;
+            }
+        }
+
+        if let Some((found_ty_inner, expected_ty_inner, error_tys)) =
+            self.deconstruct_option_or_result(found, expected)
+            && let ty::Ref(_, peeled, hir::Mutability::Not) = *expected_ty_inner.kind()
+        {
+            // Suggest removing any stray borrows (unless there's macro shenanigans involved).
+            let inner_expr = expr.peel_borrows();
+            if !inner_expr.span.eq_ctxt(expr.span) {
+                return false;
+            }
+            let borrow_removal_span = if inner_expr.hir_id == expr.hir_id {
+                None
+            } else {
+                Some(expr.span.shrink_to_lo().until(inner_expr.span))
+            };
+            // Given `Result<_, E>`, check our expected ty is `Result<_, &E>` for
+            // `as_ref` and `as_deref` compatibility.
+            let error_tys_equate_as_ref = error_tys.map_or(true, |(found, expected)| {
+                self.can_eq(
+                    self.param_env,
+                    Ty::new_imm_ref(self.tcx, self.tcx.lifetimes.re_erased, found),
+                    expected,
+                )
+            });
+
+            let prefix_wrap = |sugg: &str| {
+                if let Some(name) = self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
+                    format!(": {}{}", name, sugg)
+                } else {
+                    sugg.to_string()
                 }
+            };
+
+            // FIXME: This could/should be extended to suggest `as_mut` and `as_deref_mut`,
+            // but those checks need to be a bit more delicate and the benefit is diminishing.
+            if self.can_eq(self.param_env, found_ty_inner, peeled) && error_tys_equate_as_ref {
+                let sugg = prefix_wrap(".as_ref()");
+                err.subdiagnostic(errors::SuggestConvertViaMethod {
+                    span: expr.span.shrink_to_hi(),
+                    sugg,
+                    expected,
+                    found,
+                    borrow_removal_span,
+                });
+                return true;
+            } else if let Some((deref_ty, _)) =
+                self.autoderef(expr.span, found_ty_inner).silence_errors().nth(1)
+                && self.can_eq(self.param_env, deref_ty, peeled)
+                && error_tys_equate_as_ref
+            {
+                let sugg = prefix_wrap(".as_deref()");
+                err.subdiagnostic(errors::SuggestConvertViaMethod {
+                    span: expr.span.shrink_to_hi(),
+                    sugg,
+                    expected,
+                    found,
+                    borrow_removal_span,
+                });
+                return true;
+            } else if let ty::Adt(adt, _) = found_ty_inner.peel_refs().kind()
+                && Some(adt.did()) == self.tcx.lang_items().string()
+                && peeled.is_str()
+                // `Result::map`, conversely, does not take ref of the error type.
+                && error_tys.map_or(true, |(found, expected)| {
+                    self.can_eq(self.param_env, found, expected)
+                })
+            {
+                let sugg = prefix_wrap(".map(|x| x.as_str())");
+                err.span_suggestion_verbose(
+                    expr.span.shrink_to_hi(),
+                    fluent::hir_typeck_convert_to_str,
+                    sugg,
+                    Applicability::MachineApplicable,
+                );
+                return true;
             }
         }
 
         false
+    }
+
+    fn deconstruct_option_or_result(
+        &self,
+        found_ty: Ty<'tcx>,
+        expected_ty: Ty<'tcx>,
+    ) -> Option<(Ty<'tcx>, Ty<'tcx>, Option<(Ty<'tcx>, Ty<'tcx>)>)> {
+        let ty::Adt(found_adt, found_args) = found_ty.peel_refs().kind() else {
+            return None;
+        };
+        let ty::Adt(expected_adt, expected_args) = expected_ty.kind() else {
+            return None;
+        };
+        if self.tcx.is_diagnostic_item(sym::Option, found_adt.did())
+            && self.tcx.is_diagnostic_item(sym::Option, expected_adt.did())
+        {
+            Some((found_args.type_at(0), expected_args.type_at(0), None))
+        } else if self.tcx.is_diagnostic_item(sym::Result, found_adt.did())
+            && self.tcx.is_diagnostic_item(sym::Result, expected_adt.did())
+        {
+            Some((
+                found_args.type_at(0),
+                expected_args.type_at(0),
+                Some((found_args.type_at(1), expected_args.type_at(1))),
+            ))
+        } else {
+            None
+        }
     }
 
     /// When encountering the expected boxed value allocated in the stack, suggest allocating it
@@ -440,33 +532,35 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub(in super::super) fn suggest_boxing_when_appropriate(
         &self,
         err: &mut Diagnostic,
-        expr: &hir::Expr<'_>,
+        span: Span,
+        hir_id: HirId,
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
     ) -> bool {
-        if self.tcx.hir().is_inside_const_context(expr.hir_id) {
-            // Do not suggest `Box::new` in const context.
+        // Do not suggest `Box::new` in const context.
+        if self.tcx.hir().is_inside_const_context(hir_id) || !expected.is_box() || found.is_box() {
             return false;
         }
-        if !expected.is_box() || found.is_box() {
-            return false;
-        }
-        let boxed_found = self.tcx.mk_box(found);
-        if self.can_coerce(boxed_found, expected) {
-            err.multipart_suggestion(
-                "store this in the heap by calling `Box::new`",
-                vec![
-                    (expr.span.shrink_to_lo(), "Box::new(".to_string()),
-                    (expr.span.shrink_to_hi(), ")".to_string()),
-                ],
-                Applicability::MachineApplicable,
-            );
-            err.note(
-                "for more on the distinction between the stack and the heap, read \
-                 https://doc.rust-lang.org/book/ch15-01-box.html, \
-                 https://doc.rust-lang.org/rust-by-example/std/box.html, and \
-                 https://doc.rust-lang.org/std/boxed/index.html",
-            );
+        if self.can_coerce(Ty::new_box(self.tcx, found), expected) {
+            let suggest_boxing = match found.kind() {
+                ty::Tuple(tuple) if tuple.is_empty() => {
+                    errors::SuggestBoxing::Unit { start: span.shrink_to_lo(), end: span }
+                }
+                ty::Coroutine(def_id, ..)
+                    if matches!(
+                        self.tcx.coroutine_kind(def_id),
+                        Some(CoroutineKind::Async(CoroutineSource::Closure))
+                    ) =>
+                {
+                    errors::SuggestBoxing::AsyncBody
+                }
+                _ => errors::SuggestBoxing::Other {
+                    start: span.shrink_to_lo(),
+                    end: span.shrink_to_hi(),
+                },
+            };
+            err.subdiagnostic(suggest_boxing);
+
             true
         } else {
             false
@@ -490,7 +584,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     .take(4)
                     .map(|(var_hir_id, upvar)| {
                         let var_name = self.tcx.hir().name(*var_hir_id).to_string();
-                        let msg = format!("`{}` captured here", var_name);
+                        let msg = format!("`{var_name}` captured here");
                         (upvar.span, msg)
                     })
                     .collect::<Vec<_>>();
@@ -526,13 +620,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return false;
         }
         let pin_did = self.tcx.lang_items().pin_type();
-        // This guards the `unwrap` and `mk_box` below.
+        // This guards the `new_box` below.
         if pin_did.is_none() || self.tcx.lang_items().owned_box().is_none() {
             return false;
         }
-        let box_found = self.tcx.mk_box(found);
-        let pin_box_found = self.tcx.mk_lang_item(box_found, LangItem::Pin).unwrap();
-        let pin_found = self.tcx.mk_lang_item(found, LangItem::Pin).unwrap();
+        let box_found = Ty::new_box(self.tcx, found);
+        let Some(pin_box_found) = Ty::new_lang_item(self.tcx, box_found, LangItem::Pin) else {
+            return false;
+        };
+        let Some(pin_found) = Ty::new_lang_item(self.tcx, found, LangItem::Pin) else {
+            return false;
+        };
         match expected.kind() {
             ty::Adt(def, _) if Some(def.did()) == pin_did => {
                 if self.can_coerce(pin_box_found, expected) {
@@ -542,12 +640,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             err.help("use `Box::pin`");
                         }
                         _ => {
+                            let prefix = if let Some(name) =
+                                self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr)
+                            {
+                                format!("{}: ", name)
+                            } else {
+                                String::new()
+                            };
+                            let suggestion = vec![
+                                (expr.span.shrink_to_lo(), format!("{prefix}Box::pin(")),
+                                (expr.span.shrink_to_hi(), ")".to_string()),
+                            ];
                             err.multipart_suggestion(
                                 "you need to pin and box this expression",
-                                vec![
-                                    (expr.span.shrink_to_lo(), "Box::pin(".to_string()),
-                                    (expr.span.shrink_to_hi(), ")".to_string()),
-                                ],
+                                suggestion,
                                 Applicability::MaybeIncorrect,
                             );
                         }
@@ -570,7 +676,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // is and we were expecting a Box, ergo Pin<Box<expected>>, we
                 // can suggest Box::pin.
                 let parent = self.tcx.hir().parent_id(expr.hir_id);
-                let Some(Node::Expr(Expr { kind: ExprKind::Call(fn_name, _), .. })) = self.tcx.hir().find(parent) else {
+                let Some(Node::Expr(Expr { kind: ExprKind::Call(fn_name, _), .. })) =
+                    self.tcx.opt_hir_node(parent)
+                else {
                     return false;
                 };
                 match fn_name.kind {
@@ -686,66 +794,80 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         match &fn_decl.output {
             &hir::FnRetTy::DefaultReturn(span) if expected.is_unit() && !can_suggest => {
                 // `fn main()` must return `()`, do not suggest changing return type
-                err.subdiagnostic(ExpectedReturnTypeLabel::Unit { span });
+                err.subdiagnostic(errors::ExpectedReturnTypeLabel::Unit { span });
                 return true;
             }
             &hir::FnRetTy::DefaultReturn(span) if expected.is_unit() => {
                 if let Some(found) = found.make_suggestable(self.tcx, false) {
-                    err.subdiagnostic(AddReturnTypeSuggestion::Add { span, found: found.to_string() });
+                    err.subdiagnostic(errors::AddReturnTypeSuggestion::Add {
+                        span,
+                        found: found.to_string(),
+                    });
                     return true;
-                } else if let ty::Closure(_, substs) = found.kind()
+                } else if let ty::Closure(_, args) = found.kind()
                     // FIXME(compiler-errors): Get better at printing binders...
-                    && let closure = substs.as_closure()
+                    && let closure = args.as_closure()
                     && closure.sig().is_suggestable(self.tcx, false)
                 {
-                    err.subdiagnostic(AddReturnTypeSuggestion::Add { span, found: closure.print_as_impl_trait().to_string() });
+                    err.subdiagnostic(errors::AddReturnTypeSuggestion::Add {
+                        span,
+                        found: closure.print_as_impl_trait().to_string(),
+                    });
                     return true;
                 } else {
                     // FIXME: if `found` could be `impl Iterator` we should suggest that.
-                    err.subdiagnostic(AddReturnTypeSuggestion::MissingHere { span });
-                    return true
+                    err.subdiagnostic(errors::AddReturnTypeSuggestion::MissingHere { span });
+                    return true;
                 }
             }
             hir::FnRetTy::Return(hir_ty) => {
-                let span = hir_ty.span;
-
                 if let hir::TyKind::OpaqueDef(item_id, ..) = hir_ty.kind
                     && let hir::Node::Item(hir::Item {
-                        kind: hir::ItemKind::OpaqueTy(op_ty),
-                        ..
-                    }) = self.tcx.hir().get(item_id.hir_id())
-                    && let [hir::GenericBound::LangItemTrait(
-                        hir::LangItem::Future, _, _, generic_args)] = op_ty.bounds
+                        kind: hir::ItemKind::OpaqueTy(op_ty), ..
+                    }) = self.tcx.hir_node(item_id.hir_id())
+                    && let [hir::GenericBound::Trait(trait_ref, _)] = op_ty.bounds
+                    && let Some(hir::PathSegment { args: Some(generic_args), .. }) =
+                        trait_ref.trait_ref.path.segments.last()
                     && let hir::GenericArgs { bindings: [ty_binding], .. } = generic_args
-                    && let hir::TypeBindingKind::Equality { term: hir::Term::Ty(term) } = ty_binding.kind
+                    && let hir::TypeBindingKind::Equality { term: hir::Term::Ty(term) } =
+                        ty_binding.kind
                 {
                     // Check if async function's return type was omitted.
                     // Don't emit suggestions if the found type is `impl Future<...>`.
                     debug!(?found);
                     if found.is_suggestable(self.tcx, false) {
                         if term.span.is_empty() {
-                            err.subdiagnostic(AddReturnTypeSuggestion::Add { span, found: found.to_string() });
+                            err.subdiagnostic(errors::AddReturnTypeSuggestion::Add {
+                                span: term.span,
+                                found: found.to_string(),
+                            });
                             return true;
                         } else {
-                            err.subdiagnostic(ExpectedReturnTypeLabel::Other { span, expected });
+                            err.subdiagnostic(errors::ExpectedReturnTypeLabel::Other {
+                                span: term.span,
+                                expected,
+                            });
                         }
                     }
-                }
-
-                // Only point to return type if the expected type is the return type, as if they
-                // are not, the expectation must have been caused by something else.
-                debug!("return type {:?}", hir_ty);
-                let ty = self.astconv().ast_ty_to_ty(hir_ty);
-                debug!("return type {:?}", ty);
-                debug!("expected type {:?}", expected);
-                let bound_vars = self.tcx.late_bound_vars(hir_ty.hir_id.owner.into());
-                let ty = Binder::bind_with_vars(ty, bound_vars);
-                let ty = self.normalize(span, ty);
-                let ty = self.tcx.erase_late_bound_regions(ty);
-                if self.can_coerce(expected, ty) {
-                    err.subdiagnostic(ExpectedReturnTypeLabel::Other { span, expected });
-                    self.try_suggest_return_impl_trait(err, expected, ty, fn_id);
-                    return true;
+                } else {
+                    // Only point to return type if the expected type is the return type, as if they
+                    // are not, the expectation must have been caused by something else.
+                    debug!("return type {:?}", hir_ty);
+                    let ty = self.astconv().ast_ty_to_ty(hir_ty);
+                    debug!("return type {:?}", ty);
+                    debug!("expected type {:?}", expected);
+                    let bound_vars = self.tcx.late_bound_vars(hir_ty.hir_id.owner.into());
+                    let ty = Binder::bind_with_vars(ty, bound_vars);
+                    let ty = self.normalize(hir_ty.span, ty);
+                    let ty = self.tcx.instantiate_bound_regions_with_erased(ty);
+                    if self.can_coerce(expected, ty) {
+                        err.subdiagnostic(errors::ExpectedReturnTypeLabel::Other {
+                            span: hir_ty.span,
+                            expected,
+                        });
+                        self.try_suggest_return_impl_trait(err, expected, ty, fn_id);
+                        return true;
+                    }
                 }
             }
             _ => {}
@@ -780,23 +902,29 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let ty::Param(expected_ty_as_param) = expected.kind() else { return };
 
-        let fn_node = self.tcx.hir().find(fn_id);
+        let fn_node = self.tcx.opt_hir_node(fn_id);
 
         let Some(hir::Node::Item(hir::Item {
             kind:
                 hir::ItemKind::Fn(
-                    hir::FnSig { decl: hir::FnDecl { inputs: fn_parameters, output: fn_return, .. }, .. },
+                    hir::FnSig {
+                        decl: hir::FnDecl { inputs: fn_parameters, output: fn_return, .. },
+                        ..
+                    },
                     hir::Generics { params, predicates, .. },
                     _body_id,
                 ),
             ..
-        })) = fn_node else { return };
+        })) = fn_node
+        else {
+            return;
+        };
 
         if params.get(expected_ty_as_param.index as usize).is_none() {
             return;
         };
 
-        // get all where BoundPredicates here, because they are used in to cases below
+        // get all where BoundPredicates here, because they are used in two cases below
         let where_predicates = predicates
             .iter()
             .filter_map(|p| match p {
@@ -855,7 +983,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         err.span_suggestion(
             fn_return.span(),
             "consider using an impl return type",
-            format!("impl {}", all_bounds_str),
+            format!("impl {all_bounds_str}"),
             Applicability::MaybeIncorrect,
         );
     }
@@ -873,10 +1001,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if !expected.is_unit() {
             return;
         }
-        let found = self.resolve_vars_with_obligations(found);
+        let found = self.resolve_vars_if_possible(found);
 
         let in_loop = self.is_loop(id)
-            || self.tcx.hir().parent_iter(id).any(|(parent_id, _)| self.is_loop(parent_id));
+            || self
+                .tcx
+                .hir()
+                .parent_iter(id)
+                .take_while(|(_, node)| {
+                    // look at parents until we find the first body owner
+                    node.body_id().is_none()
+                })
+                .any(|(parent_id, _)| self.is_loop(parent_id));
 
         let in_local_statement = self.is_local_statement(id)
             || self
@@ -900,23 +1036,30 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let hir::FnRetTy::Return(ty) = fn_decl.output {
             let ty = self.astconv().ast_ty_to_ty(ty);
             let bound_vars = self.tcx.late_bound_vars(fn_id);
-            let ty = self.tcx.erase_late_bound_regions(Binder::bind_with_vars(ty, bound_vars));
+            let ty = self
+                .tcx
+                .instantiate_bound_regions_with_erased(Binder::bind_with_vars(ty, bound_vars));
             let ty = match self.tcx.asyncness(fn_id.owner) {
-                hir::IsAsync::Async => self.get_impl_future_output_ty(ty).unwrap_or_else(|| {
+                ty::Asyncness::Yes => self.get_impl_future_output_ty(ty).unwrap_or_else(|| {
                     span_bug!(fn_decl.output.span(), "failed to get output type of async function")
                 }),
-                hir::IsAsync::NotAsync => ty,
+                ty::Asyncness::No => ty,
             };
             let ty = self.normalize(expr.span, ty);
             if self.can_coerce(found, ty) {
-                err.multipart_suggestion(
-                    "you might have meant to return this value",
-                    vec![
-                        (expr.span.shrink_to_lo(), "return ".to_string()),
-                        (expr.span.shrink_to_hi(), ";".to_string()),
-                    ],
-                    Applicability::MaybeIncorrect,
-                );
+                if let Some(node) = self.tcx.opt_hir_node(fn_id)
+                    && let Some(owner_node) = node.as_owner()
+                    && let Some(span) = expr.span.find_ancestor_inside(owner_node.span())
+                {
+                    err.multipart_suggestion(
+                        "you might have meant to return this value",
+                        vec![
+                            (span.shrink_to_lo(), "return ".to_string()),
+                            (span.shrink_to_hi(), ";".to_string()),
+                        ],
+                        Applicability::MaybeIncorrect,
+                    );
+                }
             }
         }
     }
@@ -981,84 +1124,71 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 .type_implements_trait(
                     clone_trait_def,
                     [self.tcx.erase_regions(expected_ty)],
-                    self.param_env
+                    self.param_env,
                 )
                 .must_apply_modulo_regions()
-          {
-              diag.span_suggestion_verbose(
-                  expr.span.shrink_to_hi(),
-                  "consider using clone here",
-                  ".clone()",
-                  Applicability::MachineApplicable,
-              );
-              return true;
-          }
+        {
+            let suggestion = match self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
+                Some(ident) => format!(": {ident}.clone()"),
+                None => ".clone()".to_string(),
+            };
+
+            diag.span_suggestion_verbose(
+                expr.span.shrink_to_hi(),
+                "consider using clone here",
+                suggestion,
+                Applicability::MachineApplicable,
+            );
+            return true;
+        }
         false
     }
 
-    pub(crate) fn suggest_copied_or_cloned(
+    pub(crate) fn suggest_copied_cloned_or_as_ref(
         &self,
         diag: &mut Diagnostic,
         expr: &hir::Expr<'_>,
         expr_ty: Ty<'tcx>,
         expected_ty: Ty<'tcx>,
     ) -> bool {
-        let ty::Adt(adt_def, substs) = expr_ty.kind() else { return false; };
-        let ty::Adt(expected_adt_def, expected_substs) = expected_ty.kind() else { return false; };
+        let ty::Adt(adt_def, args) = expr_ty.kind() else {
+            return false;
+        };
+        let ty::Adt(expected_adt_def, expected_args) = expected_ty.kind() else {
+            return false;
+        };
         if adt_def != expected_adt_def {
             return false;
         }
 
-        let mut suggest_copied_or_cloned = || {
-            let expr_inner_ty = substs.type_at(0);
-            let expected_inner_ty = expected_substs.type_at(0);
-            if let ty::Ref(_, ty, hir::Mutability::Not) = expr_inner_ty.kind()
-                && self.can_eq(self.param_env, *ty, expected_inner_ty)
+        if Some(adt_def.did()) == self.tcx.get_diagnostic_item(sym::Result)
+            && self.can_eq(self.param_env, args.type_at(1), expected_args.type_at(1))
+            || Some(adt_def.did()) == self.tcx.get_diagnostic_item(sym::Option)
+        {
+            let expr_inner_ty = args.type_at(0);
+            let expected_inner_ty = expected_args.type_at(0);
+            if let &ty::Ref(_, ty, _mutability) = expr_inner_ty.kind()
+                && self.can_eq(self.param_env, ty, expected_inner_ty)
             {
                 let def_path = self.tcx.def_path_str(adt_def.did());
-                if self.type_is_copy_modulo_regions(self.param_env, *ty, expr.span) {
-                    diag.span_suggestion_verbose(
-                        expr.span.shrink_to_hi(),
-                        format!(
-                            "use `{def_path}::copied` to copy the value inside the `{def_path}`"
-                        ),
-                        ".copied()",
-                        Applicability::MachineApplicable,
-                    );
-                    return true;
+                let span = expr.span.shrink_to_hi();
+                let subdiag = if self.type_is_copy_modulo_regions(self.param_env, ty) {
+                    errors::OptionResultRefMismatch::Copied { span, def_path }
                 } else if let Some(clone_did) = self.tcx.lang_items().clone_trait()
                     && rustc_trait_selection::traits::type_known_to_meet_bound_modulo_regions(
                         self,
                         self.param_env,
-                        *ty,
+                        ty,
                         clone_did,
-                        expr.span
                     )
                 {
-                    diag.span_suggestion_verbose(
-                        expr.span.shrink_to_hi(),
-                        format!(
-                            "use `{def_path}::cloned` to clone the value inside the `{def_path}`"
-                        ),
-                        ".cloned()",
-                        Applicability::MachineApplicable,
-                    );
-                    return true;
-                }
+                    errors::OptionResultRefMismatch::Cloned { span, def_path }
+                } else {
+                    return false;
+                };
+                diag.subdiagnostic(subdiag);
+                return true;
             }
-            false
-        };
-
-        if let Some(result_did) = self.tcx.get_diagnostic_item(sym::Result)
-            && adt_def.did() == result_did
-            // Check that the error types are equal
-            && self.can_eq(self.param_env, substs.type_at(1), expected_substs.type_at(1))
-        {
-            return suggest_copied_or_cloned();
-        } else if let Some(option_did) = self.tcx.get_diagnostic_item(sym::Option)
-            && adt_def.did() == option_did
-        {
-            return suggest_copied_or_cloned();
         }
 
         false
@@ -1094,17 +1224,27 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 self.tcx,
                 self.misc(expr.span),
                 self.param_env,
-                ty::Binder::dummy(self.tcx.mk_trait_ref(
-                    into_def_id,
-                    [expr_ty, expected_ty]
-                )),
+                ty::TraitRef::new(self.tcx, into_def_id, [expr_ty, expected_ty]),
             ))
         {
-            let sugg = if expr.precedence().order() >= PREC_POSTFIX {
-                vec![(expr.span.shrink_to_hi(), ".into()".to_owned())]
+            let mut span = expr.span;
+            while expr.span.eq_ctxt(span)
+                && let Some(parent_callsite) = span.parent_callsite()
+            {
+                span = parent_callsite;
+            }
+
+            let mut sugg = if expr.precedence().order() >= PREC_POSTFIX {
+                vec![(span.shrink_to_hi(), ".into()".to_owned())]
             } else {
-                vec![(expr.span.shrink_to_lo(), "(".to_owned()), (expr.span.shrink_to_hi(), ").into()".to_owned())]
+                vec![
+                    (span.shrink_to_lo(), "(".to_owned()),
+                    (span.shrink_to_hi(), ").into()".to_owned()),
+                ]
             };
+            if let Some(name) = self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
+                sugg.insert(0, (expr.span.shrink_to_lo(), format!("{}: ", name)));
+            }
             diag.multipart_suggestion(
                 format!("call `Into::into` on this expression to convert `{expr_ty}` into `{expected_ty}`"),
                 sugg,
@@ -1128,7 +1268,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return false;
         }
 
-        let ty::Adt(def, _) = expr_ty.peel_refs().kind() else { return false; };
+        let ty::Adt(def, _) = expr_ty.peel_refs().kind() else {
+            return false;
+        };
         if !self.tcx.is_diagnostic_item(sym::Option, def.did()) {
             return false;
         }
@@ -1143,9 +1285,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // since the user probably just misunderstood how `let else`
         // and `&&` work together.
         if let Some((_, hir::Node::Local(local))) = cond_parent
-            && let hir::PatKind::Path(qpath) | hir::PatKind::TupleStruct(qpath, _, _) = &local.pat.kind
+            && let hir::PatKind::Path(qpath) | hir::PatKind::TupleStruct(qpath, _, _) =
+                &local.pat.kind
             && let hir::QPath::Resolved(None, path) = qpath
-            && let Some(did) = path.res.opt_def_id()
+            && let Some(did) = path
+                .res
+                .opt_def_id()
                 .and_then(|did| self.tcx.opt_parent(did))
                 .and_then(|did| self.tcx.opt_parent(did))
             && self.tcx.is_diagnostic_item(sym::Option, did)
@@ -1153,13 +1298,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return false;
         }
 
-        diag.span_suggestion(
+        let suggestion = match self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
+            Some(ident) => format!(": {ident}.is_some()"),
+            None => ".is_some()".to_string(),
+        };
+
+        diag.span_suggestion_verbose(
             expr.span.shrink_to_hi(),
             "use `Option::is_some` to test if the `Option` has a value",
-            ".is_some()",
+            suggestion,
             Applicability::MachineApplicable,
         );
-
         true
     }
 
@@ -1246,7 +1395,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 node: rustc_ast::LitKind::Int(lit, rustc_ast::LitIntType::Unsuffixed),
                 span,
             }) => {
-                let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(span) else { return false; };
+                let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(*span) else {
+                    return false;
+                };
                 if !(snippet.starts_with("0x") || snippet.starts_with("0X")) {
                     return false;
                 }
@@ -1286,10 +1437,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
 
         // Provided expression needs to be a literal `0`.
-        let ExprKind::Lit(Spanned {
-            node: rustc_ast::LitKind::Int(0, _),
-            span,
-        }) = expr.kind else {
+        let ExprKind::Lit(Spanned { node: rustc_ast::LitKind::Int(0, _), span }) = expr.kind else {
             return false;
         };
 
@@ -1305,7 +1453,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         // We have satisfied all requirements to provide a suggestion. Emit it.
         err.span_suggestion(
-            span,
+            *span,
             format!("if you meant to create a null pointer, use `{null_path_str}()`"),
             null_path_str + "()",
             Applicability::MachineApplicable,
@@ -1320,7 +1468,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expr: &hir::Expr<'_>,
         expected_ty: Ty<'tcx>,
     ) -> bool {
-        let Some((DefKind::AssocFn, old_def_id)) = self.typeck_results.borrow().type_dependent_def(expr.hir_id) else {
+        let Some((DefKind::AssocFn, old_def_id)) =
+            self.typeck_results.borrow().type_dependent_def(expr.hir_id)
+        else {
             return false;
         };
         let old_item_name = self.tcx.item_name(old_def_id);
@@ -1376,9 +1526,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // Same item
             return false;
         }
-        let item_ty = self.tcx.type_of(item.def_id).subst_identity();
+        let item_ty = self.tcx.type_of(item.def_id).instantiate_identity();
         // FIXME(compiler-errors): This check is *so* rudimentary
-        if item_ty.needs_subst() {
+        if item_ty.has_param() {
             return false;
         }
         if self.can_coerce(item_ty, expected_ty) {
@@ -1395,12 +1545,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     fn is_loop(&self, id: hir::HirId) -> bool {
-        let node = self.tcx.hir().get(id);
+        let node = self.tcx.hir_node(id);
         matches!(node, Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))
     }
 
     fn is_local_statement(&self, id: hir::HirId) -> bool {
-        let node = self.tcx.hir().get(id);
+        let node = self.tcx.hir_node(id);
         matches!(node, Node::Stmt(Stmt { kind: StmtKind::Local(..), .. }))
     }
 
@@ -1413,8 +1563,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         found_ty: Ty<'tcx>,
         expr: &hir::Expr<'_>,
     ) {
-        let hir::ExprKind::MethodCall(segment, callee_expr, &[], _) = expr.kind else { return; };
-        let Some(clone_trait_did) = self.tcx.lang_items().clone_trait() else { return; };
+        // When `expr` is `x` in something like `let x = foo.clone(); x`, need to recurse up to get
+        // `foo` and `clone`.
+        let expr = self.note_type_is_not_clone_inner_expr(expr);
+
+        // If we've recursed to an `expr` of `foo.clone()`, get `foo` and `clone`.
+        let hir::ExprKind::MethodCall(segment, callee_expr, &[], _) = expr.kind else {
+            return;
+        };
+
+        let Some(clone_trait_did) = self.tcx.lang_items().clone_trait() else {
+            return;
+        };
         let ty::Ref(_, pointee_ty, _) = found_ty.kind() else { return };
         let results = self.typeck_results.borrow();
         // First, look for a `Clone::clone` call
@@ -1432,7 +1592,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             && !results.expr_adjustments(callee_expr).iter().any(|adj| matches!(adj.kind, ty::adjustment::Adjust::Deref(..)))
             // Check that we're in fact trying to clone into the expected type
             && self.can_coerce(*pointee_ty, expected_ty)
-            && let trait_ref = ty::Binder::dummy(self.tcx.mk_trait_ref(clone_trait_did, [expected_ty]))
+            && let trait_ref = ty::TraitRef::new(self.tcx, clone_trait_did, [expected_ty])
             // And the expected type doesn't implement `Clone`
             && !self.predicate_must_hold_considering_regions(&traits::Obligation::new(
                 self.tcx,
@@ -1443,7 +1603,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         {
             diag.span_note(
                 callee_expr.span,
-                &format!(
+                format!(
                     "`{expected_ty}` does not implement `Clone`, so `{found_ty}` was cloned instead"
                 ),
             );
@@ -1459,8 +1619,132 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     None,
                 );
             } else {
+                if let Some(errors) =
+                    self.could_impl_trait(clone_trait_did, expected_ty, self.param_env)
+                {
+                    match &errors[..] {
+                        [] => {}
+                        [error] => {
+                            diag.help(format!(
+                                "`Clone` is not implemented because the trait bound `{}` is \
+                                 not satisfied",
+                                error.obligation.predicate,
+                            ));
+                        }
+                        [errors @ .., last] => {
+                            diag.help(format!(
+                                "`Clone` is not implemented because the following trait bounds \
+                                 could not be satisfied: {} and `{}`",
+                                errors
+                                    .iter()
+                                    .map(|e| format!("`{}`", e.obligation.predicate))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                last.obligation.predicate,
+                            ));
+                        }
+                    }
+                    for error in errors {
+                        if let traits::FulfillmentErrorCode::CodeSelectionError(
+                            traits::SelectionError::Unimplemented,
+                        ) = error.code
+                            && let ty::PredicateKind::Clause(ty::ClauseKind::Trait(pred)) =
+                                error.obligation.predicate.kind().skip_binder()
+                        {
+                            self.infcx.err_ctxt().suggest_derive(
+                                &error.obligation,
+                                diag,
+                                error.obligation.predicate.kind().rebind(pred),
+                            );
+                        }
+                    }
+                }
                 self.suggest_derive(diag, &[(trait_ref.to_predicate(self.tcx), None, None)]);
             }
+        }
+    }
+
+    /// Given a type mismatch error caused by `&T` being cloned instead of `T`, and
+    /// the `expr` as the source of this type mismatch, try to find the method call
+    /// as the source of this error and return that instead. Otherwise, return the
+    /// original expression.
+    fn note_type_is_not_clone_inner_expr<'b>(
+        &'b self,
+        expr: &'b hir::Expr<'b>,
+    ) -> &'b hir::Expr<'b> {
+        match expr.peel_blocks().kind {
+            hir::ExprKind::Path(hir::QPath::Resolved(
+                None,
+                hir::Path { segments: [_], res: crate::Res::Local(binding), .. },
+            )) => {
+                let Some(hir::Node::Pat(hir::Pat { hir_id, .. })) = self.tcx.opt_hir_node(*binding)
+                else {
+                    return expr;
+                };
+                let Some(parent) = self.tcx.opt_hir_node(self.tcx.hir().parent_id(*hir_id)) else {
+                    return expr;
+                };
+
+                match parent {
+                    // foo.clone()
+                    hir::Node::Local(hir::Local { init: Some(init), .. }) => {
+                        self.note_type_is_not_clone_inner_expr(init)
+                    }
+                    // When `expr` is more complex like a tuple
+                    hir::Node::Pat(hir::Pat {
+                        hir_id: pat_hir_id,
+                        kind: hir::PatKind::Tuple(pats, ..),
+                        ..
+                    }) => {
+                        let Some(hir::Node::Local(hir::Local { init: Some(init), .. })) =
+                            self.tcx.opt_hir_node(self.tcx.hir().parent_id(*pat_hir_id))
+                        else {
+                            return expr;
+                        };
+
+                        match init.peel_blocks().kind {
+                            ExprKind::Tup(init_tup) => {
+                                if let Some(init) = pats
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|x| x.1.hir_id == *hir_id)
+                                    .find_map(|(i, _)| init_tup.get(i))
+                                {
+                                    self.note_type_is_not_clone_inner_expr(init)
+                                } else {
+                                    expr
+                                }
+                            }
+                            _ => expr,
+                        }
+                    }
+                    _ => expr,
+                }
+            }
+            // If we're calling into a closure that may not be typed recurse into that call. no need
+            // to worry if it's a call to a typed function or closure as this would ne handled
+            // previously.
+            hir::ExprKind::Call(Expr { kind: call_expr_kind, .. }, _) => {
+                if let hir::ExprKind::Path(hir::QPath::Resolved(None, call_expr_path)) =
+                    call_expr_kind
+                    && let hir::Path { segments: [_], res: crate::Res::Local(binding), .. } =
+                        call_expr_path
+                    && let Some(hir::Node::Pat(hir::Pat { hir_id, .. })) =
+                        self.tcx.opt_hir_node(*binding)
+                    && let Some(closure) = self.tcx.opt_hir_node(self.tcx.hir().parent_id(*hir_id))
+                    && let hir::Node::Local(hir::Local { init: Some(init), .. }) = closure
+                    && let Expr {
+                        kind: hir::ExprKind::Closure(hir::Closure { body: body_id, .. }),
+                        ..
+                    } = init
+                {
+                    let hir::Body { value: body_expr, .. } = self.tcx.hir().body(*body_id);
+                    self.note_type_is_not_clone_inner_expr(body_expr)
+                } else {
+                    expr
+                }
+            }
+            _ => expr,
         }
     }
 
@@ -1500,6 +1784,1390 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             true
         } else {
             false
+        }
+    }
+
+    pub(crate) fn is_field_suggestable(
+        &self,
+        field: &ty::FieldDef,
+        hir_id: HirId,
+        span: Span,
+    ) -> bool {
+        // The field must be visible in the containing module.
+        field.vis.is_accessible_from(self.tcx.parent_module(hir_id), self.tcx)
+            // The field must not be unstable.
+            && !matches!(
+                self.tcx.eval_stability(field.did, None, rustc_span::DUMMY_SP, None),
+                rustc_middle::middle::stability::EvalResult::Deny { .. }
+            )
+            // If the field is from an external crate it must not be `doc(hidden)`.
+            && (field.did.is_local() || !self.tcx.is_doc_hidden(field.did))
+            // If the field is hygienic it must come from the same syntax context.
+            && self.tcx.def_ident_span(field.did).unwrap().normalize_to_macros_2_0().eq_ctxt(span)
+    }
+
+    pub(crate) fn suggest_missing_unwrap_expect(
+        &self,
+        err: &mut Diagnostic,
+        expr: &hir::Expr<'tcx>,
+        expected: Ty<'tcx>,
+        found: Ty<'tcx>,
+    ) -> bool {
+        let ty::Adt(adt, args) = found.kind() else {
+            return false;
+        };
+        let ret_ty_matches = |diagnostic_item| {
+            let Some(sig) = self.body_fn_sig() else {
+                return false;
+            };
+            let ty::Adt(kind, _) = sig.output().kind() else {
+                return false;
+            };
+            self.tcx.is_diagnostic_item(diagnostic_item, kind.did())
+        };
+
+        // don't suggest anything like `Ok(ok_val).unwrap()` , `Some(some_val).unwrap()`,
+        // `None.unwrap()` etc.
+        let is_ctor = matches!(
+            expr.kind,
+            hir::ExprKind::Call(
+                hir::Expr {
+                    kind: hir::ExprKind::Path(hir::QPath::Resolved(
+                        None,
+                        hir::Path { res: Res::Def(hir::def::DefKind::Ctor(_, _), _), .. },
+                    )),
+                    ..
+                },
+                ..,
+            ) | hir::ExprKind::Path(hir::QPath::Resolved(
+                None,
+                hir::Path { res: Res::Def(hir::def::DefKind::Ctor(_, _), _), .. },
+            )),
+        );
+
+        let (article, kind, variant, sugg_operator) =
+            if self.tcx.is_diagnostic_item(sym::Result, adt.did()) {
+                ("a", "Result", "Err", ret_ty_matches(sym::Result))
+            } else if self.tcx.is_diagnostic_item(sym::Option, adt.did()) {
+                ("an", "Option", "None", ret_ty_matches(sym::Option))
+            } else {
+                return false;
+            };
+        if is_ctor || !self.can_coerce(args.type_at(0), expected) {
+            return false;
+        }
+
+        let (msg, sugg) = if sugg_operator {
+            (
+                format!(
+                    "use the `?` operator to extract the `{found}` value, propagating \
+                            {article} `{kind}::{variant}` value to the caller"
+                ),
+                "?",
+            )
+        } else {
+            (
+                format!(
+                    "consider using `{kind}::expect` to unwrap the `{found}` value, \
+                                panicking if the value is {article} `{kind}::{variant}`"
+                ),
+                ".expect(\"REASON\")",
+            )
+        };
+
+        let sugg = match self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
+            Some(ident) => format!(": {ident}{sugg}"),
+            None => sugg.to_string(),
+        };
+
+        err.span_suggestion_verbose(
+            expr.span.shrink_to_hi(),
+            msg,
+            sugg,
+            Applicability::HasPlaceholders,
+        );
+        return true;
+    }
+
+    pub(crate) fn suggest_coercing_result_via_try_operator(
+        &self,
+        err: &mut Diagnostic,
+        expr: &hir::Expr<'tcx>,
+        expected: Ty<'tcx>,
+        found: Ty<'tcx>,
+    ) -> bool {
+        let map = self.tcx.hir();
+        let returned = matches!(
+            map.find_parent(expr.hir_id),
+            Some(hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Ret(_), .. }))
+        ) || map.get_return_block(expr.hir_id).is_some();
+        if returned
+            && let ty::Adt(e, args_e) = expected.kind()
+            && let ty::Adt(f, args_f) = found.kind()
+            && e.did() == f.did()
+            && Some(e.did()) == self.tcx.get_diagnostic_item(sym::Result)
+            && let e_ok = args_e.type_at(0)
+            && let f_ok = args_f.type_at(0)
+            && self.infcx.can_eq(self.param_env, f_ok, e_ok)
+            && let e_err = args_e.type_at(1)
+            && let f_err = args_f.type_at(1)
+            && self
+                .infcx
+                .type_implements_trait(
+                    self.tcx.get_diagnostic_item(sym::Into).unwrap(),
+                    [f_err, e_err],
+                    self.param_env,
+                )
+                .must_apply_modulo_regions()
+        {
+            err.multipart_suggestion(
+                "use `?` to coerce and return an appropriate `Err`, and wrap the resulting value \
+                 in `Ok` so the expression remains of type `Result`",
+                vec![
+                    (expr.span.shrink_to_lo(), "Ok(".to_string()),
+                    (expr.span.shrink_to_hi(), "?)".to_string()),
+                ],
+                Applicability::MaybeIncorrect,
+            );
+            return true;
+        }
+        false
+    }
+
+    /// If the expected type is an enum (Issue #55250) with any variants whose
+    /// sole field is of the found type, suggest such variants. (Issue #42764)
+    pub(crate) fn suggest_compatible_variants(
+        &self,
+        err: &mut Diagnostic,
+        expr: &hir::Expr<'_>,
+        expected: Ty<'tcx>,
+        expr_ty: Ty<'tcx>,
+    ) -> bool {
+        if in_external_macro(self.tcx.sess, expr.span) {
+            return false;
+        }
+        if let ty::Adt(expected_adt, args) = expected.kind() {
+            if let hir::ExprKind::Field(base, ident) = expr.kind {
+                let base_ty = self.typeck_results.borrow().expr_ty(base);
+                if self.can_eq(self.param_env, base_ty, expected)
+                    && let Some(base_span) = base.span.find_ancestor_inside(expr.span)
+                {
+                    err.span_suggestion_verbose(
+                        expr.span.with_lo(base_span.hi()),
+                        format!("consider removing the tuple struct field `{ident}`"),
+                        "",
+                        Applicability::MaybeIncorrect,
+                    );
+                    return true;
+                }
+            }
+
+            // If the expression is of type () and it's the return expression of a block,
+            // we suggest adding a separate return expression instead.
+            // (To avoid things like suggesting `Ok(while .. { .. })`.)
+            if expr_ty.is_unit() {
+                let mut id = expr.hir_id;
+                let mut parent;
+
+                // Unroll desugaring, to make sure this works for `for` loops etc.
+                loop {
+                    parent = self.tcx.hir().parent_id(id);
+                    if let Some(parent_span) = self.tcx.hir().opt_span(parent) {
+                        if parent_span.find_ancestor_inside(expr.span).is_some() {
+                            // The parent node is part of the same span, so is the result of the
+                            // same expansion/desugaring and not the 'real' parent node.
+                            id = parent;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+
+                if let Some(hir::Node::Block(&hir::Block {
+                    span: block_span, expr: Some(e), ..
+                })) = self.tcx.opt_hir_node(parent)
+                {
+                    if e.hir_id == id {
+                        if let Some(span) = expr.span.find_ancestor_inside(block_span) {
+                            let return_suggestions = if self
+                                .tcx
+                                .is_diagnostic_item(sym::Result, expected_adt.did())
+                            {
+                                vec!["Ok(())"]
+                            } else if self.tcx.is_diagnostic_item(sym::Option, expected_adt.did()) {
+                                vec!["None", "Some(())"]
+                            } else {
+                                return false;
+                            };
+                            if let Some(indent) =
+                                self.tcx.sess.source_map().indentation_before(span.shrink_to_lo())
+                            {
+                                // Add a semicolon, except after `}`.
+                                let semicolon =
+                                    match self.tcx.sess.source_map().span_to_snippet(span) {
+                                        Ok(s) if s.ends_with('}') => "",
+                                        _ => ";",
+                                    };
+                                err.span_suggestions(
+                                    span.shrink_to_hi(),
+                                    "try adding an expression at the end of the block",
+                                    return_suggestions
+                                        .into_iter()
+                                        .map(|r| format!("{semicolon}\n{indent}{r}")),
+                                    Applicability::MaybeIncorrect,
+                                );
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            let compatible_variants: Vec<(String, _, _, Option<String>)> = expected_adt
+                .variants()
+                .iter()
+                .filter(|variant| {
+                    variant.fields.len() == 1
+                })
+                .filter_map(|variant| {
+                    let sole_field = &variant.single_field();
+
+                    let field_is_local = sole_field.did.is_local();
+                    let field_is_accessible =
+                        sole_field.vis.is_accessible_from(expr.hir_id.owner.def_id, self.tcx)
+                        // Skip suggestions for unstable public fields (for example `Pin::pointer`)
+                        && matches!(self.tcx.eval_stability(sole_field.did, None, expr.span, None), EvalResult::Allow | EvalResult::Unmarked);
+
+                    if !field_is_local && !field_is_accessible {
+                        return None;
+                    }
+
+                    let note_about_variant_field_privacy = (field_is_local && !field_is_accessible)
+                        .then(|| " (its field is private, but it's local to this crate and its privacy can be changed)".to_string());
+
+                    let sole_field_ty = sole_field.ty(self.tcx, args);
+                    if self.can_coerce(expr_ty, sole_field_ty) {
+                        let variant_path =
+                            with_no_trimmed_paths!(self.tcx.def_path_str(variant.def_id));
+                        // FIXME #56861: DRYer prelude filtering
+                        if let Some(path) = variant_path.strip_prefix("std::prelude::")
+                            && let Some((_, path)) = path.split_once("::")
+                        {
+                            return Some((path.to_string(), variant.ctor_kind(), sole_field.name, note_about_variant_field_privacy));
+                        }
+                        Some((variant_path, variant.ctor_kind(), sole_field.name, note_about_variant_field_privacy))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let suggestions_for = |variant: &_, ctor_kind, field_name| {
+                let prefix = match self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
+                    Some(ident) => format!("{ident}: "),
+                    None => String::new(),
+                };
+
+                let (open, close) = match ctor_kind {
+                    Some(CtorKind::Fn) => ("(".to_owned(), ")"),
+                    None => (format!(" {{ {field_name}: "), " }"),
+
+                    Some(CtorKind::Const) => unreachable!("unit variants don't have fields"),
+                };
+
+                // Suggest constructor as deep into the block tree as possible.
+                // This fixes https://github.com/rust-lang/rust/issues/101065,
+                // and also just helps make the most minimal suggestions.
+                let mut expr = expr;
+                while let hir::ExprKind::Block(block, _) = &expr.kind
+                    && let Some(expr_) = &block.expr
+                {
+                    expr = expr_
+                }
+
+                vec![
+                    (expr.span.shrink_to_lo(), format!("{prefix}{variant}{open}")),
+                    (expr.span.shrink_to_hi(), close.to_owned()),
+                ]
+            };
+
+            match &compatible_variants[..] {
+                [] => { /* No variants to format */ }
+                [(variant, ctor_kind, field_name, note)] => {
+                    // Just a single matching variant.
+                    err.multipart_suggestion_verbose(
+                        format!(
+                            "try wrapping the expression in `{variant}`{note}",
+                            note = note.as_deref().unwrap_or("")
+                        ),
+                        suggestions_for(&**variant, *ctor_kind, *field_name),
+                        Applicability::MaybeIncorrect,
+                    );
+                    return true;
+                }
+                _ => {
+                    // More than one matching variant.
+                    err.multipart_suggestions(
+                        format!(
+                            "try wrapping the expression in a variant of `{}`",
+                            self.tcx.def_path_str(expected_adt.did())
+                        ),
+                        compatible_variants.into_iter().map(
+                            |(variant, ctor_kind, field_name, _)| {
+                                suggestions_for(&variant, ctor_kind, field_name)
+                            },
+                        ),
+                        Applicability::MaybeIncorrect,
+                    );
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    pub(crate) fn suggest_non_zero_new_unwrap(
+        &self,
+        err: &mut Diagnostic,
+        expr: &hir::Expr<'_>,
+        expected: Ty<'tcx>,
+        expr_ty: Ty<'tcx>,
+    ) -> bool {
+        let tcx = self.tcx;
+        let (adt, unwrap) = match expected.kind() {
+            // In case Option<NonZero*> is wanted, but * is provided, suggest calling new
+            ty::Adt(adt, args) if tcx.is_diagnostic_item(sym::Option, adt.did()) => {
+                // Unwrap option
+                let ty::Adt(adt, _) = args.type_at(0).kind() else {
+                    return false;
+                };
+
+                (adt, "")
+            }
+            // In case NonZero* is wanted, but * is provided also add `.unwrap()` to satisfy types
+            ty::Adt(adt, _) => (adt, ".unwrap()"),
+            _ => return false,
+        };
+
+        let map = [
+            (sym::NonZeroU8, tcx.types.u8),
+            (sym::NonZeroU16, tcx.types.u16),
+            (sym::NonZeroU32, tcx.types.u32),
+            (sym::NonZeroU64, tcx.types.u64),
+            (sym::NonZeroU128, tcx.types.u128),
+            (sym::NonZeroI8, tcx.types.i8),
+            (sym::NonZeroI16, tcx.types.i16),
+            (sym::NonZeroI32, tcx.types.i32),
+            (sym::NonZeroI64, tcx.types.i64),
+            (sym::NonZeroI128, tcx.types.i128),
+        ];
+
+        let Some((s, _)) = map.iter().find(|&&(s, t)| {
+            self.tcx.is_diagnostic_item(s, adt.did()) && self.can_coerce(expr_ty, t)
+        }) else {
+            return false;
+        };
+
+        let path = self.tcx.def_path_str(adt.non_enum_variant().def_id);
+
+        err.multipart_suggestion(
+            format!("consider calling `{s}::new`"),
+            vec![
+                (expr.span.shrink_to_lo(), format!("{path}::new(")),
+                (expr.span.shrink_to_hi(), format!("){unwrap}")),
+            ],
+            Applicability::MaybeIncorrect,
+        );
+
+        true
+    }
+
+    /// Identify some cases where `as_ref()` would be appropriate and suggest it.
+    ///
+    /// Given the following code:
+    /// ```compile_fail,E0308
+    /// struct Foo;
+    /// fn takes_ref(_: &Foo) {}
+    /// let ref opt = Some(Foo);
+    ///
+    /// opt.map(|param| takes_ref(param));
+    /// ```
+    /// Suggest using `opt.as_ref().map(|param| takes_ref(param));` instead.
+    ///
+    /// It only checks for `Option` and `Result` and won't work with
+    /// ```ignore (illustrative)
+    /// opt.map(|param| { takes_ref(param) });
+    /// ```
+    fn can_use_as_ref(&self, expr: &hir::Expr<'_>) -> Option<(Vec<(Span, String)>, &'static str)> {
+        let hir::ExprKind::Path(hir::QPath::Resolved(_, path)) = expr.kind else {
+            return None;
+        };
+
+        let hir::def::Res::Local(local_id) = path.res else {
+            return None;
+        };
+
+        let local_parent = self.tcx.hir().parent_id(local_id);
+        let Some(Node::Param(hir::Param { hir_id: param_hir_id, .. })) =
+            self.tcx.opt_hir_node(local_parent)
+        else {
+            return None;
+        };
+
+        let param_parent = self.tcx.hir().parent_id(*param_hir_id);
+        let Some(Node::Expr(hir::Expr {
+            hir_id: expr_hir_id,
+            kind: hir::ExprKind::Closure(hir::Closure { fn_decl: closure_fn_decl, .. }),
+            ..
+        })) = self.tcx.opt_hir_node(param_parent)
+        else {
+            return None;
+        };
+
+        let expr_parent = self.tcx.hir().parent_id(*expr_hir_id);
+        let hir = self.tcx.opt_hir_node(expr_parent);
+        let closure_params_len = closure_fn_decl.inputs.len();
+        let (
+            Some(Node::Expr(hir::Expr {
+                kind: hir::ExprKind::MethodCall(method_path, receiver, ..),
+                ..
+            })),
+            1,
+        ) = (hir, closure_params_len)
+        else {
+            return None;
+        };
+
+        let self_ty = self.typeck_results.borrow().expr_ty(receiver);
+        let name = method_path.ident.name;
+        let is_as_ref_able = match self_ty.peel_refs().kind() {
+            ty::Adt(def, _) => {
+                (self.tcx.is_diagnostic_item(sym::Option, def.did())
+                    || self.tcx.is_diagnostic_item(sym::Result, def.did()))
+                    && (name == sym::map || name == sym::and_then)
+            }
+            _ => false,
+        };
+        if is_as_ref_able {
+            Some((
+                vec![(method_path.ident.span.shrink_to_lo(), "as_ref().".to_string())],
+                "consider using `as_ref` instead",
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// This function is used to determine potential "simple" improvements or users' errors and
+    /// provide them useful help. For example:
+    ///
+    /// ```compile_fail,E0308
+    /// fn some_fn(s: &str) {}
+    ///
+    /// let x = "hey!".to_owned();
+    /// some_fn(x); // error
+    /// ```
+    ///
+    /// No need to find every potential function which could make a coercion to transform a
+    /// `String` into a `&str` since a `&` would do the trick!
+    ///
+    /// In addition of this check, it also checks between references mutability state. If the
+    /// expected is mutable but the provided isn't, maybe we could just say "Hey, try with
+    /// `&mut`!".
+    pub(crate) fn suggest_deref_or_ref(
+        &self,
+        expr: &hir::Expr<'tcx>,
+        checked_ty: Ty<'tcx>,
+        expected: Ty<'tcx>,
+    ) -> Option<(
+        Vec<(Span, String)>,
+        String,
+        Applicability,
+        bool, /* verbose */
+        bool, /* suggest `&` or `&mut` type annotation */
+    )> {
+        let sess = self.sess();
+        let sp = expr.span;
+
+        // If the span is from an external macro, there's no suggestion we can make.
+        if in_external_macro(sess, sp) {
+            return None;
+        }
+
+        let sm = sess.source_map();
+
+        let replace_prefix = |s: &str, old: &str, new: &str| {
+            s.strip_prefix(old).map(|stripped| new.to_string() + stripped)
+        };
+
+        // `ExprKind::DropTemps` is semantically irrelevant for these suggestions.
+        let expr = expr.peel_drop_temps();
+
+        match (&expr.kind, expected.kind(), checked_ty.kind()) {
+            (_, &ty::Ref(_, exp, _), &ty::Ref(_, check, _)) => match (exp.kind(), check.kind()) {
+                (&ty::Str, &ty::Array(arr, _) | &ty::Slice(arr)) if arr == self.tcx.types.u8 => {
+                    if let hir::ExprKind::Lit(_) = expr.kind
+                        && let Ok(src) = sm.span_to_snippet(sp)
+                        && replace_prefix(&src, "b\"", "\"").is_some()
+                    {
+                        let pos = sp.lo() + BytePos(1);
+                        return Some((
+                            vec![(sp.with_hi(pos), String::new())],
+                            "consider removing the leading `b`".to_string(),
+                            Applicability::MachineApplicable,
+                            true,
+                            false,
+                        ));
+                    }
+                }
+                (&ty::Array(arr, _) | &ty::Slice(arr), &ty::Str) if arr == self.tcx.types.u8 => {
+                    if let hir::ExprKind::Lit(_) = expr.kind
+                        && let Ok(src) = sm.span_to_snippet(sp)
+                        && replace_prefix(&src, "\"", "b\"").is_some()
+                    {
+                        return Some((
+                            vec![(sp.shrink_to_lo(), "b".to_string())],
+                            "consider adding a leading `b`".to_string(),
+                            Applicability::MachineApplicable,
+                            true,
+                            false,
+                        ));
+                    }
+                }
+                _ => {}
+            },
+            (_, &ty::Ref(_, _, mutability), _) => {
+                // Check if it can work when put into a ref. For example:
+                //
+                // ```
+                // fn bar(x: &mut i32) {}
+                //
+                // let x = 0u32;
+                // bar(&x); // error, expected &mut
+                // ```
+                let ref_ty = match mutability {
+                    hir::Mutability::Mut => {
+                        Ty::new_mut_ref(self.tcx, self.tcx.lifetimes.re_static, checked_ty)
+                    }
+                    hir::Mutability::Not => {
+                        Ty::new_imm_ref(self.tcx, self.tcx.lifetimes.re_static, checked_ty)
+                    }
+                };
+                if self.can_coerce(ref_ty, expected) {
+                    let mut sugg_sp = sp;
+                    if let hir::ExprKind::MethodCall(segment, receiver, args, _) = expr.kind {
+                        let clone_trait =
+                            self.tcx.require_lang_item(LangItem::Clone, Some(segment.ident.span));
+                        if args.is_empty()
+                            && self
+                                .typeck_results
+                                .borrow()
+                                .type_dependent_def_id(expr.hir_id)
+                                .is_some_and(|did| {
+                                    let ai = self.tcx.associated_item(did);
+                                    ai.trait_container(self.tcx) == Some(clone_trait)
+                                })
+                            && segment.ident.name == sym::clone
+                        {
+                            // If this expression had a clone call when suggesting borrowing
+                            // we want to suggest removing it because it'd now be unnecessary.
+                            sugg_sp = receiver.span;
+                        }
+                    }
+
+                    if let hir::ExprKind::Unary(hir::UnOp::Deref, inner) = expr.kind
+                        && let Some(1) = self.deref_steps(expected, checked_ty)
+                    {
+                        // We have `*&T`, check if what was expected was `&T`.
+                        // If so, we may want to suggest removing a `*`.
+                        sugg_sp = sugg_sp.with_hi(inner.span.lo());
+                        return Some((
+                            vec![(sugg_sp, String::new())],
+                            "consider removing deref here".to_string(),
+                            Applicability::MachineApplicable,
+                            true,
+                            false,
+                        ));
+                    }
+
+                    if let Some((sugg, msg)) = self.can_use_as_ref(expr) {
+                        return Some((
+                            sugg,
+                            msg.to_string(),
+                            Applicability::MachineApplicable,
+                            true,
+                            false,
+                        ));
+                    }
+
+                    let prefix = match self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr)
+                    {
+                        Some(ident) => format!("{ident}: "),
+                        None => String::new(),
+                    };
+
+                    if let Some(hir::Node::Expr(hir::Expr {
+                        kind: hir::ExprKind::Assign(..),
+                        ..
+                    })) = self.tcx.hir().find_parent(expr.hir_id)
+                    {
+                        if mutability.is_mut() {
+                            // Suppressing this diagnostic, we'll properly print it in `check_expr_assign`
+                            return None;
+                        }
+                    }
+
+                    let make_sugg = |expr: &Expr<'_>, span: Span, sugg: &str| {
+                        let needs_parens = match expr.kind {
+                            // parenthesize if needed (Issue #46756)
+                            hir::ExprKind::Cast(_, _) | hir::ExprKind::Binary(_, _, _) => true,
+                            // parenthesize borrows of range literals (Issue #54505)
+                            _ if is_range_literal(expr) => true,
+                            _ => false,
+                        };
+
+                        if needs_parens {
+                            (
+                                vec![
+                                    (span.shrink_to_lo(), format!("{prefix}{sugg}(")),
+                                    (span.shrink_to_hi(), ")".to_string()),
+                                ],
+                                false,
+                            )
+                        } else {
+                            (vec![(span.shrink_to_lo(), format!("{prefix}{sugg}"))], true)
+                        }
+                    };
+
+                    // Suggest dereferencing the lhs for expressions such as `&T == T`
+                    if let Some(hir::Node::Expr(hir::Expr {
+                        kind: hir::ExprKind::Binary(_, lhs, ..),
+                        ..
+                    })) = self.tcx.hir().find_parent(expr.hir_id)
+                        && let &ty::Ref(..) = self.check_expr(lhs).kind()
+                    {
+                        let (sugg, verbose) = make_sugg(lhs, lhs.span, "*");
+
+                        return Some((
+                            sugg,
+                            "consider dereferencing the borrow".to_string(),
+                            Applicability::MachineApplicable,
+                            verbose,
+                            false,
+                        ));
+                    }
+
+                    let sugg = mutability.ref_prefix_str();
+                    let (sugg, verbose) = make_sugg(expr, sp, sugg);
+                    return Some((
+                        sugg,
+                        format!("consider {}borrowing here", mutability.mutably_str()),
+                        Applicability::MachineApplicable,
+                        verbose,
+                        false,
+                    ));
+                }
+            }
+            (hir::ExprKind::AddrOf(hir::BorrowKind::Ref, _, expr), _, &ty::Ref(_, checked, _))
+                if self.can_sub(self.param_env, checked, expected) =>
+            {
+                let make_sugg = |start: Span, end: BytePos| {
+                    // skip `(` for tuples such as `(c) = (&123)`.
+                    // make sure we won't suggest like `(c) = 123)` which is incorrect.
+                    let sp = sm
+                        .span_extend_while(start.shrink_to_lo(), |c| c == '(' || c.is_whitespace())
+                        .map_or(start, |s| s.shrink_to_hi());
+                    Some((
+                        vec![(sp.with_hi(end), String::new())],
+                        "consider removing the borrow".to_string(),
+                        Applicability::MachineApplicable,
+                        true,
+                        true,
+                    ))
+                };
+
+                // We have `&T`, check if what was expected was `T`. If so,
+                // we may want to suggest removing a `&`.
+                if sm.is_imported(expr.span) {
+                    // Go through the spans from which this span was expanded,
+                    // and find the one that's pointing inside `sp`.
+                    //
+                    // E.g. for `&format!("")`, where we want the span to the
+                    // `format!()` invocation instead of its expansion.
+                    if let Some(call_span) =
+                        iter::successors(Some(expr.span), |s| s.parent_callsite())
+                            .find(|&s| sp.contains(s))
+                        && sm.is_span_accessible(call_span)
+                    {
+                        return make_sugg(sp, call_span.lo());
+                    }
+                    return None;
+                }
+                if sp.contains(expr.span) && sm.is_span_accessible(expr.span) {
+                    return make_sugg(sp, expr.span.lo());
+                }
+            }
+            (
+                _,
+                &ty::RawPtr(TypeAndMut { ty: ty_b, mutbl: mutbl_b }),
+                &ty::Ref(_, ty_a, mutbl_a),
+            ) => {
+                if let Some(steps) = self.deref_steps(ty_a, ty_b)
+                    // Only suggest valid if dereferencing needed.
+                    && steps > 0
+                    // The pointer type implements `Copy` trait so the suggestion is always valid.
+                    && let Ok(src) = sm.span_to_snippet(sp)
+                {
+                    let derefs = "*".repeat(steps);
+                    let old_prefix = mutbl_a.ref_prefix_str();
+                    let new_prefix = mutbl_b.ref_prefix_str().to_owned() + &derefs;
+
+                    let suggestion = replace_prefix(&src, old_prefix, &new_prefix).map(|_| {
+                        // skip `&` or `&mut ` if both mutabilities are mutable
+                        let lo = sp.lo()
+                            + BytePos(min(old_prefix.len(), mutbl_b.ref_prefix_str().len()) as _);
+                        // skip `&` or `&mut `
+                        let hi = sp.lo() + BytePos(old_prefix.len() as _);
+                        let sp = sp.with_lo(lo).with_hi(hi);
+
+                        (
+                            sp,
+                            format!(
+                                "{}{derefs}",
+                                if mutbl_a != mutbl_b { mutbl_b.prefix_str() } else { "" }
+                            ),
+                            if mutbl_b <= mutbl_a {
+                                Applicability::MachineApplicable
+                            } else {
+                                Applicability::MaybeIncorrect
+                            },
+                        )
+                    });
+
+                    if let Some((span, src, applicability)) = suggestion {
+                        return Some((
+                            vec![(span, src)],
+                            "consider dereferencing".to_string(),
+                            applicability,
+                            true,
+                            false,
+                        ));
+                    }
+                }
+            }
+            _ if sp == expr.span => {
+                if let Some(mut steps) = self.deref_steps(checked_ty, expected) {
+                    let mut expr = expr.peel_blocks();
+                    let mut prefix_span = expr.span.shrink_to_lo();
+                    let mut remove = String::new();
+
+                    // Try peeling off any existing `&` and `&mut` to reach our target type
+                    while steps > 0 {
+                        if let hir::ExprKind::AddrOf(_, mutbl, inner) = expr.kind {
+                            // If the expression has `&`, removing it would fix the error
+                            prefix_span = prefix_span.with_hi(inner.span.lo());
+                            expr = inner;
+                            remove.push_str(mutbl.ref_prefix_str());
+                            steps -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    // If we've reached our target type with just removing `&`, then just print now.
+                    if steps == 0 && !remove.trim().is_empty() {
+                        return Some((
+                            vec![(prefix_span, String::new())],
+                            format!("consider removing the `{}`", remove.trim()),
+                            // Do not remove `&&` to get to bool, because it might be something like
+                            // { a } && b, which we have a separate fixup suggestion that is more
+                            // likely correct...
+                            if remove.trim() == "&&" && expected == self.tcx.types.bool {
+                                Applicability::MaybeIncorrect
+                            } else {
+                                Applicability::MachineApplicable
+                            },
+                            true,
+                            false,
+                        ));
+                    }
+
+                    // For this suggestion to make sense, the type would need to be `Copy`,
+                    // or we have to be moving out of a `Box<T>`
+                    if self.type_is_copy_modulo_regions(self.param_env, expected)
+                        // FIXME(compiler-errors): We can actually do this if the checked_ty is
+                        // `steps` layers of boxes, not just one, but this is easier and most likely.
+                        || (checked_ty.is_box() && steps == 1)
+                        // We can always deref a binop that takes its arguments by ref.
+                        || matches!(
+                            self.tcx.hir().get_parent(expr.hir_id),
+                            hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Binary(op, ..), .. })
+                                if !op.node.is_by_value()
+                        )
+                    {
+                        let deref_kind = if checked_ty.is_box() {
+                            "unboxing the value"
+                        } else if checked_ty.is_ref() {
+                            "dereferencing the borrow"
+                        } else {
+                            "dereferencing the type"
+                        };
+
+                        // Suggest removing `&` if we have removed any, otherwise suggest just
+                        // dereferencing the remaining number of steps.
+                        let message = if remove.is_empty() {
+                            format!("consider {deref_kind}")
+                        } else {
+                            format!(
+                                "consider removing the `{}` and {} instead",
+                                remove.trim(),
+                                deref_kind
+                            )
+                        };
+
+                        let prefix =
+                            match self.tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
+                                Some(ident) => format!("{ident}: "),
+                                None => String::new(),
+                            };
+
+                        let (span, suggestion) = if self.is_else_if_block(expr) {
+                            // Don't suggest nonsense like `else *if`
+                            return None;
+                        } else if let Some(expr) = self.maybe_get_block_expr(expr) {
+                            // prefix should be empty here..
+                            (expr.span.shrink_to_lo(), "*".to_string())
+                        } else {
+                            (prefix_span, format!("{}{}", prefix, "*".repeat(steps)))
+                        };
+                        if suggestion.trim().is_empty() {
+                            return None;
+                        }
+
+                        return Some((
+                            vec![(span, suggestion)],
+                            message,
+                            Applicability::MachineApplicable,
+                            true,
+                            false,
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Returns whether the given expression is an `else if`.
+    fn is_else_if_block(&self, expr: &hir::Expr<'_>) -> bool {
+        if let hir::ExprKind::If(..) = expr.kind {
+            let parent_id = self.tcx.hir().parent_id(expr.hir_id);
+            if let Some(Node::Expr(hir::Expr {
+                kind: hir::ExprKind::If(_, _, Some(else_expr)),
+                ..
+            })) = self.tcx.opt_hir_node(parent_id)
+            {
+                return else_expr.hir_id == expr.hir_id;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn suggest_cast(
+        &self,
+        err: &mut Diagnostic,
+        expr: &hir::Expr<'_>,
+        checked_ty: Ty<'tcx>,
+        expected_ty: Ty<'tcx>,
+        expected_ty_expr: Option<&'tcx hir::Expr<'tcx>>,
+    ) -> bool {
+        if self.tcx.sess.source_map().is_imported(expr.span) {
+            // Ignore if span is from within a macro.
+            return false;
+        }
+
+        let Ok(src) = self.tcx.sess.source_map().span_to_snippet(expr.span) else {
+            return false;
+        };
+
+        // If casting this expression to a given numeric type would be appropriate in case of a type
+        // mismatch.
+        //
+        // We want to minimize the amount of casting operations that are suggested, as it can be a
+        // lossy operation with potentially bad side effects, so we only suggest when encountering
+        // an expression that indicates that the original type couldn't be directly changed.
+        //
+        // For now, don't suggest casting with `as`.
+        let can_cast = false;
+
+        let mut sugg = vec![];
+
+        if let Some(hir::Node::ExprField(field)) = self.tcx.hir().find_parent(expr.hir_id) {
+            // `expr` is a literal field for a struct, only suggest if appropriate
+            if field.is_shorthand {
+                // This is a field literal
+                sugg.push((field.ident.span.shrink_to_lo(), format!("{}: ", field.ident)));
+            } else {
+                // Likely a field was meant, but this field wasn't found. Do not suggest anything.
+                return false;
+            }
+        };
+
+        if let hir::ExprKind::Call(path, args) = &expr.kind
+            && let (hir::ExprKind::Path(hir::QPath::TypeRelative(base_ty, path_segment)), 1) =
+                (&path.kind, args.len())
+            // `expr` is a conversion like `u32::from(val)`, do not suggest anything (#63697).
+            && let (hir::TyKind::Path(hir::QPath::Resolved(None, base_ty_path)), sym::from) =
+                (&base_ty.kind, path_segment.ident.name)
+        {
+            if let Some(ident) = &base_ty_path.segments.iter().map(|s| s.ident).next() {
+                match ident.name {
+                    sym::i128
+                    | sym::i64
+                    | sym::i32
+                    | sym::i16
+                    | sym::i8
+                    | sym::u128
+                    | sym::u64
+                    | sym::u32
+                    | sym::u16
+                    | sym::u8
+                    | sym::isize
+                    | sym::usize
+                        if base_ty_path.segments.len() == 1 =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let msg = format!(
+            "you can convert {} `{}` to {} `{}`",
+            checked_ty.kind().article(),
+            checked_ty,
+            expected_ty.kind().article(),
+            expected_ty,
+        );
+        let cast_msg = format!(
+            "you can cast {} `{}` to {} `{}`",
+            checked_ty.kind().article(),
+            checked_ty,
+            expected_ty.kind().article(),
+            expected_ty,
+        );
+        let lit_msg = format!(
+            "change the type of the numeric literal from `{checked_ty}` to `{expected_ty}`",
+        );
+
+        let close_paren = if expr.precedence().order() < PREC_POSTFIX {
+            sugg.push((expr.span.shrink_to_lo(), "(".to_string()));
+            ")"
+        } else {
+            ""
+        };
+
+        let mut cast_suggestion = sugg.clone();
+        cast_suggestion.push((expr.span.shrink_to_hi(), format!("{close_paren} as {expected_ty}")));
+        let mut into_suggestion = sugg.clone();
+        into_suggestion.push((expr.span.shrink_to_hi(), format!("{close_paren}.into()")));
+        let mut suffix_suggestion = sugg.clone();
+        suffix_suggestion.push((
+            if matches!(
+                (&expected_ty.kind(), &checked_ty.kind()),
+                (ty::Int(_) | ty::Uint(_), ty::Float(_))
+            ) {
+                // Remove fractional part from literal, for example `42.0f32` into `42`
+                let src = src.trim_end_matches(&checked_ty.to_string());
+                let len = src.split('.').next().unwrap().len();
+                expr.span.with_lo(expr.span.lo() + BytePos(len as u32))
+            } else {
+                let len = src.trim_end_matches(&checked_ty.to_string()).len();
+                expr.span.with_lo(expr.span.lo() + BytePos(len as u32))
+            },
+            if expr.precedence().order() < PREC_POSTFIX {
+                // Readd `)`
+                format!("{expected_ty})")
+            } else {
+                expected_ty.to_string()
+            },
+        ));
+        let literal_is_ty_suffixed = |expr: &hir::Expr<'_>| {
+            if let hir::ExprKind::Lit(lit) = &expr.kind { lit.node.is_suffixed() } else { false }
+        };
+        let is_negative_int =
+            |expr: &hir::Expr<'_>| matches!(expr.kind, hir::ExprKind::Unary(hir::UnOp::Neg, ..));
+        let is_uint = |ty: Ty<'_>| matches!(ty.kind(), ty::Uint(..));
+
+        let in_const_context = self.tcx.hir().is_inside_const_context(expr.hir_id);
+
+        let suggest_fallible_into_or_lhs_from =
+            |err: &mut Diagnostic, exp_to_found_is_fallible: bool| {
+                // If we know the expression the expected type is derived from, we might be able
+                // to suggest a widening conversion rather than a narrowing one (which may
+                // panic). For example, given x: u8 and y: u32, if we know the span of "x",
+                //   x > y
+                // can be given the suggestion "u32::from(x) > y" rather than
+                // "x > y.try_into().unwrap()".
+                let lhs_expr_and_src = expected_ty_expr.and_then(|expr| {
+                    self.tcx
+                        .sess
+                        .source_map()
+                        .span_to_snippet(expr.span)
+                        .ok()
+                        .map(|src| (expr, src))
+                });
+                let (msg, suggestion) = if let (Some((lhs_expr, lhs_src)), false) =
+                    (lhs_expr_and_src, exp_to_found_is_fallible)
+                {
+                    let msg = format!(
+                        "you can convert `{lhs_src}` from `{expected_ty}` to `{checked_ty}`, matching the type of `{src}`",
+                    );
+                    let suggestion = vec![
+                        (lhs_expr.span.shrink_to_lo(), format!("{checked_ty}::from(")),
+                        (lhs_expr.span.shrink_to_hi(), ")".to_string()),
+                    ];
+                    (msg, suggestion)
+                } else {
+                    let msg =
+                        format!("{} and panic if the converted value doesn't fit", msg.clone());
+                    let mut suggestion = sugg.clone();
+                    suggestion.push((
+                        expr.span.shrink_to_hi(),
+                        format!("{close_paren}.try_into().unwrap()"),
+                    ));
+                    (msg, suggestion)
+                };
+                err.multipart_suggestion_verbose(msg, suggestion, Applicability::MachineApplicable);
+            };
+
+        let suggest_to_change_suffix_or_into =
+            |err: &mut Diagnostic,
+             found_to_exp_is_fallible: bool,
+             exp_to_found_is_fallible: bool| {
+                let exp_is_lhs = expected_ty_expr.is_some_and(|e| self.tcx.hir().is_lhs(e.hir_id));
+
+                if exp_is_lhs {
+                    return;
+                }
+
+                let always_fallible = found_to_exp_is_fallible
+                    && (exp_to_found_is_fallible || expected_ty_expr.is_none());
+                let msg = if literal_is_ty_suffixed(expr) {
+                    lit_msg.clone()
+                } else if always_fallible && (is_negative_int(expr) && is_uint(expected_ty)) {
+                    // We now know that converting either the lhs or rhs is fallible. Before we
+                    // suggest a fallible conversion, check if the value can never fit in the
+                    // expected type.
+                    let msg = format!("`{src}` cannot fit into type `{expected_ty}`");
+                    err.note(msg);
+                    return;
+                } else if in_const_context {
+                    // Do not recommend `into` or `try_into` in const contexts.
+                    return;
+                } else if found_to_exp_is_fallible {
+                    return suggest_fallible_into_or_lhs_from(err, exp_to_found_is_fallible);
+                } else {
+                    msg.clone()
+                };
+                let suggestion = if literal_is_ty_suffixed(expr) {
+                    suffix_suggestion.clone()
+                } else {
+                    into_suggestion.clone()
+                };
+                err.multipart_suggestion_verbose(msg, suggestion, Applicability::MachineApplicable);
+            };
+
+        match (&expected_ty.kind(), &checked_ty.kind()) {
+            (ty::Int(exp), ty::Int(found)) => {
+                let (f2e_is_fallible, e2f_is_fallible) = match (exp.bit_width(), found.bit_width())
+                {
+                    (Some(exp), Some(found)) if exp < found => (true, false),
+                    (Some(exp), Some(found)) if exp > found => (false, true),
+                    (None, Some(8 | 16)) => (false, true),
+                    (Some(8 | 16), None) => (true, false),
+                    (None, _) | (_, None) => (true, true),
+                    _ => (false, false),
+                };
+                suggest_to_change_suffix_or_into(err, f2e_is_fallible, e2f_is_fallible);
+                true
+            }
+            (ty::Uint(exp), ty::Uint(found)) => {
+                let (f2e_is_fallible, e2f_is_fallible) = match (exp.bit_width(), found.bit_width())
+                {
+                    (Some(exp), Some(found)) if exp < found => (true, false),
+                    (Some(exp), Some(found)) if exp > found => (false, true),
+                    (None, Some(8 | 16)) => (false, true),
+                    (Some(8 | 16), None) => (true, false),
+                    (None, _) | (_, None) => (true, true),
+                    _ => (false, false),
+                };
+                suggest_to_change_suffix_or_into(err, f2e_is_fallible, e2f_is_fallible);
+                true
+            }
+            (&ty::Int(exp), &ty::Uint(found)) => {
+                let (f2e_is_fallible, e2f_is_fallible) = match (exp.bit_width(), found.bit_width())
+                {
+                    (Some(exp), Some(found)) if found < exp => (false, true),
+                    (None, Some(8)) => (false, true),
+                    _ => (true, true),
+                };
+                suggest_to_change_suffix_or_into(err, f2e_is_fallible, e2f_is_fallible);
+                true
+            }
+            (&ty::Uint(exp), &ty::Int(found)) => {
+                let (f2e_is_fallible, e2f_is_fallible) = match (exp.bit_width(), found.bit_width())
+                {
+                    (Some(exp), Some(found)) if found > exp => (true, false),
+                    (Some(8), None) => (true, false),
+                    _ => (true, true),
+                };
+                suggest_to_change_suffix_or_into(err, f2e_is_fallible, e2f_is_fallible);
+                true
+            }
+            (ty::Float(exp), ty::Float(found)) => {
+                if found.bit_width() < exp.bit_width() {
+                    suggest_to_change_suffix_or_into(err, false, true);
+                } else if literal_is_ty_suffixed(expr) {
+                    err.multipart_suggestion_verbose(
+                        lit_msg,
+                        suffix_suggestion,
+                        Applicability::MachineApplicable,
+                    );
+                } else if can_cast {
+                    // Missing try_into implementation for `f64` to `f32`
+                    err.multipart_suggestion_verbose(
+                        format!("{cast_msg}, producing the closest possible value"),
+                        cast_suggestion,
+                        Applicability::MaybeIncorrect, // lossy conversion
+                    );
+                }
+                true
+            }
+            (&ty::Uint(_) | &ty::Int(_), &ty::Float(_)) => {
+                if literal_is_ty_suffixed(expr) {
+                    err.multipart_suggestion_verbose(
+                        lit_msg,
+                        suffix_suggestion,
+                        Applicability::MachineApplicable,
+                    );
+                } else if can_cast {
+                    // Missing try_into implementation for `{float}` to `{integer}`
+                    err.multipart_suggestion_verbose(
+                        format!("{msg}, rounding the float towards zero"),
+                        cast_suggestion,
+                        Applicability::MaybeIncorrect, // lossy conversion
+                    );
+                }
+                true
+            }
+            (ty::Float(exp), ty::Uint(found)) => {
+                // if `found` is `None` (meaning found is `usize`), don't suggest `.into()`
+                if exp.bit_width() > found.bit_width().unwrap_or(256) {
+                    err.multipart_suggestion_verbose(
+                        format!(
+                            "{msg}, producing the floating point representation of the integer",
+                        ),
+                        into_suggestion,
+                        Applicability::MachineApplicable,
+                    );
+                } else if literal_is_ty_suffixed(expr) {
+                    err.multipart_suggestion_verbose(
+                        lit_msg,
+                        suffix_suggestion,
+                        Applicability::MachineApplicable,
+                    );
+                } else {
+                    // Missing try_into implementation for `{integer}` to `{float}`
+                    err.multipart_suggestion_verbose(
+                        format!(
+                            "{cast_msg}, producing the floating point representation of the integer, \
+                                 rounded if necessary",
+                        ),
+                        cast_suggestion,
+                        Applicability::MaybeIncorrect, // lossy conversion
+                    );
+                }
+                true
+            }
+            (ty::Float(exp), ty::Int(found)) => {
+                // if `found` is `None` (meaning found is `isize`), don't suggest `.into()`
+                if exp.bit_width() > found.bit_width().unwrap_or(256) {
+                    err.multipart_suggestion_verbose(
+                        format!(
+                            "{}, producing the floating point representation of the integer",
+                            msg.clone(),
+                        ),
+                        into_suggestion,
+                        Applicability::MachineApplicable,
+                    );
+                } else if literal_is_ty_suffixed(expr) {
+                    err.multipart_suggestion_verbose(
+                        lit_msg,
+                        suffix_suggestion,
+                        Applicability::MachineApplicable,
+                    );
+                } else {
+                    // Missing try_into implementation for `{integer}` to `{float}`
+                    err.multipart_suggestion_verbose(
+                        format!(
+                            "{}, producing the floating point representation of the integer, \
+                                rounded if necessary",
+                            &msg,
+                        ),
+                        cast_suggestion,
+                        Applicability::MaybeIncorrect, // lossy conversion
+                    );
+                }
+                true
+            }
+            (
+                &ty::Uint(ty::UintTy::U32 | ty::UintTy::U64 | ty::UintTy::U128)
+                | &ty::Int(ty::IntTy::I32 | ty::IntTy::I64 | ty::IntTy::I128),
+                &ty::Char,
+            ) => {
+                err.multipart_suggestion_verbose(
+                    format!("{cast_msg}, since a `char` always occupies 4 bytes"),
+                    cast_suggestion,
+                    Applicability::MachineApplicable,
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Identify when the user has written `foo..bar()` instead of `foo.bar()`.
+    pub(crate) fn suggest_method_call_on_range_literal(
+        &self,
+        err: &mut Diagnostic,
+        expr: &hir::Expr<'tcx>,
+        checked_ty: Ty<'tcx>,
+        expected_ty: Ty<'tcx>,
+    ) {
+        if !hir::is_range_literal(expr) {
+            return;
+        }
+        let hir::ExprKind::Struct(hir::QPath::LangItem(LangItem::Range, ..), [start, end], _) =
+            expr.kind
+        else {
+            return;
+        };
+        let parent = self.tcx.hir().parent_id(expr.hir_id);
+        if let Some(hir::Node::ExprField(_)) = self.tcx.opt_hir_node(parent) {
+            // Ignore `Foo { field: a..Default::default() }`
+            return;
+        }
+        let mut expr = end.expr;
+        let mut expectation = Some(expected_ty);
+        while let hir::ExprKind::MethodCall(_, rcvr, ..) = expr.kind {
+            // Getting to the root receiver and asserting it is a fn call let's us ignore cases in
+            // `tests/ui/methods/issues/issue-90315.stderr`.
+            expr = rcvr;
+            // If we have more than one layer of calls, then the expected ty
+            // cannot guide the method probe.
+            expectation = None;
+        }
+        let hir::ExprKind::Call(method_name, _) = expr.kind else {
+            return;
+        };
+        let ty::Adt(adt, _) = checked_ty.kind() else {
+            return;
+        };
+        if self.tcx.lang_items().range_struct() != Some(adt.did()) {
+            return;
+        }
+        if let ty::Adt(adt, _) = expected_ty.kind()
+            && self.tcx.lang_items().range_struct() == Some(adt.did())
+        {
+            return;
+        }
+        // Check if start has method named end.
+        let hir::ExprKind::Path(hir::QPath::Resolved(None, p)) = method_name.kind else {
+            return;
+        };
+        let [hir::PathSegment { ident, .. }] = p.segments else {
+            return;
+        };
+        let self_ty = self.typeck_results.borrow().expr_ty(start.expr);
+        let Ok(_pick) = self.lookup_probe_for_diagnostic(
+            *ident,
+            self_ty,
+            expr,
+            probe::ProbeScope::AllTraits,
+            expectation,
+        ) else {
+            return;
+        };
+        let mut sugg = ".";
+        let mut span = start.expr.span.between(end.expr.span);
+        if span.lo() + BytePos(2) == span.hi() {
+            // There's no space between the start, the range op and the end, suggest removal which
+            // will be more noticeable than the replacement of `..` with `.`.
+            span = span.with_lo(span.lo() + BytePos(1));
+            sugg = "";
+        }
+        err.span_suggestion_verbose(
+            span,
+            "you likely meant to write a method call instead of a range",
+            sugg,
+            Applicability::MachineApplicable,
+        );
+    }
+
+    /// Identify when the type error is because `()` is found in a binding that was assigned a
+    /// block without a tail expression.
+    pub(crate) fn suggest_return_binding_for_missing_tail_expr(
+        &self,
+        err: &mut Diagnostic,
+        expr: &hir::Expr<'_>,
+        checked_ty: Ty<'tcx>,
+        expected_ty: Ty<'tcx>,
+    ) {
+        if !checked_ty.is_unit() {
+            return;
+        }
+        let hir::ExprKind::Path(hir::QPath::Resolved(None, path)) = expr.kind else {
+            return;
+        };
+        let hir::def::Res::Local(hir_id) = path.res else {
+            return;
+        };
+        let Some(hir::Node::Pat(pat)) = self.tcx.opt_hir_node(hir_id) else {
+            return;
+        };
+        let Some(hir::Node::Local(hir::Local { ty: None, init: Some(init), .. })) =
+            self.tcx.hir().find_parent(pat.hir_id)
+        else {
+            return;
+        };
+        let hir::ExprKind::Block(block, None) = init.kind else {
+            return;
+        };
+        if block.expr.is_some() {
+            return;
+        }
+        let [.., stmt] = block.stmts else {
+            err.span_label(block.span, "this empty block is missing a tail expression");
+            return;
+        };
+        let hir::StmtKind::Semi(tail_expr) = stmt.kind else {
+            return;
+        };
+        let Some(ty) = self.node_ty_opt(tail_expr.hir_id) else {
+            return;
+        };
+        if self.can_eq(self.param_env, expected_ty, ty) {
+            err.span_suggestion_short(
+                stmt.span.with_lo(tail_expr.span.hi()),
+                "remove this semicolon",
+                "",
+                Applicability::MachineApplicable,
+            );
+        } else {
+            err.span_label(block.span, "this block is missing a tail expression");
         }
     }
 }

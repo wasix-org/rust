@@ -2,9 +2,7 @@
 
 use std::marker::PhantomData;
 
-use rustc_index::bit_set::BitSet;
-use rustc_index::vec::IndexVec;
-use rustc_middle::mir::{self, BasicBlock, Location};
+use rustc_index::IndexVec;
 use rustc_middle::ty;
 use rustc_span::DUMMY_SP;
 
@@ -39,8 +37,8 @@ fn mock_body<'tcx>() -> mir::Body<'tcx> {
             args: vec![],
             destination: dummy_place.clone(),
             target: Some(mir::START_BLOCK),
-            cleanup: None,
-            from_hir_call: false,
+            unwind: mir::UnwindAction::Continue,
+            call_source: mir::CallSource::Misc,
             fn_span: DUMMY_SP,
         },
     );
@@ -53,8 +51,8 @@ fn mock_body<'tcx>() -> mir::Body<'tcx> {
             args: vec![],
             destination: dummy_place.clone(),
             target: Some(mir::START_BLOCK),
-            cleanup: None,
-            from_hir_call: false,
+            unwind: mir::UnwindAction::Continue,
+            call_source: mir::CallSource::Misc,
             fn_span: DUMMY_SP,
         },
     );
@@ -179,7 +177,7 @@ impl<'tcx, D: Direction> AnalysisDomain<'tcx> for MockAnalysis<'tcx, D> {
 
 impl<'tcx, D: Direction> Analysis<'tcx> for MockAnalysis<'tcx, D> {
     fn apply_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::Domain,
         _statement: &mir::Statement<'tcx>,
         location: Location,
@@ -189,7 +187,7 @@ impl<'tcx, D: Direction> Analysis<'tcx> for MockAnalysis<'tcx, D> {
     }
 
     fn apply_before_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::Domain,
         _statement: &mir::Statement<'tcx>,
         location: Location,
@@ -198,18 +196,19 @@ impl<'tcx, D: Direction> Analysis<'tcx> for MockAnalysis<'tcx, D> {
         assert!(state.insert(idx));
     }
 
-    fn apply_terminator_effect(
-        &self,
+    fn apply_terminator_effect<'mir>(
+        &mut self,
         state: &mut Self::Domain,
-        _terminator: &mir::Terminator<'tcx>,
+        terminator: &'mir mir::Terminator<'tcx>,
         location: Location,
-    ) {
+    ) -> TerminatorEdges<'mir, 'tcx> {
         let idx = self.effect(Effect::Primary.at_index(location.statement_index));
         assert!(state.insert(idx));
+        terminator.edges()
     }
 
     fn apply_before_terminator_effect(
-        &self,
+        &mut self,
         state: &mut Self::Domain,
         _terminator: &mir::Terminator<'tcx>,
         location: Location,
@@ -219,7 +218,7 @@ impl<'tcx, D: Direction> Analysis<'tcx> for MockAnalysis<'tcx, D> {
     }
 
     fn apply_call_return_effect(
-        &self,
+        &mut self,
         _state: &mut Self::Domain,
         _block: BasicBlock,
         _return_places: CallReturnPlaces<'_, 'tcx>,

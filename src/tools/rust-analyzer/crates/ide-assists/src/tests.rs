@@ -3,7 +3,7 @@ mod generated;
 mod sourcegen;
 
 use expect_test::expect;
-use hir::{db::DefDatabase, Semantics};
+use hir::Semantics;
 use ide_db::{
     base_db::{fixture::WithFixture, FileId, FileRange, SourceDatabaseExt},
     imports::insert_use::{ImportGranularity, InsertUseConfig},
@@ -30,6 +30,7 @@ pub(crate) const TEST_CONFIG: AssistConfig = AssistConfig {
         skip_glob_imports: true,
     },
     prefer_no_std: false,
+    prefer_prelude: true,
     assist_emit_must_use: false,
 };
 
@@ -44,6 +45,7 @@ pub(crate) const TEST_CONFIG_NO_SNIPPET_CAP: AssistConfig = AssistConfig {
         skip_glob_imports: true,
     },
     prefer_no_std: false,
+    prefer_prelude: true,
     assist_emit_must_use: false,
 };
 
@@ -98,6 +100,11 @@ pub(crate) fn check_assist_not_applicable(assist: Handler, ra_fixture: &str) {
     check(assist, ra_fixture, ExpectedResult::NotApplicable, None);
 }
 
+#[track_caller]
+pub(crate) fn check_assist_not_applicable_by_label(assist: Handler, ra_fixture: &str, label: &str) {
+    check(assist, ra_fixture, ExpectedResult::NotApplicable, Some(label));
+}
+
 /// Check assist in unresolved state. Useful to check assists for lazy computation.
 #[track_caller]
 pub(crate) fn check_assist_unresolved(assist: Handler, ra_fixture: &str) {
@@ -132,8 +139,13 @@ fn check_doc_test(assist_id: &str, before: &str, after: &str) {
             .filter(|it| !it.source_file_edits.is_empty() || !it.file_system_edits.is_empty())
             .expect("Assist did not contain any source changes");
         let mut actual = before;
-        if let Some(source_file_edit) = source_change.get_source_edit(file_id) {
+        if let Some((source_file_edit, snippet_edit)) =
+            source_change.get_source_and_snippet_edit(file_id)
+        {
             source_file_edit.apply(&mut actual);
+            if let Some(snippet_edit) = snippet_edit {
+                snippet_edit.apply(&mut actual);
+            }
         }
         actual
     };
@@ -161,7 +173,7 @@ fn check_with_config(
     assist_label: Option<&str>,
 ) {
     let (mut db, file_with_caret_id, range_or_offset) = RootDatabase::with_range_or_offset(before);
-    db.set_enable_proc_attr_macros(true);
+    db.enable_proc_attr_macros();
     let text_without_caret = db.file_text(file_with_caret_id).to_string();
 
     let frange = FileRange { file_id: file_with_caret_id, range: range_or_offset.into() };
@@ -191,9 +203,12 @@ fn check_with_config(
                 && source_change.file_system_edits.len() == 0;
 
             let mut buf = String::new();
-            for (file_id, edit) in source_change.source_file_edits {
+            for (file_id, (edit, snippet_edit)) in source_change.source_file_edits {
                 let mut text = db.file_text(file_id).as_ref().to_owned();
                 edit.apply(&mut text);
+                if let Some(snippet_edit) = snippet_edit {
+                    snippet_edit.apply(&mut text);
+                }
                 if !skip_header {
                     let sr = db.file_source_root(file_id);
                     let sr = db.source_root(sr);
@@ -273,8 +288,9 @@ fn assist_order_field_struct() {
     assert_eq!(assists.next().expect("expected assist").label, "Generate a getter method");
     assert_eq!(assists.next().expect("expected assist").label, "Generate a mut getter method");
     assert_eq!(assists.next().expect("expected assist").label, "Generate a setter method");
-    assert_eq!(assists.next().expect("expected assist").label, "Convert to tuple struct");
     assert_eq!(assists.next().expect("expected assist").label, "Add `#[derive]`");
+    assert_eq!(assists.next().expect("expected assist").label, "Generate `new`");
+    assert_eq!(assists.next().map(|it| it.label.to_string()), None);
 }
 
 #[test]
@@ -484,18 +500,21 @@ pub fn test_some_range(a: int) -> bool {
                         source_file_edits: {
                             FileId(
                                 0,
-                            ): TextEdit {
-                                indels: [
-                                    Indel {
-                                        insert: "let $0var_name = 5;\n    ",
-                                        delete: 45..45,
-                                    },
-                                    Indel {
-                                        insert: "var_name",
-                                        delete: 59..60,
-                                    },
-                                ],
-                            },
+                            ): (
+                                TextEdit {
+                                    indels: [
+                                        Indel {
+                                            insert: "let $0var_name = 5;\n    ",
+                                            delete: 45..45,
+                                        },
+                                        Indel {
+                                            insert: "var_name",
+                                            delete: 59..60,
+                                        },
+                                    ],
+                                },
+                                None,
+                            ),
                         },
                         file_system_edits: [],
                         is_snippet: true,
@@ -543,18 +562,21 @@ pub fn test_some_range(a: int) -> bool {
                         source_file_edits: {
                             FileId(
                                 0,
-                            ): TextEdit {
-                                indels: [
-                                    Indel {
-                                        insert: "let $0var_name = 5;\n    ",
-                                        delete: 45..45,
-                                    },
-                                    Indel {
-                                        insert: "var_name",
-                                        delete: 59..60,
-                                    },
-                                ],
-                            },
+                            ): (
+                                TextEdit {
+                                    indels: [
+                                        Indel {
+                                            insert: "let $0var_name = 5;\n    ",
+                                            delete: 45..45,
+                                        },
+                                        Indel {
+                                            insert: "var_name",
+                                            delete: 59..60,
+                                        },
+                                    ],
+                                },
+                                None,
+                            ),
                         },
                         file_system_edits: [],
                         is_snippet: true,
@@ -580,18 +602,21 @@ pub fn test_some_range(a: int) -> bool {
                         source_file_edits: {
                             FileId(
                                 0,
-                            ): TextEdit {
-                                indels: [
-                                    Indel {
-                                        insert: "fun_name()",
-                                        delete: 59..60,
-                                    },
-                                    Indel {
-                                        insert: "\n\nfn $0fun_name() -> i32 {\n    5\n}",
-                                        delete: 110..110,
-                                    },
-                                ],
-                            },
+                            ): (
+                                TextEdit {
+                                    indels: [
+                                        Indel {
+                                            insert: "fun_name()",
+                                            delete: 59..60,
+                                        },
+                                        Indel {
+                                            insert: "\n\nfn $0fun_name() -> i32 {\n    5\n}",
+                                            delete: 110..110,
+                                        },
+                                    ],
+                                },
+                                None,
+                            ),
                         },
                         file_system_edits: [],
                         is_snippet: true,

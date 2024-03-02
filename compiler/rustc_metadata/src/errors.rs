@@ -308,14 +308,9 @@ pub struct FailCreateFileEncoder {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_fail_seek_file)]
-pub struct FailSeekFile {
-    pub err: Error,
-}
-
-#[derive(Diagnostic)]
 #[diag(metadata_fail_write_file)]
-pub struct FailWriteFile {
+pub struct FailWriteFile<'a> {
+    pub path: &'a Path,
     pub err: Error,
 }
 
@@ -396,6 +391,17 @@ pub struct FailedWriteError {
 }
 
 #[derive(Diagnostic)]
+#[diag(metadata_failed_copy_to_stdout)]
+pub struct FailedCopyToStdout {
+    pub filename: PathBuf,
+    pub err: Error,
+}
+
+#[derive(Diagnostic)]
+#[diag(metadata_binary_output_to_tty)]
+pub struct BinaryOutputToTty;
+
+#[derive(Diagnostic)]
 #[diag(metadata_missing_native_library)]
 pub struct MissingNativeLibrary<'a> {
     libname: &'a str,
@@ -408,7 +414,9 @@ impl<'a> MissingNativeLibrary<'a> {
         // if it looks like the user has provided a complete filename rather just the bare lib name,
         // then provide a note that they might want to try trimming the name
         let suggested_name = if !verbatim {
-            if let Some(libname) = libname.strip_prefix("lib") && let Some(libname) = libname.strip_suffix(".a") {
+            if let Some(libname) = libname.strip_prefix("lib")
+                && let Some(libname) = libname.strip_suffix(".a")
+            {
                 // this is a unix style filename so trim prefix & suffix
                 Some(libname)
             } else if let Some(libname) = libname.strip_suffix(".lib") {
@@ -490,15 +498,15 @@ pub(crate) struct MultipleCandidates {
 impl IntoDiagnostic<'_> for MultipleCandidates {
     fn into_diagnostic(
         self,
-        handler: &'_ rustc_errors::Handler,
+        dcx: &'_ rustc_errors::DiagCtxt,
     ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = handler.struct_err(fluent::metadata_multiple_candidates);
+        let mut diag = dcx.struct_err(fluent::metadata_multiple_candidates);
         diag.set_arg("crate_name", self.crate_name);
         diag.set_arg("flavor", self.flavor);
         diag.code(error_code!(E0464));
         diag.set_span(self.span);
         for (i, candidate) in self.candidates.iter().enumerate() {
-            diag.note(&format!("candidate #{}: {}", i + 1, candidate.display()));
+            diag.note(format!("candidate #{}: {}", i + 1, candidate.display()));
         }
         diag
     }
@@ -589,9 +597,9 @@ impl IntoDiagnostic<'_> for InvalidMetadataFiles {
     #[track_caller]
     fn into_diagnostic(
         self,
-        handler: &'_ rustc_errors::Handler,
+        dcx: &'_ rustc_errors::DiagCtxt,
     ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = handler.struct_err(fluent::metadata_invalid_meta_files);
+        let mut diag = dcx.struct_err(fluent::metadata_invalid_meta_files);
         diag.set_arg("crate_name", self.crate_name);
         diag.set_arg("add_info", self.add_info);
         diag.code(error_code!(E0786));
@@ -612,15 +620,16 @@ pub struct CannotFindCrate {
     pub is_nightly_build: bool,
     pub profiler_runtime: Symbol,
     pub locator_triple: TargetTriple,
+    pub is_ui_testing: bool,
 }
 
 impl IntoDiagnostic<'_> for CannotFindCrate {
     #[track_caller]
     fn into_diagnostic(
         self,
-        handler: &'_ rustc_errors::Handler,
+        dcx: &'_ rustc_errors::DiagCtxt,
     ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = handler.struct_err(fluent::metadata_cannot_find_crate);
+        let mut diag = dcx.struct_err(fluent::metadata_cannot_find_crate);
         diag.set_arg("crate_name", self.crate_name);
         diag.set_arg("current_crate", self.current_crate);
         diag.set_arg("add_info", self.add_info);
@@ -635,12 +644,19 @@ impl IntoDiagnostic<'_> for CannotFindCrate {
             } else {
                 diag.note(fluent::metadata_target_no_std_support);
             }
-            // NOTE: this suggests using rustup, even though the user may not have it installed.
-            // That's because they could choose to install it; or this may give them a hint which
-            // target they need to install from their distro.
+
             if self.missing_core {
-                diag.help(fluent::metadata_consider_downloading_target);
+                if env!("CFG_RELEASE_CHANNEL") == "dev" && !self.is_ui_testing {
+                    // Note: Emits the nicer suggestion only for the dev channel.
+                    diag.help(fluent::metadata_consider_adding_std);
+                } else {
+                    // NOTE: this suggests using rustup, even though the user may not have it installed.
+                    // That's because they could choose to install it; or this may give them a hint which
+                    // target they need to install from their distro.
+                    diag.help(fluent::metadata_consider_downloading_target);
+                }
             }
+
             // Suggest using #![no_std]. #[no_core] is unstable and not really supported anyway.
             // NOTE: this is a dummy span if `extern crate std` was injected by the compiler.
             // If it's not a dummy, that means someone added `extern crate std` explicitly and
@@ -659,14 +675,6 @@ impl IntoDiagnostic<'_> for CannotFindCrate {
         diag.span_label(self.span, fluent::metadata_cant_find_crate);
         diag
     }
-}
-
-#[derive(Diagnostic)]
-#[diag(metadata_no_dylib_plugin, code = "E0457")]
-pub struct NoDylibPlugin {
-    #[primary_span]
-    pub span: Span,
-    pub crate_name: Symbol,
 }
 
 #[derive(Diagnostic)]

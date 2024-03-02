@@ -87,7 +87,7 @@ bitflags! {
         /// #[cmse_nonsecure_entry]: with a TrustZone-M extension, declare a
         /// function as an entry function from Non-Secure code.
         const CMSE_NONSECURE_ENTRY      = 1 << 14;
-        /// `#[no_coverage]`: indicates that the function should be ignored by
+        /// `#[coverage(off)]`: indicates that the function should be ignored by
         /// the MIR `InstrumentCoverage` pass and not added to the coverage map
         /// during codegen.
         const NO_COVERAGE               = 1 << 15;
@@ -100,6 +100,8 @@ bitflags! {
         const REALLOCATOR               = 1 << 18;
         /// `#[rustc_allocator_zeroed]`: a hint to LLVM that the function only allocates zeroed memory.
         const ALLOCATOR_ZEROED          = 1 << 19;
+        /// `#[no_builtins]`: indicates that disable implicit builtin knowledge of functions for the function.
+        const NO_BUILTINS               = 1 << 20;
     }
 }
 
@@ -121,14 +123,6 @@ impl CodegenFnAttrs {
             no_sanitize: SanitizerSet::empty(),
             instruction_set: None,
             alignment: None,
-        }
-    }
-
-    /// Returns `true` if `#[inline]` or `#[inline(always)]` is present.
-    pub fn requests_inline(&self) -> bool {
-        match self.inline {
-            InlineAttr::Hint | InlineAttr::Always => true,
-            InlineAttr::None | InlineAttr::Never => false,
         }
     }
 

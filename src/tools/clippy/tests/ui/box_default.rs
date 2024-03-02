@@ -1,5 +1,5 @@
-// run-rustfix
 #![warn(clippy::box_default)]
+#![allow(clippy::default_constructed_unit_structs)]
 
 #[derive(Default)]
 struct ImplementsDefault;
@@ -34,6 +34,13 @@ fn main() {
     let _more = ret_ty_fn();
     call_ty_fn(Box::new(u8::default()));
     issue_10381();
+
+    // `Box::<Option<_>>::default()` would be valid here, but not `Box::default()` or
+    // `Box::<Option<{closure@...}>::default()`
+    //
+    // Would have a suggestion after https://github.com/rust-lang/rust/blob/fdd030127cc68afec44a8d3f6341525dd34e50ae/compiler/rustc_middle/src/ty/diagnostics.rs#L554-L563
+    let mut unnameable = Box::new(Option::default());
+    let _ = unnameable.insert(|| {});
 }
 
 fn ret_ty_fn() -> Box<bool> {
@@ -82,4 +89,18 @@ fn issue_10381() {
     }
 
     assert!(maybe_get_bar(2).is_some());
+}
+
+#[allow(unused)]
+fn issue_11868() {
+    fn foo(_: &mut Vec<usize>) {}
+
+    macro_rules! bar {
+        ($baz:expr) => {
+            Box::leak(Box::new($baz))
+        };
+    }
+
+    foo(bar!(vec![]));
+    foo(bar!(vec![1]));
 }

@@ -1,0 +1,21 @@
+error[E0308]: mismatched types
+  --> $DIR/trait-where-clause-const.rs:21:5
+   |
+LL |     T::b();
+   |     ^^^^^^ expected `host`, found `true`
+   |
+   = note: expected constant `host`
+              found constant `true`
+
+error[E0308]: mismatched types
+  --> $DIR/trait-where-clause-const.rs:23:5
+   |
+LL |     T::c::<T>();
+   |     ^^^^^^^^^^^ expected `host`, found `true`
+   |
+   = note: expected constant `host`
+              found constant `true`
+
+error: aborting due to 2 previous errors
+
+For more information about this error, try `rustc --explain E0308`.

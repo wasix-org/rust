@@ -1,6 +1,4 @@
-use hir::InFile;
-
-use crate::{Diagnostic, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 // Diagnostic: missing-match-arm
 //
@@ -9,20 +7,39 @@ pub(crate) fn missing_match_arms(
     ctx: &DiagnosticsContext<'_>,
     d: &hir::MissingMatchArms,
 ) -> Diagnostic {
-    Diagnostic::new(
-        "missing-match-arm",
+    Diagnostic::new_with_syntax_node_ptr(
+        ctx,
+        DiagnosticCode::RustcHardError("E0004"),
         format!("missing match arm: {}", d.uncovered_patterns),
-        ctx.sema.diagnostics_display_range(InFile::new(d.file, d.match_expr.clone().into())).range,
+        d.scrutinee_expr.clone().map(Into::into),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tests::check_diagnostics;
+    use crate::{
+        tests::{check_diagnostics, check_diagnostics_with_config},
+        DiagnosticsConfig,
+    };
 
+    #[track_caller]
     fn check_diagnostics_no_bails(ra_fixture: &str) {
         cov_mark::check_count!(validate_match_bailed_out, 0);
         crate::tests::check_diagnostics(ra_fixture)
+    }
+
+    #[test]
+    fn empty_body() {
+        let mut config = DiagnosticsConfig::test_sample();
+        config.disabled.insert("syntax-error".to_string());
+        check_diagnostics_with_config(
+            config,
+            r#"
+fn main() {
+    match 0;
+}
+"#,
+        );
     }
 
     #[test]
@@ -273,15 +290,20 @@ enum Either2 { C, D }
 fn main() {
     match Either::A {
         Either2::C => (),
+      //^^^^^^^^^^ error: expected Either, found Either2
         Either2::D => (),
+      //^^^^^^^^^^ error: expected Either, found Either2
     }
     match (true, false) {
         (true, false, true) => (),
+      //^^^^^^^^^^^^^^^^^^^ error: expected (bool, bool), found (bool, bool, bool)
         (true) => (),
       // ^^^^  error: expected (bool, bool), found bool
     }
     match (true, false) { (true,) => {} }
+                        //^^^^^^^ error: expected (bool, bool), found (bool,)
     match (0) { () => () }
+              //^^ error: expected i32, found ()
     match Unresolved::Bar { Unresolved::Baz => () }
 }
         "#,
@@ -295,7 +317,9 @@ fn main() {
             r#"
 fn main() {
     match false { true | () => {} }
+                       //^^ error: expected bool, found ()
     match (false,) { (true | (),) => {} }
+                           //^^ error: expected bool, found ()
 }
 "#,
         );
@@ -313,6 +337,7 @@ fn main() {
     match Either::A {
         Either::A => (),
         Either::B() => (),
+              // ^^ error: this pattern has 0 fields, but the corresponding tuple struct has 1 field
     }
 }
 "#,
@@ -328,9 +353,11 @@ enum A { B(isize, isize), C }
 fn main() {
     match A::B(1, 2) {
         A::B(_, _, _) => (),
+                // ^^ error: this pattern has 3 fields, but the corresponding tuple struct has 2 fields
     }
     match A::B(1, 2) {
         A::C(_) => (),
+         // ^^^ error: this pattern has 1 field, but the corresponding tuple struct has 0 fields
     }
 }
 "#,
@@ -555,6 +582,7 @@ fn bang(never: !) {
             r#"
 enum Option<T> { Some(T), None }
 
+#[allow(unused)]
 fn main() {
     // `Never` is deliberately not defined so that it's an uninferred type.
     match Option::<Never>::None {
@@ -710,7 +738,7 @@ fn main() {
             r#"
 struct S { a: char}
 fn main(v: S) {
-    match v { S{ a }      => {} }
+    match v { S{ a }      => { _ = a; } }
     match v { S{ a: _x }  => {} }
     match v { S{ a: 'a' } => {} }
     match v { S{..}       => {} }
@@ -740,17 +768,13 @@ fn main() {
 
     #[test]
     fn binding_ref_has_correct_type() {
-        cov_mark::check_count!(validate_match_bailed_out, 1);
-
         // Asserts `PatKind::Binding(ref _x): bool`, not &bool.
         // If that's not true match checking will panic with "incompatible constructors"
         // FIXME: make facilities to test this directly like `tests::check_infer(..)`
-        check_diagnostics(
+        check_diagnostics_no_bails(
             r#"
 enum Foo { A }
 fn main() {
-    // FIXME: this should not bail out but current behavior is such as the old algorithm.
-    // ExprValidator::validate_match(..) checks types of top level patterns incorrectly.
     match Foo::A {
         ref _x => {}
         Foo::A => {}
@@ -844,6 +868,7 @@ fn main() {
 struct Foo { }
 fn main(f: Foo) {
     match f { Foo { bar } => () }
+                 // ^^^ error: no such field
 }
 "#,
         );
@@ -895,7 +920,7 @@ enum E{ A, B }
 fn foo() {
     match &E::A {
         E::A => {}
-        x => {}
+        _x => {}
     }
 }",
         );
@@ -1026,6 +1051,7 @@ fn main() {
 
             check_diagnostics(
                 r#"
+//- minicore: copy
 fn main() {
     match &false {
         &true => {}
@@ -1037,12 +1063,13 @@ fn main() {
 
         #[test]
         fn reference_patterns_in_fields() {
-            cov_mark::check_count!(validate_match_bailed_out, 2);
-
+            cov_mark::check_count!(validate_match_bailed_out, 1);
             check_diagnostics(
                 r#"
+//- minicore: copy
 fn main() {
     match (&false,) {
+        //^^^^^^^^^ error: missing match arm: `(&false,)` not covered
         (true,) => {}
     }
     match (&false,) {

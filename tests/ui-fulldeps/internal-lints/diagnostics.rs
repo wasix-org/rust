@@ -7,18 +7,19 @@
 #![deny(rustc::diagnostic_outside_of_impl)]
 
 extern crate rustc_errors;
+extern crate rustc_fluent_macro;
 extern crate rustc_macros;
 extern crate rustc_session;
 extern crate rustc_span;
 
 use rustc_errors::{
-    AddToDiagnostic, IntoDiagnostic, Diagnostic, DiagnosticBuilder,
-    ErrorGuaranteed, Handler, DiagnosticMessage, SubdiagnosticMessage,
+    AddToDiagnostic, DiagCtxt, Diagnostic, DiagnosticBuilder, DiagnosticMessage, ErrorGuaranteed,
+    IntoDiagnostic, SubdiagnosticMessage,
 };
-use rustc_macros::{fluent_messages, Diagnostic, Subdiagnostic};
+use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_span::Span;
 
-fluent_messages! { "./diagnostics.ftl" }
+rustc_fluent_macro::fluent_messages! { "./diagnostics.ftl" }
 
 #[derive(Diagnostic)]
 #[diag(no_crate_example)]
@@ -37,8 +38,8 @@ struct Note {
 pub struct UntranslatableInIntoDiagnostic;
 
 impl<'a> IntoDiagnostic<'a, ErrorGuaranteed> for UntranslatableInIntoDiagnostic {
-    fn into_diagnostic(self, handler: &'a Handler) -> DiagnosticBuilder<'a, ErrorGuaranteed> {
-        handler.struct_err("untranslatable diagnostic")
+    fn into_diagnostic(self, dcx: &'a DiagCtxt) -> DiagnosticBuilder<'a, ErrorGuaranteed> {
+        dcx.struct_err("untranslatable diagnostic")
         //~^ ERROR diagnostics should be created using translatable messages
     }
 }
@@ -46,8 +47,8 @@ impl<'a> IntoDiagnostic<'a, ErrorGuaranteed> for UntranslatableInIntoDiagnostic 
 pub struct TranslatableInIntoDiagnostic;
 
 impl<'a> IntoDiagnostic<'a, ErrorGuaranteed> for TranslatableInIntoDiagnostic {
-    fn into_diagnostic(self, handler: &'a Handler) -> DiagnosticBuilder<'a, ErrorGuaranteed> {
-        handler.struct_err(crate::fluent_generated::no_crate_example)
+    fn into_diagnostic(self, dcx: &'a DiagCtxt) -> DiagnosticBuilder<'a, ErrorGuaranteed> {
+        dcx.struct_err(crate::fluent_generated::no_crate_example)
     }
 }
 
@@ -74,11 +75,11 @@ impl AddToDiagnostic for TranslatableInAddToDiagnostic {
     }
 }
 
-pub fn make_diagnostics<'a>(handler: &'a Handler) {
-    let _diag = handler.struct_err(crate::fluent_generated::no_crate_example);
+pub fn make_diagnostics<'a>(dcx: &'a DiagCtxt) {
+    let _diag = dcx.struct_err(crate::fluent_generated::no_crate_example);
     //~^ ERROR diagnostics should only be created in `IntoDiagnostic`/`AddToDiagnostic` impls
 
-    let _diag = handler.struct_err("untranslatable diagnostic");
+    let _diag = dcx.struct_err("untranslatable diagnostic");
     //~^ ERROR diagnostics should only be created in `IntoDiagnostic`/`AddToDiagnostic` impls
     //~^^ ERROR diagnostics should be created using translatable messages
 }
@@ -86,6 +87,6 @@ pub fn make_diagnostics<'a>(handler: &'a Handler) {
 // Check that `rustc_lint_diagnostics`-annotated functions aren't themselves linted.
 
 #[rustc_lint_diagnostics]
-pub fn skipped_because_of_annotation<'a>(handler: &'a Handler) {
-    let _diag = handler.struct_err("untranslatable diagnostic"); // okay!
+pub fn skipped_because_of_annotation<'a>(dcx: &'a DiagCtxt) {
+    let _diag = dcx.struct_err("untranslatable diagnostic"); // okay!
 }

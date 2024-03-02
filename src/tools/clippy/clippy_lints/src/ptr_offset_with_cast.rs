@@ -3,7 +3,7 @@ use clippy_utils::source::snippet_opt;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 use std::fmt;
 
@@ -17,7 +17,7 @@ declare_clippy_lint! {
     /// cast by using the `add` method instead.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let vec = vec![b'a', b'b', b'c'];
     /// let ptr = vec.as_ptr();
     /// let offset = 1_usize;
@@ -29,7 +29,7 @@ declare_clippy_lint! {
     ///
     /// Could be written:
     ///
-    /// ```rust
+    /// ```no_run
     /// let vec = vec![b'a', b'b', b'c'];
     /// let ptr = vec.as_ptr();
     /// let offset = 1_usize;
@@ -50,12 +50,12 @@ impl<'tcx> LateLintPass<'tcx> for PtrOffsetWithCast {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         // Check if the expressions is a ptr.offset or ptr.wrapping_offset method call
         let Some((receiver_expr, arg_expr, method)) = expr_as_ptr_offset_call(cx, expr) else {
-            return
+            return;
         };
 
         // Check if the argument to the method call is a cast from usize
         let Some(cast_lhs_expr) = expr_as_cast_from_usize(cx, arg_expr) else {
-            return
+            return;
         };
 
         let msg = format!("use of `{method}` with a `usize` casted to an `isize`");

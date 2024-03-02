@@ -8,7 +8,6 @@
 //! * Functions called by the compiler itself.
 
 use crate::def_id::DefId;
-use crate::errors::LangItemError;
 use crate::{MethodKind, Target};
 
 use rustc_ast as ast;
@@ -42,14 +41,7 @@ impl LanguageItems {
         self.items[item as usize] = Some(def_id);
     }
 
-    /// Requires that a given `LangItem` was bound and returns the corresponding `DefId`.
-    /// If it wasn't bound, e.g. due to a missing `#[lang = "<it.name()>"]`,
-    /// returns an error encapsulating the `LangItem`.
-    pub fn require(&self, it: LangItem) -> Result<DefId, LangItemError> {
-        self.get(it).ok_or_else(|| LangItemError(it))
-    }
-
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (LangItem, DefId)> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = (LangItem, DefId)> + '_ {
         self.items
             .iter()
             .enumerate()
@@ -166,6 +158,9 @@ language_item_table! {
 
     Freeze,                  sym::freeze,              freeze_trait,               Target::Trait,          GenericRequirement::Exact(0);
 
+    FnPtrTrait,              sym::fn_ptr_trait,        fn_ptr_trait,               Target::Trait,          GenericRequirement::Exact(0);
+    FnPtrAddr,               sym::fn_ptr_addr,         fn_ptr_addr,                Target::Method(MethodKind::Trait { body: false }), GenericRequirement::None;
+
     Drop,                    sym::drop,                drop_trait,                 Target::Trait,          GenericRequirement::None;
     Destruct,                sym::destruct,            destruct_trait,             Target::Trait,          GenericRequirement::None;
 
@@ -215,14 +210,17 @@ language_item_table! {
 
     FnOnceOutput,            sym::fn_once_output,      fn_once_output,             Target::AssocTy,        GenericRequirement::None;
 
+    Iterator,                sym::iterator,            iterator_trait,             Target::Trait,          GenericRequirement::Exact(0);
     Future,                  sym::future_trait,        future_trait,               Target::Trait,          GenericRequirement::Exact(0);
-    GeneratorState,          sym::generator_state,     gen_state,                  Target::Enum,           GenericRequirement::None;
-    Generator,               sym::generator,           gen_trait,                  Target::Trait,          GenericRequirement::Minimum(1);
+    AsyncIterator,           sym::async_iterator,      async_iterator_trait,       Target::Trait,          GenericRequirement::Exact(0);
+    CoroutineState,          sym::coroutine_state,     coroutine_state,            Target::Enum,           GenericRequirement::None;
+    Coroutine,               sym::coroutine,           coroutine_trait,            Target::Trait,          GenericRequirement::Minimum(1);
     Unpin,                   sym::unpin,               unpin_trait,                Target::Trait,          GenericRequirement::None;
     Pin,                     sym::pin,                 pin_type,                   Target::Struct,         GenericRequirement::None;
 
     PartialEq,               sym::eq,                  eq_trait,                   Target::Trait,          GenericRequirement::Exact(1);
     PartialOrd,              sym::partial_ord,         partial_ord_trait,          Target::Trait,          GenericRequirement::Exact(1);
+    CVoid,                   sym::c_void,              c_void,                     Target::Enum,           GenericRequirement::None;
 
     // A number of panic-related lang items. The `panic` item corresponds to divide-by-zero and
     // various panic cases with `match`. The `panic_bounds_check` item is for indexing arrays.
@@ -234,13 +232,14 @@ language_item_table! {
     Panic,                   sym::panic,               panic_fn,                   Target::Fn,             GenericRequirement::Exact(0);
     PanicNounwind,           sym::panic_nounwind,      panic_nounwind,             Target::Fn,             GenericRequirement::Exact(0);
     PanicFmt,                sym::panic_fmt,           panic_fmt,                  Target::Fn,             GenericRequirement::None;
-    PanicDisplay,            sym::panic_display,       panic_display,              Target::Fn,             GenericRequirement::None;
     ConstPanicFmt,           sym::const_panic_fmt,     const_panic_fmt,            Target::Fn,             GenericRequirement::None;
     PanicBoundsCheck,        sym::panic_bounds_check,  panic_bounds_check_fn,      Target::Fn,             GenericRequirement::Exact(0);
+    PanicMisalignedPointerDereference, sym::panic_misaligned_pointer_dereference, panic_misaligned_pointer_dereference_fn, Target::Fn, GenericRequirement::Exact(0);
     PanicInfo,               sym::panic_info,          panic_info,                 Target::Struct,         GenericRequirement::None;
     PanicLocation,           sym::panic_location,      panic_location,             Target::Struct,         GenericRequirement::None;
     PanicImpl,               sym::panic_impl,          panic_impl,                 Target::Fn,             GenericRequirement::None;
     PanicCannotUnwind,       sym::panic_cannot_unwind, panic_cannot_unwind,        Target::Fn,             GenericRequirement::Exact(0);
+    PanicInCleanup,          sym::panic_in_cleanup,    panic_in_cleanup,           Target::Fn,             GenericRequirement::Exact(0);
     /// libstd panic entry point. Necessary for const eval to be able to catch it
     BeginPanic,              sym::begin_panic,         begin_panic_fn,             Target::Fn,             GenericRequirement::None;
 
@@ -253,7 +252,6 @@ language_item_table! {
     FormatUnsafeArg,         sym::format_unsafe_arg,   format_unsafe_arg,          Target::Struct,         GenericRequirement::None;
 
     ExchangeMalloc,          sym::exchange_malloc,     exchange_malloc_fn,         Target::Fn,             GenericRequirement::None;
-    BoxFree,                 sym::box_free,            box_free_fn,                Target::Fn,             GenericRequirement::Minimum(1);
     DropInPlace,             sym::drop_in_place,       drop_in_place_fn,           Target::Fn,             GenericRequirement::Minimum(1);
     AllocLayout,             sym::alloc_layout,        alloc_layout,               Target::Struct,         GenericRequirement::None;
 
@@ -263,6 +261,8 @@ language_item_table! {
     EhCatchTypeinfo,         sym::eh_catch_typeinfo,   eh_catch_typeinfo,          Target::Static,         GenericRequirement::None;
 
     OwnedBox,                sym::owned_box,           owned_box,                  Target::Struct,         GenericRequirement::Minimum(1);
+    // Experimental language item for Miri
+    PtrUnique,               sym::ptr_unique,          ptr_unique,                 Target::Struct,         GenericRequirement::Exact(1);
 
     PhantomData,             sym::phantom_data,        phantom_data,               Target::Struct,         GenericRequirement::Exact(1);
 
@@ -289,19 +289,25 @@ language_item_table! {
 
     PointerLike,             sym::pointer_like,        pointer_like,               Target::Trait,          GenericRequirement::Exact(0);
 
+    ConstParamTy,            sym::const_param_ty,      const_param_ty_trait,       Target::Trait,          GenericRequirement::Exact(0);
+
     Poll,                    sym::Poll,                poll,                       Target::Enum,           GenericRequirement::None;
     PollReady,               sym::Ready,               poll_ready_variant,         Target::Variant,        GenericRequirement::None;
     PollPending,             sym::Pending,             poll_pending_variant,       Target::Variant,        GenericRequirement::None;
 
+    AsyncGenReady,           sym::AsyncGenReady,       async_gen_ready,            Target::Method(MethodKind::Inherent), GenericRequirement::Exact(1);
+    AsyncGenPending,         sym::AsyncGenPending,     async_gen_pending,          Target::AssocConst,     GenericRequirement::Exact(1);
+    AsyncGenFinished,        sym::AsyncGenFinished,    async_gen_finished,         Target::AssocConst,     GenericRequirement::Exact(1);
+
     // FIXME(swatinem): the following lang items are used for async lowering and
     // should become obsolete eventually.
     ResumeTy,                sym::ResumeTy,            resume_ty,                  Target::Struct,         GenericRequirement::None;
-    IdentityFuture,          sym::identity_future,     identity_future_fn,         Target::Fn,             GenericRequirement::None;
     GetContext,              sym::get_context,         get_context_fn,             Target::Fn,             GenericRequirement::None;
 
     Context,                 sym::Context,             context,                    Target::Struct,         GenericRequirement::None;
     FuturePoll,              sym::poll,                future_poll_fn,             Target::Method(MethodKind::Trait { body: false }), GenericRequirement::None;
 
+    Option,                  sym::Option,              option_type,                Target::Enum,           GenericRequirement::None;
     OptionSome,              sym::Some,                option_some_variant,        Target::Variant,        GenericRequirement::None;
     OptionNone,              sym::None,                option_none_variant,        Target::Variant,        GenericRequirement::None;
 
@@ -326,6 +332,7 @@ language_item_table! {
     RangeTo,                 sym::RangeTo,             range_to_struct,            Target::Struct,         GenericRequirement::None;
 
     String,                  sym::String,              string,                     Target::Struct,         GenericRequirement::None;
+    CStr,                    sym::CStr,                c_str,                      Target::Struct,         GenericRequirement::None;
 }
 
 pub enum GenericRequirement {

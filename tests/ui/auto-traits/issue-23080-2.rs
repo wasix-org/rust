@@ -1,3 +1,6 @@
+// revisions: current next
+//[next] compile-flags: -Znext-solver
+
 #![feature(auto_traits)]
 #![feature(negative_impls)]
 

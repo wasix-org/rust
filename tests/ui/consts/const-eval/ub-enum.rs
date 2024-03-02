@@ -66,8 +66,8 @@ const BAD_ENUM2_OPTION_PTR: Option<Enum2> = unsafe { mem::transmute(&0) };
 
 // # valid discriminant for uninhabited variant
 
-// An enum with 3 variants of which some are uninhabited -- so the uninhabited variants *do*
-// have a discriminant.
+// An enum with uninhabited variants but also at least 2 inhabited variants -- so the uninhabited
+// variants *do* have a discriminant.
 enum UninhDiscriminant {
     A,
     B(!),
@@ -97,6 +97,12 @@ const BAD_UNINHABITED_WITH_DATA1: Result<(i32, Never), (i32, !)> = unsafe { mem:
 //~^ ERROR evaluation of constant value failed
 const BAD_UNINHABITED_WITH_DATA2: Result<(i32, !), (i32, Never)> = unsafe { mem::transmute(0u64) };
 //~^ ERROR evaluation of constant value failed
+
+const TEST_ICE_89765: () = {
+    // This is a regression test for https://github.com/rust-lang/rust/issues/89765.
+    unsafe { std::mem::discriminant(&*(&() as *const () as *const Never)); };
+    //~^ inside `TEST_ICE_89765`
+};
 
 fn main() {
 }

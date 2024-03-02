@@ -22,7 +22,7 @@ use rustc_infer::infer::{
 };
 use rustc_middle::hir::place::PlaceBase;
 use rustc_middle::mir::{ConstraintCategory, ReturnConstraint};
-use rustc_middle::ty::subst::InternalSubsts;
+use rustc_middle::ty::GenericArgs;
 use rustc_middle::ty::TypeVisitor;
 use rustc_middle::ty::{self, RegionVid, Ty};
 use rustc_middle::ty::{Region, TyCtxt};
@@ -35,7 +35,7 @@ use crate::session_diagnostics::{
     LifetimeReturnCategoryErr, RequireStaticErr, VarHereDenote,
 };
 
-use super::{OutlivesSuggestionBuilder, RegionName};
+use super::{OutlivesSuggestionBuilder, RegionName, RegionNameSource};
 use crate::region_infer::{BlameConstraint, ExtraConstraintInfo};
 use crate::{
     nll::ConstraintDescription,
@@ -53,7 +53,7 @@ impl<'tcx> ConstraintDescription for ConstraintCategory<'tcx> {
             ConstraintCategory::Yield => "yielding this value ",
             ConstraintCategory::UseAsConst => "using this value as a constant ",
             ConstraintCategory::UseAsStatic => "using this value as a static ",
-            ConstraintCategory::Cast => "cast ",
+            ConstraintCategory::Cast { .. } => "cast ",
             ConstraintCategory::CallArgument(_) => "argument ",
             ConstraintCategory::TypeAnnotation => "type annotation ",
             ConstraintCategory::ClosureBounds => "closure body ",
@@ -84,7 +84,7 @@ impl<'tcx> RegionErrors<'tcx> {
     #[track_caller]
     pub fn push(&mut self, val: impl Into<RegionErrorKind<'tcx>>) {
         let val = val.into();
-        self.1.sess.delay_span_bug(DUMMY_SP, format!("{val:?}"));
+        self.1.sess.span_delayed_bug(DUMMY_SP, format!("{val:?}"));
         self.0.push(val);
     }
     pub fn is_empty(&self) -> bool {
@@ -92,6 +92,12 @@ impl<'tcx> RegionErrors<'tcx> {
     }
     pub fn into_iter(self) -> impl Iterator<Item = RegionErrorKind<'tcx>> {
         self.0.into_iter()
+    }
+}
+
+impl std::fmt::Debug for RegionErrors<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RegionErrors").field(&self.0).finish()
     }
 }
 
@@ -181,11 +187,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
     /// Returns `true` if a closure is inferred to be an `FnMut` closure.
     fn is_closure_fn_mut(&self, fr: RegionVid) -> bool {
-        if let Some(ty::ReFree(free_region)) = self.to_error_region(fr).as_deref()
-            && let ty::BoundRegionKind::BrEnv = free_region.bound_region
-            && let DefiningTy::Closure(_, substs) = self.regioncx.universal_regions().defining_ty
+        if let Some(ty::ReLateParam(late_param)) = self.to_error_region(fr).as_deref()
+            && let ty::BoundRegionKind::BrEnv = late_param.bound_region
+            && let DefiningTy::Closure(_, args) = self.regioncx.universal_regions().defining_ty
         {
-            return substs.as_closure().kind() == ty::ClosureKind::FnMut;
+            return args.as_closure().kind() == ty::ClosureKind::FnMut;
         }
 
         false
@@ -207,9 +213,9 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             .regioncx
             .placeholders_contained_in(lower_bound)
             .map(|placeholder| {
-                if let Some(id) = placeholder.name.get_id()
+                if let Some(id) = placeholder.bound.kind.get_id()
                     && let Some(placeholder_id) = id.as_local()
-                    && let gat_hir_id = hir.local_def_id_to_hir_id(placeholder_id)
+                    && let gat_hir_id = self.infcx.tcx.local_def_id_to_hir_id(placeholder_id)
                     && let Some(generics_impl) = hir.get_parent(gat_hir_id).generics()
                 {
                     Some((gat_hir_id, generics_impl))
@@ -224,15 +230,13 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let mut hrtb_bounds = vec![];
         gat_id_and_generics.iter().flatten().for_each(|(gat_hir_id, generics)| {
             for pred in generics.predicates {
-                let BoundPredicate(
-                        WhereBoundPredicate {
-                            bound_generic_params,
-                            bounds,
-                            ..
-                        }) = pred else { continue; };
+                let BoundPredicate(WhereBoundPredicate { bound_generic_params, bounds, .. }) = pred
+                else {
+                    continue;
+                };
                 if bound_generic_params
                     .iter()
-                    .rfind(|bgp| hir.local_def_id_to_hir_id(bgp.def_id) == *gat_hir_id)
+                    .rfind(|bgp| self.infcx.tcx.local_def_id_to_hir_id(bgp.def_id) == *gat_hir_id)
                     .is_some()
                 {
                     for bound in *bounds {
@@ -247,7 +251,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             let Trait(PolyTraitRef { trait_ref, span: trait_span, .. }, _) = bound else { return; };
             diag.span_note(
                 *trait_span,
-                format!("due to current limitations in the borrow checker, this implies a `'static` lifetime")
+                "due to current limitations in the borrow checker, this implies a `'static` lifetime"
             );
             let Some(generics_fn) = hir.get_generics(self.body.source.def_id().expect_local()) else { return; };
             let Def(_, trait_res_defid) = trait_ref.path.res else { return; };
@@ -279,7 +283,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         if suggestions.len() > 0 {
             suggestions.dedup();
             diag.multipart_suggestion_verbose(
-                format!("consider restricting the type parameter to the `'static` lifetime"),
+                "consider restricting the type parameter to the `'static` lifetime",
                 suggestions,
                 Applicability::MaybeIncorrect,
             );
@@ -504,12 +508,12 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                                 .to_string(),
                         )
                     }
-                    ty::Adt(adt, substs) => {
-                        let generic_arg = substs[param_index as usize];
-                        let identity_substs =
-                            InternalSubsts::identity_for_item(self.infcx.tcx, adt.did());
-                        let base_ty = self.infcx.tcx.mk_adt(*adt, identity_substs);
-                        let base_generic_arg = identity_substs[param_index as usize];
+                    ty::Adt(adt, args) => {
+                        let generic_arg = args[param_index as usize];
+                        let identity_args =
+                            GenericArgs::identity_for_item(self.infcx.tcx, adt.did());
+                        let base_ty = Ty::new_adt(self.infcx.tcx, *adt, identity_args);
+                        let base_generic_arg = identity_args[param_index as usize];
                         let adt_desc = adt.descr();
 
                         let desc = format!(
@@ -522,19 +526,18 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     }
                     ty::FnDef(def_id, _) => {
                         let name = self.infcx.tcx.item_name(*def_id);
-                        let identity_substs =
-                            InternalSubsts::identity_for_item(self.infcx.tcx, *def_id);
+                        let identity_args = GenericArgs::identity_for_item(self.infcx.tcx, *def_id);
                         let desc = format!("a function pointer to `{name}`");
                         let note = format!(
                             "the function `{name}` is invariant over the parameter `{}`",
-                            identity_substs[param_index as usize]
+                            identity_args[param_index as usize]
                         );
                         (desc, note)
                     }
                     _ => panic!("Unexpected type {ty:?}"),
                 };
-                diag.note(&format!("requirement occurs because of {desc}",));
-                diag.note(&note);
+                diag.note(format!("requirement occurs because of {desc}",));
+                diag.note(note);
                 diag.help("see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance");
             }
         }
@@ -575,7 +578,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
         let mut output_ty = self.regioncx.universal_regions().unnormalized_output_ty;
         if let ty::Alias(ty::Opaque, ty::AliasTy { def_id, .. }) = *output_ty.kind() {
-            output_ty = self.infcx.tcx.type_of(def_id).subst_identity()
+            output_ty = self.infcx.tcx.type_of(def_id).instantiate_identity()
         };
 
         debug!("report_fnmut_error: output_ty={:?}", output_ty);
@@ -583,7 +586,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let err = FnMutError {
             span: *span,
             ty_err: match output_ty.kind() {
-                ty::Generator(def, ..) if self.infcx.tcx.generator_is_async(*def) => {
+                ty::Coroutine(def, ..) if self.infcx.tcx.coroutine_is_async(*def) => {
                     FnMutReturnTypeErr::ReturnAsyncBlock { span: *span }
                 }
                 _ if output_ty.contains_closure() => {
@@ -602,7 +605,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             };
 
             let captured_place = &self.upvars[upvar_field.index()].place;
-            let defined_hir = match captured_place.place.base {
+            let defined_hir = match captured_place.base {
                 PlaceBase::Local(hirid) => Some(hirid),
                 PlaceBase::Upvar(upvar) => Some(upvar.var_path.hir_id),
                 _ => None,
@@ -647,14 +650,14 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
         let fr_name_and_span = self.regioncx.get_var_name_and_span_for_region(
             self.infcx.tcx,
-            &self.body,
+            self.body,
             &self.local_names,
             &self.upvars,
             errci.fr,
         );
         let outlived_fr_name_and_span = self.regioncx.get_var_name_and_span_for_region(
             self.infcx.tcx,
-            &self.body,
+            self.body,
             &self.local_names,
             &self.upvars,
             errci.outlived_fr,
@@ -760,7 +763,14 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let err = LifetimeOutliveErr { span: *span };
         let mut diag = self.infcx.tcx.sess.create_err(err);
 
-        let fr_name = self.give_region_a_name(*fr).unwrap();
+        // In certain scenarios, such as the one described in issue #118021,
+        // we might encounter a lifetime that cannot be named.
+        // These situations are bound to result in errors.
+        // To prevent an immediate ICE, we opt to create a dummy name instead.
+        let fr_name = self.give_region_a_name(*fr).unwrap_or(RegionName {
+            name: kw::UnderscoreLifetime,
+            source: RegionNameSource::Static,
+        });
         fr_name.highlight_region_name(&mut diag);
         let outlived_fr_name = self.give_region_a_name(*outlived_fr).unwrap();
         outlived_fr_name.highlight_region_name(&mut diag);
@@ -813,7 +823,9 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 return;
             }
             let suitable_region = self.infcx.tcx.is_suitable_region(f);
-            let Some(suitable_region) = suitable_region else { return; };
+            let Some(suitable_region) = suitable_region else {
+                return;
+            };
 
             let fn_returns = self.infcx.tcx.return_type_impl_or_dyn_traits(suitable_region.def_id);
 
@@ -845,10 +857,13 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 return;
             }
 
-            let Some((alias_tys, alias_span)) = self
+            let Some((alias_tys, alias_span, lt_addition_span)) = self
                 .infcx
                 .tcx
-                .return_type_impl_or_dyn_traits_with_type_alias(suitable_region.def_id) else { return; };
+                .return_type_impl_or_dyn_traits_with_type_alias(suitable_region.def_id)
+            else {
+                return;
+            };
 
             // in case the return type of the method is a type alias
             let mut spans_suggs: Vec<_> = Vec::new();
@@ -858,12 +873,22 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     ()
                 }
                 if let TyKind::TraitObject(_, lt, _) = alias_ty.kind {
-                    spans_suggs.push((lt.ident.span.shrink_to_hi(), " + 'a".to_string()));
+                    if lt.ident.name == kw::Empty {
+                        spans_suggs.push((lt.ident.span.shrink_to_hi(), " + 'a".to_string()));
+                    } else {
+                        spans_suggs.push((lt.ident.span, "'a".to_string()));
+                    }
                 }
             }
-            spans_suggs.push((alias_span.shrink_to_hi(), "<'a>".to_string()));
+
+            if let Some(lt_addition_span) = lt_addition_span {
+                spans_suggs.push((lt_addition_span, "'a, ".to_string()));
+            } else {
+                spans_suggs.push((alias_span.shrink_to_hi(), "<'a>".to_string()));
+            }
+
             diag.multipart_suggestion_verbose(
-                &format!(
+                format!(
                     "to declare that the trait object {captures}, you can add a lifetime parameter `'a` in the type alias"
                 ),
                 spans_suggs,
@@ -886,14 +911,14 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let tcx = self.infcx.tcx;
 
         let instance = if let ConstraintCategory::CallArgument(Some(func_ty)) = category {
-            let (fn_did, substs) = match func_ty.kind() {
-                ty::FnDef(fn_did, substs) => (fn_did, substs),
+            let (fn_did, args) = match func_ty.kind() {
+                ty::FnDef(fn_did, args) => (fn_did, args),
                 _ => return,
             };
-            debug!(?fn_did, ?substs);
+            debug!(?fn_did, ?args);
 
             // Only suggest this on function calls, not closures
-            let ty = tcx.type_of(fn_did).subst_identity();
+            let ty = tcx.type_of(fn_did).instantiate_identity();
             debug!("ty: {:?}, ty.kind: {:?}", ty, ty.kind());
             if let ty::Closure(_, _) = ty.kind() {
                 return;
@@ -903,7 +928,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 tcx,
                 self.param_env,
                 *fn_did,
-                self.infcx.resolve_vars_if_possible(substs),
+                self.infcx.resolve_vars_if_possible(args),
             ) {
                 instance
             } else {
@@ -922,8 +947,13 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let mut visitor = TraitObjectVisitor(FxIndexSet::default());
         visitor.visit_ty(param.param_ty);
 
-        let Some((ident, self_ty)) =
-            NiceRegionError::get_impl_ident_and_self_ty_from_trait(tcx, instance.def_id(), &visitor.0) else { return; };
+        let Some((ident, self_ty)) = NiceRegionError::get_impl_ident_and_self_ty_from_trait(
+            tcx,
+            instance.def_id(),
+            &visitor.0,
+        ) else {
+            return;
+        };
 
         self.suggest_constrain_dyn_trait_in_impl(diag, &visitor.0, ident, self_ty);
     }
@@ -941,7 +971,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         for found_did in found_dids {
             let mut traits = vec![];
             let mut hir_v = HirTraitObjectVisitor(&mut traits, *found_did);
-            hir_v.visit_ty(&self_ty);
+            hir_v.visit_ty(self_ty);
             debug!("trait spans found: {:?}", traits);
             for span in &traits {
                 let mut multi_span: MultiSpan = vec![*span].into();
@@ -971,23 +1001,25 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         sup: RegionVid,
     ) {
         let (Some(sub), Some(sup)) = (self.to_error_region(sub), self.to_error_region(sup)) else {
-            return
+            return;
         };
 
         let Some((ty_sub, _)) = self
             .infcx
             .tcx
             .is_suitable_region(sub)
-            .and_then(|anon_reg| find_anon_type(self.infcx.tcx, sub, &anon_reg.boundregion)) else {
-            return
+            .and_then(|anon_reg| find_anon_type(self.infcx.tcx, sub, &anon_reg.bound_region))
+        else {
+            return;
         };
 
         let Some((ty_sup, _)) = self
             .infcx
             .tcx
             .is_suitable_region(sup)
-            .and_then(|anon_reg| find_anon_type(self.infcx.tcx, sup, &anon_reg.boundregion)) else {
-            return
+            .and_then(|anon_reg| find_anon_type(self.infcx.tcx, sup, &anon_reg.bound_region))
+        else {
+            return;
         };
 
         suggest_adding_lifetime_params(self.infcx.tcx, sub, ty_sup, ty_sub, diag);
@@ -1017,7 +1049,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 ..
             }) => {
                 let body = map.body(*body);
-                if !matches!(body.generator_kind, Some(hir::GeneratorKind::Async(..))) {
+                if !matches!(body.coroutine_kind, Some(hir::CoroutineKind::Async(..))) {
                     closure_span = Some(expr.span.shrink_to_lo());
                 }
             }

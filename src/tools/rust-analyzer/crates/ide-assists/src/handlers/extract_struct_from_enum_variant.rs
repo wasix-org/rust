@@ -158,7 +158,7 @@ fn existing_definition(db: &RootDatabase, variant_name: &ast::Name, variant: &Va
             ),
             _ => false,
         })
-        .any(|(name, _)| name.to_string() == variant_name.to_string())
+        .any(|(name, _)| name.display(db).to_string() == variant_name.to_string())
 }
 
 fn extract_generic_params(
@@ -384,6 +384,7 @@ fn process_references(
                     *enum_module_def,
                     ctx.config.insert_use.prefix_kind,
                     ctx.config.prefer_no_std,
+                    ctx.config.prefer_prelude,
                 );
                 if let Some(mut mod_path) = mod_path {
                     mod_path.pop_segment();
@@ -1006,7 +1007,7 @@ enum X<'a, 'b, 'x> {
     }
 
     #[test]
-    fn test_extract_struct_with_liftime_type_const() {
+    fn test_extract_struct_with_lifetime_type_const() {
         check_assist(
             extract_struct_from_enum_variant,
             r#"

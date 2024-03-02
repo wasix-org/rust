@@ -23,6 +23,8 @@
 //! This API is completely unstable and subject to change.
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![doc(rust_logo)]
+#![feature(rustdoc_internals)]
 #![feature(allocator_api)]
 #![feature(array_windows)]
 #![feature(assert_matches)]
@@ -30,16 +32,15 @@
 #![feature(core_intrinsics)]
 #![feature(discriminant_kind)]
 #![feature(exhaustive_patterns)]
-#![feature(generators)]
+#![feature(coroutines)]
 #![feature(get_mut_unchecked)]
 #![feature(if_let_guard)]
-#![feature(iter_from_generator)]
-#![feature(local_key_cell_methods)]
+#![feature(inline_const)]
+#![feature(iter_from_coroutine)]
 #![feature(negative_impls)]
 #![feature(never_type)]
 #![feature(extern_types)]
 #![feature(new_uninit)]
-#![feature(once_cell)]
 #![feature(let_chains)]
 #![feature(min_specialization)]
 #![feature(trusted_len)]
@@ -48,19 +49,22 @@
 #![feature(associated_type_bounds)]
 #![feature(rustc_attrs)]
 #![feature(control_flow_enum)]
+#![feature(trait_upcasting)]
 #![feature(trusted_step)]
 #![feature(try_blocks)]
 #![feature(try_reserve_kind)]
 #![feature(nonzero_ops)]
 #![feature(decl_macro)]
-#![feature(drain_filter)]
+#![feature(extract_if)]
 #![feature(intra_doc_pointers)]
 #![feature(yeet_expr)]
-#![feature(result_option_inspect)]
 #![feature(const_option)]
 #![feature(trait_alias)]
+#![feature(ptr_alignment_type)]
+#![feature(macro_metavar_expr)]
 #![recursion_limit = "512"]
 #![allow(rustc::potential_query_instability)]
+#![allow(internal_features)]
 
 #[macro_use]
 extern crate bitflags;
@@ -73,9 +77,6 @@ extern crate tracing;
 #[macro_use]
 extern crate smallvec;
 
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::fluent_messages;
-
 #[cfg(test)]
 mod tests;
 
@@ -83,14 +84,10 @@ mod tests;
 mod macros;
 
 #[macro_use]
-pub mod query;
-
-#[macro_use]
 pub mod arena;
-#[macro_use]
-pub mod dep_graph;
-pub(crate) mod error;
+pub mod error;
 pub mod hir;
+pub mod hooks;
 pub mod infer;
 pub mod lint;
 pub mod metadata;
@@ -99,14 +96,15 @@ pub mod mir;
 pub mod thir;
 pub mod traits;
 pub mod ty;
+pub mod util;
 mod values;
 
-pub mod util {
-    pub mod bug;
-    pub mod common;
-}
+#[macro_use]
+pub mod query;
+#[macro_use]
+pub mod dep_graph;
 
 // Allows macros to refer to this crate as `::rustc_middle`
 extern crate self as rustc_middle;
 
-fluent_messages! { "../locales/en-US.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

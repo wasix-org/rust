@@ -2,34 +2,27 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     time::Instant,
 };
 
-use crate::{
-    cli::load_cargo::ProcMacroServerChoice,
-    line_index::{LineEndings, LineIndex, PositionEncoding},
-};
-use hir::Name;
 use ide::{
     LineCol, MonikerDescriptorKind, StaticIndex, StaticIndexedFile, TextRange, TokenId,
     TokenStaticData,
 };
 use ide_db::LineIndexDatabase;
-use project_model::{CargoConfig, ProjectManifest, ProjectWorkspace};
+use load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
 use scip::types as scip_types;
-use std::env;
 
-use crate::cli::{
-    flags,
-    load_cargo::{load_workspace, LoadCargoConfig},
-    Result,
+use crate::{
+    cli::flags,
+    line_index::{LineEndings, LineIndex, PositionEncoding},
 };
 
 impl flags::Scip {
-    pub fn run(self) -> Result<()> {
+    pub fn run(self) -> anyhow::Result<()> {
         eprintln!("Generating SCIP start...");
         let now = Instant::now();
-        let cargo_config = CargoConfig::default();
 
         let no_progress = &|s| (eprintln!("rust-analyzer: Loading {s}"));
         let load_cargo_config = LoadCargoConfig {
@@ -37,14 +30,27 @@ impl flags::Scip {
             with_proc_macro_server: ProcMacroServerChoice::Sysroot,
             prefill_caches: true,
         };
-        let path = vfs::AbsPathBuf::assert(env::current_dir()?.join(&self.path));
-        let rootpath = path.normalize();
-        let manifest = ProjectManifest::discover_single(&path)?;
+        let root = vfs::AbsPathBuf::assert(std::env::current_dir()?.join(&self.path)).normalize();
 
-        let workspace = ProjectWorkspace::load(manifest, &cargo_config, no_progress)?;
+        let mut config = crate::config::Config::new(
+            root.clone(),
+            lsp_types::ClientCapabilities::default(),
+            /* workspace_roots = */ vec![],
+            /* is_visual_studio_code = */ false,
+        );
 
-        let (host, vfs, _) =
-            load_workspace(workspace, &cargo_config.extra_env, &load_cargo_config)?;
+        if let Some(p) = self.config_path {
+            let mut file = std::io::BufReader::new(std::fs::File::open(p)?);
+            let json = serde_json::from_reader(&mut file)?;
+            config.update(json)?;
+        }
+        let cargo_config = config.cargo();
+        let (host, vfs, _) = load_workspace_at(
+            root.as_path().as_ref(),
+            &cargo_config,
+            &load_cargo_config,
+            &no_progress,
+        )?;
         let db = host.raw_database();
         let analysis = host.analysis();
 
@@ -54,18 +60,16 @@ impl flags::Scip {
             version: scip_types::ProtocolVersion::UnspecifiedProtocolVersion.into(),
             tool_info: Some(scip_types::ToolInfo {
                 name: "rust-analyzer".to_owned(),
-                version: "0.1".to_owned(),
+                version: format!("{}", crate::version::version()),
                 arguments: vec![],
                 special_fields: Default::default(),
             })
             .into(),
             project_root: format!(
                 "file://{}",
-                path.normalize()
-                    .as_os_str()
+                root.as_os_str()
                     .to_str()
-                    .ok_or(anyhow::anyhow!("Unable to normalize project_root path"))?
-                    .to_string()
+                    .ok_or(anyhow::format_err!("Unable to normalize project_root path"))?
             ),
             text_document_encoding: scip_types::TextEncoding::UTF8.into(),
             special_fields: Default::default(),
@@ -84,7 +88,7 @@ impl flags::Scip {
                 new_symbol
             };
 
-            let relative_path = match get_relative_filepath(&vfs, &rootpath, file_id) {
+            let relative_path = match get_relative_filepath(&vfs, &root, file_id) {
                 Some(relative_path) => relative_path,
                 None => continue,
             };
@@ -129,6 +133,10 @@ impl flags::Scip {
                             documentation: documentation.unwrap_or_default(),
                             relationships: Vec::new(),
                             special_fields: Default::default(),
+                            kind: Default::default(),
+                            display_name: String::new(),
+                            signature_documentation: Default::default(),
+                            enclosing_symbol: String::new(),
                         };
 
                         symbols.push(symbol_info)
@@ -143,6 +151,7 @@ impl flags::Scip {
                     syntax_kind: Default::default(),
                     diagnostics: Vec::new(),
                     special_fields: Default::default(),
+                    enclosing_range: Vec::new(),
                 });
             });
 
@@ -156,6 +165,7 @@ impl flags::Scip {
                 occurrences,
                 symbols,
                 special_fields: Default::default(),
+                text: String::new(),
             });
         }
 
@@ -166,8 +176,9 @@ impl flags::Scip {
             special_fields: Default::default(),
         };
 
-        scip::write_message_to_file("index.scip", index)
-            .map_err(|err| anyhow::anyhow!("Failed to write scip to file: {}", err))?;
+        let out_path = self.output.unwrap_or_else(|| PathBuf::from(r"index.scip"));
+        scip::write_message_to_file(out_path, index)
+            .map_err(|err| anyhow::format_err!("Failed to write scip to file: {}", err))?;
 
         eprintln!("Generating SCIP finished {:?}", now.elapsed());
         Ok(())
@@ -209,13 +220,12 @@ fn new_descriptor_str(
     }
 }
 
-fn new_descriptor(name: Name, suffix: scip_types::descriptor::Suffix) -> scip_types::Descriptor {
-    let mut name = name.to_string();
-    if name.contains("'") {
-        name = format!("`{name}`");
+fn new_descriptor(name: &str, suffix: scip_types::descriptor::Suffix) -> scip_types::Descriptor {
+    if name.contains('\'') {
+        new_descriptor_str(&format!("`{name}`"), suffix)
+    } else {
+        new_descriptor_str(&name, suffix)
     }
-
-    new_descriptor_str(name.as_str(), suffix)
 }
 
 /// Loosely based on `def_to_moniker`
@@ -235,7 +245,7 @@ fn token_to_symbol(token: &TokenStaticData) -> Option<scip_types::Symbol> {
         .iter()
         .map(|desc| {
             new_descriptor(
-                desc.name.clone(),
+                &desc.name,
                 match desc.desc {
                     MonikerDescriptorKind::Namespace => Namespace,
                     MonikerDescriptorKind::Type => Type,
@@ -276,7 +286,7 @@ mod test {
         let change_fixture = ChangeFixture::parse(ra_fixture);
         host.raw_database_mut().apply_change(change_fixture.change);
         let (file_id, range_or_offset) =
-            change_fixture.file_position.expect("expected a marker ($0)");
+            change_fixture.file_position.expect("expected a marker ()");
         let offset = range_or_offset.expect_offset();
         (host, FilePosition { file_id, offset })
     }
@@ -325,7 +335,7 @@ use foo::example_mod::func;
 fn main() {
     func$0();
 }
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod example_mod {
     pub fn func() {}
 }
@@ -338,7 +348,7 @@ pub mod example_mod {
     fn symbol_for_trait() {
         check_symbol(
             r#"
-//- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
 pub mod module {
     pub trait MyTrait {
         pub fn func$0() {}
@@ -353,7 +363,7 @@ pub mod module {
     fn symbol_for_trait_constant() {
         check_symbol(
             r#"
-    //- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+    //- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
     pub mod module {
         pub trait MyTrait {
             const MY_CONST$0: u8;
@@ -368,7 +378,7 @@ pub mod module {
     fn symbol_for_trait_type() {
         check_symbol(
             r#"
-    //- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+    //- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
     pub mod module {
         pub trait MyTrait {
             type MyType$0;
@@ -384,7 +394,7 @@ pub mod module {
     fn symbol_for_trait_impl_function() {
         check_symbol(
             r#"
-    //- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+    //- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
     pub mod module {
         pub trait MyTrait {
             pub fn func() {}
@@ -411,12 +421,50 @@ pub mod module {
     fn main() {
         let x = St { a$0: 2 };
     }
-    //- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+    //- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
     pub struct St {
         pub a: i32,
     }
     "#,
             "rust-analyzer cargo foo 0.1.0 St#a.",
+        );
+    }
+
+    #[test]
+    fn symbol_for_param() {
+        check_symbol(
+            r#"
+//- /lib.rs crate:main deps:foo
+use foo::example_mod::func;
+fn main() {
+    func(42);
+}
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
+pub mod example_mod {
+    pub fn func(x$0: usize) {}
+}
+"#,
+            "rust-analyzer cargo foo 0.1.0 example_mod/func().(x)",
+        );
+    }
+
+    #[test]
+    fn symbol_for_closure_param() {
+        check_symbol(
+            r#"
+//- /lib.rs crate:main deps:foo
+use foo::example_mod::func;
+fn main() {
+    func();
+}
+//- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
+pub mod example_mod {
+    pub fn func() {
+        let f = |x$0: usize| {};
+    }
+}
+"#,
+            "rust-analyzer cargo foo 0.1.0 example_mod/func().(x)",
         );
     }
 
@@ -429,7 +477,7 @@ pub mod module {
     fn main() {
         func();
     }
-    //- /foo/lib.rs crate:foo@CratesIo:0.1.0,https://a.b/foo.git
+    //- /foo/lib.rs crate:foo@0.1.0,https://a.b/foo.git library
     pub mod module {
         pub fn func() {
             let x$0 = 2;

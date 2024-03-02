@@ -1,7 +1,7 @@
 use crate::*;
 use rustc_ast::ast::Mutability;
 use rustc_middle::ty::layout::LayoutOf as _;
-use rustc_middle::ty::{self, Instance};
+use rustc_middle::ty::{self, Instance, Ty};
 use rustc_span::{BytePos, Loc, Symbol};
 use rustc_target::{abi::Size, spec::abi::Abi};
 
@@ -37,7 +37,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let this = self.eval_context_mut();
         let tcx = this.tcx;
 
-        let flags = if let Some(flags_op) = args.get(0) {
+        let flags = if let Some(flags_op) = args.first() {
             this.read_scalar(flags_op)?.to_u64()?
         } else {
             throw_ub_format!("expected at least 1 argument")
@@ -63,7 +63,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 // to reconstruct the needed frame information in `handle_miri_resolve_frame`.
                 // Note that we never actually read or write anything from/to this pointer -
                 // all of the data is represented by the pointer value itself.
-                let fn_ptr = this.create_fn_alloc_ptr(FnVal::Instance(instance));
+                let fn_ptr = this.fn_ptr(FnVal::Instance(instance));
                 fn_ptr.wrapping_offset(Size::from_bytes(pos.0), this)
             })
             .collect();
@@ -71,7 +71,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let len: u64 = ptrs.len().try_into().unwrap();
 
         let ptr_ty = this.machine.layouts.mut_raw_ptr.ty;
-        let array_layout = this.layout_of(tcx.mk_array(ptr_ty, len)).unwrap();
+        let array_layout = this.layout_of(Ty::new_array(tcx.tcx, ptr_ty, len)).unwrap();
 
         match flags {
             // storage for pointers is allocated by miri
@@ -83,30 +83,27 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 // Write pointers into array
                 for (i, ptr) in ptrs.into_iter().enumerate() {
-                    let place = this.mplace_index(&alloc, i as u64)?;
+                    let place = this.project_index(&alloc, i as u64)?;
 
-                    this.write_pointer(ptr, &place.into())?;
+                    this.write_pointer(ptr, &place)?;
                 }
 
-                this.write_immediate(
-                    Immediate::new_slice(Scalar::from_maybe_pointer(alloc.ptr, this), len, this),
-                    dest,
-                )?;
+                this.write_immediate(Immediate::new_slice(alloc.ptr(), len, this), dest)?;
             }
             // storage for pointers is allocated by the caller
             1 => {
                 let [_flags, buf] = this.check_shim(abi, Abi::Rust, link_name, args)?;
 
-                let buf_place = this.deref_operand(buf)?;
+                let buf_place = this.deref_pointer(buf)?;
 
                 let ptr_layout = this.layout_of(ptr_ty)?;
 
                 for (i, ptr) in ptrs.into_iter().enumerate() {
-                    let offset = ptr_layout.size * i.try_into().unwrap();
+                    let offset = ptr_layout.size.checked_mul(i.try_into().unwrap(), this).unwrap();
 
                     let op_place = buf_place.offset(offset, ptr_layout, this)?;
 
-                    this.write_pointer(ptr, &op_place.into())?;
+                    this.write_pointer(ptr, &op_place)?;
                 }
             }
             _ => throw_unsup_format!("unknown `miri_get_backtrace` flags {}", flags),
@@ -138,7 +135,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             this.tcx.sess.source_map().lookup_char_pos(BytePos(offset.bytes().try_into().unwrap()));
 
         let name = fn_instance.to_string();
-        let filename = lo.file.name.prefer_remapped().to_string();
+        let filename = lo.file.name.prefer_remapped_unconditionaly().to_string();
 
         Ok((fn_instance, lo, name, filename))
     }
@@ -159,7 +156,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         // Reconstruct the original function pointer,
         // which we pass to user code.
-        let fn_ptr = this.create_fn_alloc_ptr(FnVal::Instance(fn_instance));
+        let fn_ptr = this.fn_ptr(FnVal::Instance(fn_instance));
 
         let num_fields = dest.layout.fields.count();
 
@@ -194,35 +191,29 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let filename_alloc =
                     this.allocate_str(&filename, MiriMemoryKind::Rust.into(), Mutability::Mut)?;
 
-                this.write_immediate(
-                    name_alloc.to_ref(this),
-                    &this.mplace_field(&dest, 0)?.into(),
-                )?;
-                this.write_immediate(
-                    filename_alloc.to_ref(this),
-                    &this.mplace_field(&dest, 1)?.into(),
-                )?;
+                this.write_immediate(name_alloc.to_ref(this), &this.project_field(&dest, 0)?)?;
+                this.write_immediate(filename_alloc.to_ref(this), &this.project_field(&dest, 1)?)?;
             }
             1 => {
                 this.write_scalar(
                     Scalar::from_target_usize(name.len().try_into().unwrap(), this),
-                    &this.mplace_field(&dest, 0)?.into(),
+                    &this.project_field(&dest, 0)?,
                 )?;
                 this.write_scalar(
                     Scalar::from_target_usize(filename.len().try_into().unwrap(), this),
-                    &this.mplace_field(&dest, 1)?.into(),
+                    &this.project_field(&dest, 1)?,
                 )?;
             }
             _ => throw_unsup_format!("unknown `miri_resolve_frame` flags {}", flags),
         }
 
-        this.write_scalar(Scalar::from_u32(lineno), &this.mplace_field(&dest, 2)?.into())?;
-        this.write_scalar(Scalar::from_u32(colno), &this.mplace_field(&dest, 3)?.into())?;
+        this.write_scalar(Scalar::from_u32(lineno), &this.project_field(&dest, 2)?)?;
+        this.write_scalar(Scalar::from_u32(colno), &this.project_field(&dest, 3)?)?;
 
         // Support a 4-field struct for now - this is deprecated
         // and slated for removal.
         if num_fields == 5 {
-            this.write_pointer(fn_ptr, &this.mplace_field(&dest, 4)?.into())?;
+            this.write_pointer(fn_ptr, &this.project_field(&dest, 4)?)?;
         }
 
         Ok(())

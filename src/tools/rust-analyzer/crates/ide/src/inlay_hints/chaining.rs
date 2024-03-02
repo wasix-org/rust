@@ -5,7 +5,7 @@ use syntax::{
     Direction, NodeOrToken, SyntaxKind, T,
 };
 
-use crate::{FileId, InlayHint, InlayHintsConfig, InlayKind};
+use crate::{FileId, InlayHint, InlayHintPosition, InlayHintsConfig, InlayKind};
 
 use super::label_of_ty;
 
@@ -57,10 +57,16 @@ pub(super) fn hints(
                     }
                 }
             }
+            let label = label_of_ty(famous_defs, config, &ty)?;
             acc.push(InlayHint {
+                needs_resolve: label.needs_resolve(),
                 range: expr.syntax().text_range(),
                 kind: InlayKind::Chaining,
-                label: label_of_ty(famous_defs, config, ty)?,
+                label,
+                text_edit: None,
+                position: InlayHintPosition::After,
+                pad_left: true,
+                pad_right: false,
             });
         }
     }
@@ -72,7 +78,9 @@ mod tests {
     use expect_test::expect;
 
     use crate::{
-        inlay_hints::tests::{check_expect, check_with_config, DISABLED_CONFIG, TEST_CONFIG},
+        inlay_hints::tests::{
+            check_expect, check_expect_clear_loc, check_with_config, DISABLED_CONFIG, TEST_CONFIG,
+        },
         InlayHintsConfig,
     };
 
@@ -103,6 +111,9 @@ fn main() {
                 [
                     InlayHint {
                         range: 147..172,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -120,9 +131,14 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 147..154,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -140,6 +156,8 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                 ]
             "#]],
@@ -188,6 +206,9 @@ fn main() {
                 [
                     InlayHint {
                         range: 143..190,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -205,9 +226,14 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 143..179,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -225,6 +251,8 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                 ]
             "#]],
@@ -257,6 +285,9 @@ fn main() {
                 [
                     InlayHint {
                         range: 143..190,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -274,9 +305,14 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 143..179,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -294,6 +330,8 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                 ]
             "#]],
@@ -327,6 +365,9 @@ fn main() {
                 [
                     InlayHint {
                         range: 246..283,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -357,9 +398,14 @@ fn main() {
                             },
                             "<i32, bool>>",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 246..265,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -390,6 +436,8 @@ fn main() {
                             },
                             "<i32, bool>>",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                 ]
             "#]],
@@ -398,7 +446,7 @@ fn main() {
 
     #[test]
     fn shorten_iterator_chaining_hints() {
-        check_expect(
+        check_expect_clear_loc(
             InlayHintsConfig { chaining_hints: true, ..DISABLED_CONFIG },
             r#"
 //- minicore: iterators
@@ -425,6 +473,9 @@ fn main() {
                 [
                     InlayHint {
                         range: 174..241,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "impl ",
@@ -435,7 +486,7 @@ fn main() {
                                         file_id: FileId(
                                             1,
                                         ),
-                                        range: 2611..2619,
+                                        range: 0..0,
                                     },
                                 ),
                                 tooltip: "",
@@ -448,16 +499,21 @@ fn main() {
                                         file_id: FileId(
                                             1,
                                         ),
-                                        range: 2643..2647,
+                                        range: 0..0,
                                     },
                                 ),
                                 tooltip: "",
                             },
                             " = ()>",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 174..224,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "impl ",
@@ -468,7 +524,7 @@ fn main() {
                                         file_id: FileId(
                                             1,
                                         ),
-                                        range: 2611..2619,
+                                        range: 0..0,
                                     },
                                 ),
                                 tooltip: "",
@@ -481,16 +537,21 @@ fn main() {
                                         file_id: FileId(
                                             1,
                                         ),
-                                        range: 2643..2647,
+                                        range: 0..0,
                                     },
                                 ),
                                 tooltip: "",
                             },
                             " = ()>",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 174..206,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "impl ",
@@ -501,7 +562,7 @@ fn main() {
                                         file_id: FileId(
                                             1,
                                         ),
-                                        range: 2611..2619,
+                                        range: 0..0,
                                     },
                                 ),
                                 tooltip: "",
@@ -514,16 +575,21 @@ fn main() {
                                         file_id: FileId(
                                             1,
                                         ),
-                                        range: 2643..2647,
+                                        range: 0..0,
                                     },
                                 ),
                                 tooltip: "",
                             },
                             " = ()>",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 174..189,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "&mut ",
@@ -534,13 +600,15 @@ fn main() {
                                         file_id: FileId(
                                             0,
                                         ),
-                                        range: 24..30,
+                                        range: 0..0,
                                     },
                                 ),
                                 tooltip: "",
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                 ]
             "#]],
@@ -573,6 +641,9 @@ fn main() {
                 [
                     InlayHint {
                         range: 124..130,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Type,
                         label: [
                             "",
@@ -590,9 +661,23 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: Some(
+                            TextEdit {
+                                indels: [
+                                    Indel {
+                                        insert: ": Struct",
+                                        delete: 130..130,
+                                    },
+                                ],
+                            },
+                        ),
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 145..185,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -610,9 +695,14 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 145..168,
+                        position: After,
+                        pad_left: true,
+                        pad_right: false,
                         kind: Chaining,
                         label: [
                             "",
@@ -630,9 +720,14 @@ fn main() {
                             },
                             "",
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                     InlayHint {
                         range: 222..228,
+                        position: Before,
+                        pad_left: false,
+                        pad_right: true,
                         kind: Parameter,
                         label: [
                             InlayHintLabelPart {
@@ -648,6 +743,8 @@ fn main() {
                                 tooltip: "",
                             },
                         ],
+                        text_edit: None,
+                        needs_resolve: true,
                     },
                 ]
             "#]],

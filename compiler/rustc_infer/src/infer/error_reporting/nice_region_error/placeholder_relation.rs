@@ -16,23 +16,33 @@ impl<'tcx> NiceRegionError<'_, 'tcx> {
         match &self.error {
             Some(RegionResolutionError::ConcreteFailure(
                 SubregionOrigin::RelateRegionParamBound(span),
-                Region(Interned(RePlaceholder(ty::Placeholder { name: sub_name, .. }), _)),
-                Region(Interned(RePlaceholder(ty::Placeholder { name: sup_name, .. }), _)),
+                Region(Interned(
+                    RePlaceholder(ty::Placeholder {
+                        bound: ty::BoundRegion { kind: sub_name, .. },
+                        ..
+                    }),
+                    _,
+                )),
+                Region(Interned(
+                    RePlaceholder(ty::Placeholder {
+                        bound: ty::BoundRegion { kind: sup_name, .. },
+                        ..
+                    }),
+                    _,
+                )),
             )) => {
                 let span = *span;
                 let (sub_span, sub_symbol) = match sub_name {
                     ty::BrNamed(def_id, symbol) => {
                         (Some(self.tcx().def_span(def_id)), Some(symbol))
                     }
-                    ty::BrAnon(_, span) => (*span, None),
-                    ty::BrEnv => (None, None),
+                    ty::BrAnon | ty::BrEnv => (None, None),
                 };
                 let (sup_span, sup_symbol) = match sup_name {
                     ty::BrNamed(def_id, symbol) => {
                         (Some(self.tcx().def_span(def_id)), Some(symbol))
                     }
-                    ty::BrAnon(_, span) => (*span, None),
-                    ty::BrEnv => (None, None),
+                    ty::BrAnon | ty::BrEnv => (None, None),
                 };
                 let diag = match (sub_span, sup_span, sub_symbol, sup_symbol) {
                     (Some(sub_span), Some(sup_span), Some(&sub_symbol), Some(&sup_symbol)) => {

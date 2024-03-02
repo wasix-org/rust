@@ -1,5 +1,5 @@
 error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
-  --> $DIR/single_match_else.rs:17:13
+  --> $DIR/single_match_else.rs:16:13
    |
 LL |       let _ = match ExprNode::Butterflies {
    |  _____________^
@@ -12,7 +12,8 @@ LL | |     };
    | |_____^
    |
    = note: `-D clippy::single-match-else` implied by `-D warnings`
-help: try this
+   = help: to override `-D warnings` add `#[allow(clippy::single_match_else)]`
+help: try
    |
 LL ~     let _ = if let ExprNode::ExprAddrOf = ExprNode::Butterflies { Some(&NODE) } else {
 LL +         let x = 5;
@@ -21,7 +22,7 @@ LL ~     };
    |
 
 error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
-  --> $DIR/single_match_else.rs:82:5
+  --> $DIR/single_match_else.rs:81:5
    |
 LL | /     match Some(1) {
 LL | |         Some(a) => println!("${:?}", a),
@@ -32,7 +33,7 @@ LL | |         },
 LL | |     }
    | |_____^
    |
-help: try this
+help: try
    |
 LL ~     if let Some(a) = Some(1) { println!("${:?}", a) } else {
 LL +         println!("else block");
@@ -41,7 +42,7 @@ LL +     }
    |
 
 error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
-  --> $DIR/single_match_else.rs:91:5
+  --> $DIR/single_match_else.rs:90:5
    |
 LL | /     match Some(1) {
 LL | |         Some(a) => println!("${:?}", a),
@@ -52,7 +53,7 @@ LL | |         },
 LL | |     }
    | |_____^
    |
-help: try this
+help: try
    |
 LL ~     if let Some(a) = Some(1) { println!("${:?}", a) } else {
 LL +         println!("else block");
@@ -61,7 +62,7 @@ LL +     }
    |
 
 error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
-  --> $DIR/single_match_else.rs:101:5
+  --> $DIR/single_match_else.rs:100:5
    |
 LL | /     match Result::<i32, Infallible>::Ok(1) {
 LL | |         Ok(a) => println!("${:?}", a),
@@ -72,7 +73,7 @@ LL | |         }
 LL | |     }
    | |_____^
    |
-help: try this
+help: try
    |
 LL ~     if let Ok(a) = Result::<i32, Infallible>::Ok(1) { println!("${:?}", a) } else {
 LL +         println!("else block");
@@ -81,7 +82,7 @@ LL +     }
    |
 
 error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
-  --> $DIR/single_match_else.rs:110:5
+  --> $DIR/single_match_else.rs:109:5
    |
 LL | /     match Cow::from("moo") {
 LL | |         Cow::Owned(a) => println!("${:?}", a),
@@ -92,7 +93,7 @@ LL | |         }
 LL | |     }
    | |_____^
    |
-help: try this
+help: try
    |
 LL ~     if let Cow::Owned(a) = Cow::from("moo") { println!("${:?}", a) } else {
 LL +         println!("else block");
@@ -100,5 +101,101 @@ LL +         return;
 LL +     }
    |
 
-error: aborting due to 5 previous errors
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+  --> $DIR/single_match_else.rs:119:5
+   |
+LL | /     match bar {
+LL | |         Some(v) => unsafe {
+LL | |             let r = &v as *const i32;
+LL | |             println!("{}", *r);
+...  |
+LL | |         },
+LL | |     }
+   | |_____^
+   |
+help: try
+   |
+LL ~     if let Some(v) = bar { unsafe {
+LL +         let r = &v as *const i32;
+LL +         println!("{}", *r);
+LL +     } } else {
+LL +         println!("None1");
+LL +         println!("None2");
+LL +     }
+   |
+
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+  --> $DIR/single_match_else.rs:130:5
+   |
+LL | /     match bar {
+LL | |         Some(v) => {
+LL | |             println!("Some");
+LL | |             println!("{v}");
+...  |
+LL | |         },
+LL | |     }
+   | |_____^
+   |
+help: try
+   |
+LL ~     if let Some(v) = bar {
+LL +         println!("Some");
+LL +         println!("{v}");
+LL +     } else { unsafe {
+LL +         let v = 0;
+LL +         let r = &v as *const i32;
+LL +         println!("{}", *r);
+LL +     } }
+   |
+
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+  --> $DIR/single_match_else.rs:142:5
+   |
+LL | /     match bar {
+LL | |         Some(v) => unsafe {
+LL | |             let r = &v as *const i32;
+LL | |             println!("{}", *r);
+...  |
+LL | |         },
+LL | |     }
+   | |_____^
+   |
+help: try
+   |
+LL ~     if let Some(v) = bar { unsafe {
+LL +         let r = &v as *const i32;
+LL +         println!("{}", *r);
+LL +     } } else { unsafe {
+LL +         let v = 0;
+LL +         let r = &v as *const i32;
+LL +         println!("{}", *r);
+LL +     } }
+   |
+
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+  --> $DIR/single_match_else.rs:154:5
+   |
+LL | /     match bar {
+LL | |         #[rustfmt::skip]
+LL | |         Some(v) => {
+LL | |             unsafe {
+...  |
+LL | |         },
+LL | |     }
+   | |_____^
+   |
+help: try
+   |
+LL ~     if let Some(v) = bar {
+LL +         unsafe {
+LL +             let r = &v as *const i32;
+LL +             println!("{}", *r);
+LL +         }
+LL +     } else {
+LL +         println!("None");
+LL +         println!("None");
+LL +     }
+   |
+
+error: aborting due to 9 previous errors
 

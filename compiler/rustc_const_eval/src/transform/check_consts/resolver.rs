@@ -4,10 +4,12 @@
 
 use rustc_index::bit_set::BitSet;
 use rustc_middle::mir::visit::Visitor;
-use rustc_middle::mir::{self, BasicBlock, Local, Location, Statement, StatementKind};
+use rustc_middle::mir::{
+    self, BasicBlock, CallReturnPlaces, Local, Location, Statement, StatementKind, TerminatorEdges,
+};
 use rustc_mir_dataflow::fmt::DebugWithContext;
 use rustc_mir_dataflow::JoinSemiLattice;
-use rustc_mir_dataflow::{Analysis, AnalysisDomain, CallReturnPlaces};
+use rustc_mir_dataflow::{Analysis, AnalysisDomain};
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -103,7 +105,7 @@ where
     fn ref_allows_mutation(&self, kind: mir::BorrowKind, place: mir::Place<'tcx>) -> bool {
         match kind {
             mir::BorrowKind::Mut { .. } => true,
-            mir::BorrowKind::Shared | mir::BorrowKind::Shallow | mir::BorrowKind::Unique => {
+            mir::BorrowKind::Shared | mir::BorrowKind::Fake => {
                 self.shared_borrow_allows_mutation(place)
             }
         }
@@ -222,23 +224,8 @@ where
         // The effect of assignment to the return place in `TerminatorKind::Call` is not applied
         // here; that occurs in `apply_call_return_effect`.
 
-        if let mir::TerminatorKind::DropAndReplace { value, place, .. } = &terminator.kind {
-            let qualif = qualifs::in_operand::<Q, _>(
-                self.ccx,
-                &mut |l| self.state.qualif.contains(l),
-                value,
-            );
-
-            if !place.is_indirect() {
-                self.assign_qualif_direct(place, qualif);
-            }
-        }
-
         // We ignore borrow on drop because custom drop impls are not allowed in consts.
         // FIXME: Reconsider if accounting for borrows in drops is necessary for const drop.
-
-        // We need to assign qualifs to the dropped location before visiting the operand that
-        // replaces it since qualifs can be cleared on move.
         self.super_terminator(terminator, location);
     }
 }
@@ -352,7 +339,7 @@ where
     Q: Qualif,
 {
     fn apply_statement_effect(
-        &self,
+        &mut self,
         state: &mut Self::Domain,
         statement: &mir::Statement<'tcx>,
         location: Location,
@@ -360,17 +347,18 @@ where
         self.transfer_function(state).visit_statement(statement, location);
     }
 
-    fn apply_terminator_effect(
-        &self,
+    fn apply_terminator_effect<'mir>(
+        &mut self,
         state: &mut Self::Domain,
-        terminator: &mir::Terminator<'tcx>,
+        terminator: &'mir mir::Terminator<'tcx>,
         location: Location,
-    ) {
+    ) -> TerminatorEdges<'mir, 'tcx> {
         self.transfer_function(state).visit_terminator(terminator, location);
+        terminator.edges()
     }
 
     fn apply_call_return_effect(
-        &self,
+        &mut self,
         state: &mut Self::Domain,
         block: BasicBlock,
         return_places: CallReturnPlaces<'_, 'tcx>,

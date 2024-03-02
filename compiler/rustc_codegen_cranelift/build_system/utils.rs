@@ -1,42 +1,31 @@
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, Stdio};
+use std::process::{self, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::path::{Dirs, RelPath};
-use super::rustc_info::{get_cargo_path, get_rustc_path, get_rustdoc_path};
+use crate::path::{Dirs, RelPath};
+use crate::shared_utils::rustflags_to_cmd_env;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Compiler {
     pub(crate) cargo: PathBuf,
     pub(crate) rustc: PathBuf,
     pub(crate) rustdoc: PathBuf,
-    pub(crate) rustflags: String,
-    pub(crate) rustdocflags: String,
+    pub(crate) rustflags: Vec<String>,
+    pub(crate) rustdocflags: Vec<String>,
     pub(crate) triple: String,
     pub(crate) runner: Vec<String>,
 }
 
 impl Compiler {
-    pub(crate) fn bootstrap_with_triple(triple: String) -> Compiler {
-        Compiler {
-            cargo: get_cargo_path(),
-            rustc: get_rustc_path(),
-            rustdoc: get_rustdoc_path(),
-            rustflags: String::new(),
-            rustdocflags: String::new(),
-            triple,
-            runner: vec![],
-        }
-    }
-
     pub(crate) fn set_cross_linker_and_runner(&mut self) {
         match self.triple.as_str() {
             "aarch64-unknown-linux-gnu" => {
                 // We are cross-compiling for aarch64. Use the correct linker and run tests in qemu.
-                self.rustflags += " -Clinker=aarch64-linux-gnu-gcc";
-                self.rustdocflags += " -Clinker=aarch64-linux-gnu-gcc";
+                self.rustflags.push("-Clinker=aarch64-linux-gnu-gcc".to_owned());
+                self.rustdocflags.push("-Clinker=aarch64-linux-gnu-gcc".to_owned());
                 self.runner = vec![
                     "qemu-aarch64".to_owned(),
                     "-L".to_owned(),
@@ -45,12 +34,22 @@ impl Compiler {
             }
             "s390x-unknown-linux-gnu" => {
                 // We are cross-compiling for s390x. Use the correct linker and run tests in qemu.
-                self.rustflags += " -Clinker=s390x-linux-gnu-gcc";
-                self.rustdocflags += " -Clinker=s390x-linux-gnu-gcc";
+                self.rustflags.push("-Clinker=s390x-linux-gnu-gcc".to_owned());
+                self.rustdocflags.push("-Clinker=s390x-linux-gnu-gcc".to_owned());
                 self.runner = vec![
                     "qemu-s390x".to_owned(),
                     "-L".to_owned(),
                     "/usr/s390x-linux-gnu".to_owned(),
+                ];
+            }
+            "riscv64gc-unknown-linux-gnu" => {
+                // We are cross-compiling for riscv64. Use the correct linker and run tests in qemu.
+                self.rustflags.push("-Clinker=riscv64-linux-gnu-gcc".to_owned());
+                self.rustdocflags.push("-Clinker=riscv64-linux-gnu-gcc".to_owned());
+                self.runner = vec![
+                    "qemu-riscv64".to_owned(),
+                    "-L".to_owned(),
+                    "/usr/riscv64-linux-gnu".to_owned(),
                 ];
             }
             "x86_64-pc-windows-gnu" => {
@@ -58,7 +57,7 @@ impl Compiler {
                 self.runner = vec!["wine".to_owned()];
             }
             _ => {
-                println!("Unknown non-native platform");
+                eprintln!("Unknown non-native platform");
             }
         }
     }
@@ -95,7 +94,11 @@ impl CargoProject {
             .arg(self.manifest_path(dirs))
             .arg("--target-dir")
             .arg(self.target_dir(dirs))
-            .arg("--frozen");
+            .arg("--locked");
+
+        if dirs.frozen {
+            cmd.arg("--frozen");
+        }
 
         cmd
     }
@@ -108,31 +111,14 @@ impl CargoProject {
 
         cmd.env("RUSTC", &compiler.rustc);
         cmd.env("RUSTDOC", &compiler.rustdoc);
-        cmd.env("RUSTFLAGS", &compiler.rustflags);
-        cmd.env("RUSTDOCFLAGS", &compiler.rustdocflags);
+        rustflags_to_cmd_env(&mut cmd, "RUSTFLAGS", &compiler.rustflags);
+        rustflags_to_cmd_env(&mut cmd, "RUSTDOCFLAGS", &compiler.rustdocflags);
         if !compiler.runner.is_empty() {
             cmd.env(
                 format!("CARGO_TARGET_{}_RUNNER", compiler.triple.to_uppercase().replace('-', "_")),
                 compiler.runner.join(" "),
             );
         }
-
-        cmd
-    }
-
-    #[must_use]
-    pub(crate) fn fetch(
-        &self,
-        cargo: impl AsRef<Path>,
-        rustc: impl AsRef<Path>,
-        dirs: &Dirs,
-    ) -> Command {
-        let mut cmd = Command::new(cargo.as_ref());
-
-        cmd.env("RUSTC", rustc.as_ref())
-            .arg("fetch")
-            .arg("--manifest-path")
-            .arg(self.manifest_path(dirs));
 
         cmd
     }
@@ -162,10 +148,12 @@ pub(crate) fn hyperfine_command(
     warmup: u64,
     runs: u64,
     prepare: Option<&str>,
-    a: &str,
-    b: &str,
+    cmds: &[(&str, &str)],
+    markdown_export: &Path,
 ) -> Command {
     let mut bench = Command::new("hyperfine");
+
+    bench.arg("--export-markdown").arg(markdown_export);
 
     if warmup != 0 {
         bench.arg("--warmup").arg(warmup.to_string());
@@ -179,7 +167,12 @@ pub(crate) fn hyperfine_command(
         bench.arg("--prepare").arg(prepare);
     }
 
-    bench.arg(a).arg(b);
+    for &(name, cmd) in cmds {
+        if name != "" {
+            bench.arg("-n").arg(name);
+        }
+        bench.arg(cmd);
+    }
 
     bench
 }
@@ -194,6 +187,8 @@ pub(crate) fn git_command<'a>(repo_dir: impl Into<Option<&'a Path>>, cmd: &str) 
         .arg("user.email=dummy@example.com")
         .arg("-c")
         .arg("core.autocrlf=false")
+        .arg("-c")
+        .arg("commit.gpgSign=false")
         .arg(cmd);
     if let Some(repo_dir) = repo_dir.into() {
         git_cmd.current_dir(repo_dir);
@@ -212,7 +207,9 @@ pub(crate) fn try_hard_link(src: impl AsRef<Path>, dst: impl AsRef<Path>) {
 
 #[track_caller]
 pub(crate) fn spawn_and_wait(mut cmd: Command) {
-    if !cmd.spawn().unwrap().wait().unwrap().success() {
+    let status = cmd.spawn().unwrap().wait().unwrap();
+    if !status.success() {
+        eprintln!("{cmd:?} exited with status {:?}", status);
         process::exit(1);
     }
 }
@@ -222,36 +219,15 @@ pub(crate) fn spawn_and_wait(mut cmd: Command) {
 pub(crate) fn retry_spawn_and_wait(tries: u64, mut cmd: Command) {
     for i in 1..tries + 1 {
         if i != 1 {
-            println!("Command failed. Attempt {i}/{tries}:");
+            eprintln!("Command failed. Attempt {i}/{tries}:");
         }
         if cmd.spawn().unwrap().wait().unwrap().success() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_secs(i * 5));
     }
-    println!("The command has failed after {tries} attempts.");
+    eprintln!("The command has failed after {tries} attempts.");
     process::exit(1);
-}
-
-#[track_caller]
-pub(crate) fn spawn_and_wait_with_input(mut cmd: Command, input: String) -> String {
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn child process");
-
-    let mut stdin = child.stdin.take().expect("Failed to open stdin");
-    std::thread::spawn(move || {
-        stdin.write_all(input.as_bytes()).expect("Failed to write to stdin");
-    });
-
-    let output = child.wait_with_output().expect("Failed to read stdout");
-    if !output.status.success() {
-        process::exit(1);
-    }
-
-    String::from_utf8(output.stdout).unwrap()
 }
 
 pub(crate) fn remove_dir_if_exists(path: &Path) {
@@ -284,4 +260,41 @@ pub(crate) fn is_ci() -> bool {
 
 pub(crate) fn is_ci_opt() -> bool {
     env::var("CI_OPT").is_ok()
+}
+
+static IN_GROUP: AtomicBool = AtomicBool::new(false);
+pub(crate) struct LogGroup {
+    is_gha: bool,
+}
+
+impl LogGroup {
+    pub(crate) fn guard(name: &str) -> LogGroup {
+        let is_gha = env::var("GITHUB_ACTIONS").is_ok();
+
+        assert!(!IN_GROUP.swap(true, Ordering::SeqCst));
+        if is_gha {
+            eprintln!("::group::{name}");
+        }
+
+        LogGroup { is_gha }
+    }
+}
+
+impl Drop for LogGroup {
+    fn drop(&mut self) {
+        if self.is_gha {
+            eprintln!("::endgroup::");
+        }
+        IN_GROUP.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn maybe_incremental(cmd: &mut Command) {
+    if is_ci() || std::env::var("CARGO_BUILD_INCREMENTAL").map_or(false, |val| val == "false") {
+        // Disabling incr comp reduces cache size and incr comp doesn't save as much on CI anyway
+        cmd.env("CARGO_BUILD_INCREMENTAL", "false");
+    } else {
+        // Force incr comp even in release mode unless in CI or incremental builds are explicitly disabled
+        cmd.env("CARGO_BUILD_INCREMENTAL", "true");
+    }
 }

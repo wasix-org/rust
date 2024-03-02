@@ -1,12 +1,12 @@
-error: abnormal termination: Trace/breakpoint trap
+error: abnormal termination: trace/breakpoint trap
   --> $DIR/breakpoint.rs:LL:CC
    |
 LL |         core::intrinsics::breakpoint()
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Trace/breakpoint trap
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ trace/breakpoint trap
    |
    = note: inside `main` at $DIR/breakpoint.rs:LL:CC
 
 note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 

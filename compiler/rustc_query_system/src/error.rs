@@ -15,6 +15,7 @@ pub enum HandleCycleError {
     Error,
     Fatal,
     DelayBug,
+    Stash,
 }
 
 #[derive(Subdiagnostic)]
@@ -57,6 +58,8 @@ pub struct Cycle {
     pub alias: Option<Alias>,
     #[subdiagnostic]
     pub cycle_usage: Option<CycleUsage>,
+    #[note]
+    pub note_span: (),
 }
 
 #[derive(Diagnostic)]

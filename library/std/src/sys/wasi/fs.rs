@@ -106,7 +106,7 @@ impl FileAttr {
         Ok(SystemTime::from_wasi_timestamp(self.meta.ctim))
     }
 
-    pub fn as_wasi(&self) -> &wasi::Filestat {
+    pub(crate) fn as_wasi(&self) -> &wasi::Filestat {
         &self.meta
     }
 }
@@ -144,7 +144,7 @@ impl FileType {
         self.bits.raw() == wasi::FILETYPE_SYMBOLIC_LINK.raw()
     }
 
-    pub fn bits(&self) -> wasi::Filetype {
+    pub(crate) fn bits(&self) -> wasi::Filetype {
         self.bits
     }
 }
@@ -447,7 +447,7 @@ impl File {
     }
 
     pub fn read_buf(&self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
-        crate::io::default_read_buf(|buf| self.read(buf), cursor)
+        self.fd.read_buf(cursor)
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
@@ -483,12 +483,13 @@ impl File {
     }
 
     pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
-        let to_timestamp = |time: Option<SystemTime>| {
-            match time {
-                Some(time) if let Some(ts) = time.to_wasi_timestamp() => Ok(ts),
-                Some(_) => Err(io::const_io_error!(io::ErrorKind::InvalidInput, "timestamp is too large to set as a file time")),
-                None => Ok(0),
-            }
+        let to_timestamp = |time: Option<SystemTime>| match time {
+            Some(time) if let Some(ts) = time.to_wasi_timestamp() => Ok(ts),
+            Some(_) => Err(io::const_io_error!(
+                io::ErrorKind::InvalidInput,
+                "timestamp is too large to set as a file time"
+            )),
+            None => Ok(0),
         };
         self.fd.filestat_set_times(
             to_timestamp(times.accessed)?,
@@ -504,6 +505,7 @@ impl File {
 }
 
 impl AsInner<WasiFd> for File {
+    #[inline]
     fn as_inner(&self) -> &WasiFd {
         &self.fd
     }
@@ -528,6 +530,7 @@ impl AsFd for File {
 }
 
 impl AsRawFd for File {
+    #[inline]
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }

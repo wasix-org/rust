@@ -1,7 +1,5 @@
 use crate::fluent_generated as fluent;
-use rustc_errors::{
-    AddToDiagnostic, Diagnostic, ErrorGuaranteed, Handler, IntoDiagnostic, SubdiagnosticMessage,
-};
+use rustc_errors::{AddToDiagnostic, Diagnostic, SubdiagnosticMessage};
 use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_session::lint::Level;
 use rustc_span::{Span, Symbol};
@@ -39,7 +37,7 @@ impl AddToDiagnostic for OverruledAttributeSub {
                 diag.span_label(span, fluent::lint_node_source);
                 if let Some(rationale) = reason {
                     #[allow(rustc::untranslatable_diagnostic)]
-                    diag.note(rationale.as_str());
+                    diag.note(rationale.to_string());
                 }
             }
             OverruledAttributeSub::CommandLineSource => {
@@ -81,7 +79,7 @@ pub struct UnknownToolInScopedLint {
 
 #[derive(Diagnostic)]
 #[diag(lint_builtin_ellipsis_inclusive_range_patterns, code = "E0783")]
-pub struct BuiltinEllpisisInclusiveRangePatterns {
+pub struct BuiltinEllipsisInclusiveRangePatterns {
     #[primary_span]
     pub span: Span,
     #[suggestion(style = "short", code = "{replace}", applicability = "machine-applicable")]
@@ -91,9 +89,9 @@ pub struct BuiltinEllpisisInclusiveRangePatterns {
 
 #[derive(Subdiagnostic)]
 #[note(lint_requested_level)]
-pub struct RequestedLevel {
+pub struct RequestedLevel<'a> {
     pub level: Level,
-    pub lint_name: String,
+    pub lint_name: &'a str,
 }
 
 #[derive(Diagnostic)]
@@ -102,50 +100,10 @@ pub struct UnsupportedGroup {
     pub lint_group: String,
 }
 
-pub struct CheckNameUnknown {
-    pub lint_name: String,
-    pub suggestion: Option<Symbol>,
-    pub sub: RequestedLevel,
-}
-
-impl IntoDiagnostic<'_> for CheckNameUnknown {
-    fn into_diagnostic(
-        self,
-        handler: &Handler,
-    ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = handler.struct_err(fluent::lint_check_name_unknown);
-        diag.code(rustc_errors::error_code!(E0602));
-        if let Some(suggestion) = self.suggestion {
-            diag.help(fluent::lint_help);
-            diag.set_arg("suggestion", suggestion);
-        }
-        diag.set_arg("lint_name", self.lint_name);
-        diag.subdiagnostic(self.sub);
-        diag
-    }
-}
-
 #[derive(Diagnostic)]
 #[diag(lint_check_name_unknown_tool, code = "E0602")]
-pub struct CheckNameUnknownTool {
+pub struct CheckNameUnknownTool<'a> {
     pub tool_name: Symbol,
     #[subdiagnostic]
-    pub sub: RequestedLevel,
-}
-
-#[derive(Diagnostic)]
-#[diag(lint_check_name_warning)]
-pub struct CheckNameWarning {
-    pub msg: String,
-    #[subdiagnostic]
-    pub sub: RequestedLevel,
-}
-
-#[derive(Diagnostic)]
-#[diag(lint_check_name_deprecated)]
-pub struct CheckNameDeprecated {
-    pub lint_name: String,
-    pub new_name: String,
-    #[subdiagnostic]
-    pub sub: RequestedLevel,
+    pub sub: RequestedLevel<'a>,
 }

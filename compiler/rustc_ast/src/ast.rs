@@ -14,7 +14,7 @@
 //! - [`Generics`], [`GenericParam`], [`WhereClause`]: Metadata associated with generic parameters.
 //! - [`EnumDef`] and [`Variant`]: Enum declaration.
 //! - [`MetaItemLit`] and [`LitKind`]: Literal expressions.
-//! - [`MacroDef`], [`MacStmtStyle`], [`MacCall`], [`MacDelimiter`]: Macro definition and invocation.
+//! - [`MacroDef`], [`MacStmtStyle`], [`MacCall`]: Macro definition and invocation.
 //! - [`Attribute`]: Metadata associated with item.
 //! - [`UnOp`], [`BinOp`], and [`BinOpKind`]: Unary and binary operators.
 
@@ -33,7 +33,8 @@ use rustc_macros::HashStable_Generic;
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_span::source_map::{respan, Spanned};
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
+pub use rustc_type_ir::{Movability, Mutability};
 use std::fmt;
 use std::mem;
 use thin_vec::{thin_vec, ThinVec};
@@ -119,6 +120,12 @@ impl Path {
 
     pub fn is_global(&self) -> bool {
         !self.segments.is_empty() && self.segments[0].ident.name == kw::PathRoot
+    }
+
+    /// If this path is a single identifier with no arguments, does not ensure
+    /// that the path resolves to a const param, the caller should check this.
+    pub fn is_potential_trivial_const_arg(&self) -> bool {
+        self.segments.len() == 1 && self.segments[0].args.is_none()
     }
 }
 
@@ -231,15 +238,15 @@ impl AngleBracketedArg {
     }
 }
 
-impl Into<Option<P<GenericArgs>>> for AngleBracketedArgs {
-    fn into(self) -> Option<P<GenericArgs>> {
-        Some(P(GenericArgs::AngleBracketed(self)))
+impl Into<P<GenericArgs>> for AngleBracketedArgs {
+    fn into(self) -> P<GenericArgs> {
+        P(GenericArgs::AngleBracketed(self))
     }
 }
 
-impl Into<Option<P<GenericArgs>>> for ParenthesizedArgs {
-    fn into(self) -> Option<P<GenericArgs>> {
-        Some(P(GenericArgs::Parenthesized(self)))
+impl Into<P<GenericArgs>> for ParenthesizedArgs {
+    fn into(self) -> P<GenericArgs> {
+        P(GenericArgs::Parenthesized(self))
     }
 }
 
@@ -287,16 +294,33 @@ pub enum TraitBoundModifier {
     /// No modifiers
     None,
 
+    /// `!Trait`
+    Negative,
+
     /// `?Trait`
     Maybe,
 
     /// `~const Trait`
-    MaybeConst,
+    MaybeConst(Span),
+
+    /// `~const !Trait`
+    //
+    // This parses but will be rejected during AST validation.
+    MaybeConstNegative,
 
     /// `~const ?Trait`
     //
     // This parses but will be rejected during AST validation.
     MaybeConstMaybe,
+}
+
+impl TraitBoundModifier {
+    pub fn to_constness(self) -> Const {
+        match self {
+            Self::MaybeConst(span) => Const::Yes(span),
+            _ => Const::No,
+        }
+    }
 }
 
 /// The AST represents all type param bounds as types.
@@ -621,6 +645,7 @@ impl Pat {
             // These patterns do not contain subpatterns, skip.
             PatKind::Wild
             | PatKind::Rest
+            | PatKind::Never
             | PatKind::Lit(_)
             | PatKind::Range(..)
             | PatKind::Ident(..)
@@ -632,6 +657,37 @@ impl Pat {
     /// Is this a `..` pattern?
     pub fn is_rest(&self) -> bool {
         matches!(self.kind, PatKind::Rest)
+    }
+
+    /// Whether this could be a never pattern, taking into account that a macro invocation can
+    /// return a never pattern. Used to inform errors during parsing.
+    pub fn could_be_never_pattern(&self) -> bool {
+        let mut could_be_never_pattern = false;
+        self.walk(&mut |pat| match &pat.kind {
+            PatKind::Never | PatKind::MacCall(_) => {
+                could_be_never_pattern = true;
+                false
+            }
+            PatKind::Or(s) => {
+                could_be_never_pattern = s.iter().all(|p| p.could_be_never_pattern());
+                false
+            }
+            _ => true,
+        });
+        could_be_never_pattern
+    }
+
+    /// Whether this contains a `!` pattern. This in particular means that a feature gate error will
+    /// be raised if the feature is off. Used to avoid gating the feature twice.
+    pub fn contains_never_pattern(&self) -> bool {
+        let mut contains_never_pattern = false;
+        self.walk(&mut |pat| {
+            if matches!(pat.kind, PatKind::Never) {
+                contains_never_pattern = true;
+            }
+            true
+        });
+        contains_never_pattern
     }
 }
 
@@ -709,6 +765,8 @@ pub enum RangeSyntax {
 }
 
 /// All the different flavors of pattern that Rust recognizes.
+//
+// Adding a new variant? Please update `test_pat` in `tests/ui/macros/stringify.rs`.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub enum PatKind {
     /// Represents a wildcard pattern (`_`).
@@ -769,62 +827,14 @@ pub enum PatKind {
     /// only one rest pattern may occur in the pattern sequences.
     Rest,
 
+    // A never pattern `!`
+    Never,
+
     /// Parentheses in patterns used for grouping (i.e., `(PAT)`).
     Paren(P<Pat>),
 
     /// A macro pattern; pre-expansion.
     MacCall(P<MacCall>),
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Copy)]
-#[derive(HashStable_Generic, Encodable, Decodable)]
-pub enum Mutability {
-    // N.B. Order is deliberate, so that Not < Mut
-    Not,
-    Mut,
-}
-
-impl Mutability {
-    pub fn invert(self) -> Self {
-        match self {
-            Mutability::Mut => Mutability::Not,
-            Mutability::Not => Mutability::Mut,
-        }
-    }
-
-    /// Returns `""` (empty string) or `"mut "` depending on the mutability.
-    pub fn prefix_str(self) -> &'static str {
-        match self {
-            Mutability::Mut => "mut ",
-            Mutability::Not => "",
-        }
-    }
-
-    /// Returns `"&"` or `"&mut "` depending on the mutability.
-    pub fn ref_prefix_str(self) -> &'static str {
-        match self {
-            Mutability::Not => "&",
-            Mutability::Mut => "&mut ",
-        }
-    }
-
-    /// Returns `""` (empty string) or `"mutably "` depending on the mutability.
-    pub fn mutably_str(self) -> &'static str {
-        match self {
-            Mutability::Not => "",
-            Mutability::Mut => "mutably ",
-        }
-    }
-
-    /// Return `true` if self is mutable
-    pub fn is_mut(self) -> bool {
-        matches!(self, Self::Mut)
-    }
-
-    /// Return `true` if self is **not** mutable
-    pub fn is_not(self) -> bool {
-        matches!(self, Self::Not)
-    }
 }
 
 /// The kind of borrow in an `AddrOf` expression,
@@ -842,7 +852,7 @@ pub enum BorrowKind {
     Raw,
 }
 
-#[derive(Clone, PartialEq, Encodable, Decodable, Debug, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Encodable, Decodable, HashStable_Generic)]
 pub enum BinOpKind {
     /// The `+` operator (addition)
     Add,
@@ -883,9 +893,9 @@ pub enum BinOpKind {
 }
 
 impl BinOpKind {
-    pub fn to_string(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         use BinOpKind::*;
-        match *self {
+        match self {
             Add => "+",
             Sub => "-",
             Mul => "*",
@@ -906,18 +916,24 @@ impl BinOpKind {
             Gt => ">",
         }
     }
-    pub fn lazy(&self) -> bool {
+
+    pub fn is_lazy(&self) -> bool {
         matches!(self, BinOpKind::And | BinOpKind::Or)
     }
 
     pub fn is_comparison(&self) -> bool {
         use BinOpKind::*;
-        // Note for developers: please keep this as is;
+        // Note for developers: please keep this match exhaustive;
         // we want compilation to fail if another variant is added.
         match *self {
             Eq | Lt | Le | Ne | Gt | Ge => true,
             And | Or | Add | Sub | Mul | Div | Rem | BitXor | BitAnd | BitOr | Shl | Shr => false,
         }
+    }
+
+    /// Returns `true` if the binary operator takes its arguments by value.
+    pub fn is_by_value(self) -> bool {
+        !self.is_comparison()
     }
 }
 
@@ -926,7 +942,7 @@ pub type BinOp = Spanned<BinOpKind>;
 /// Unary operator.
 ///
 /// Note that `&data` is not an operator, it's an `AddrOf` expression.
-#[derive(Clone, Encodable, Decodable, Debug, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Encodable, Decodable, HashStable_Generic)]
 pub enum UnOp {
     /// The `*` operator for dereferencing
     Deref,
@@ -937,12 +953,17 @@ pub enum UnOp {
 }
 
 impl UnOp {
-    pub fn to_string(op: UnOp) -> &'static str {
-        match op {
+    pub fn as_str(&self) -> &'static str {
+        match self {
             UnOp::Deref => "*",
             UnOp::Not => "!",
             UnOp::Neg => "-",
         }
+    }
+
+    /// Returns `true` if the unary operator takes its argument by value.
+    pub fn is_by_value(self) -> bool {
+        matches!(self, Self::Neg | Self::Not)
     }
 }
 
@@ -993,6 +1014,7 @@ impl Stmt {
     }
 }
 
+// Adding a new variant? Please update `test_stmt` in `tests/ui/macros/stringify.rs`.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub enum StmtKind {
     /// A local (let) binding.
@@ -1089,8 +1111,8 @@ pub struct Arm {
     pub pat: P<Pat>,
     /// Match arm guard, e.g. `n > 10` in `match foo { n if n > 10 => {}, _ => {} }`
     pub guard: Option<P<Expr>>,
-    /// Match arm body.
-    pub body: P<Expr>,
+    /// Match arm body. Omitted if the pattern is a never pattern.
+    pub body: Option<P<Expr>>,
     pub span: Span,
     pub id: NodeId,
     pub is_placeholder: bool,
@@ -1146,7 +1168,9 @@ impl Expr {
     ///
     /// If this is not the case, name resolution does not resolve `N` when using
     /// `min_const_generics` as more complex expressions are not supported.
-    pub fn is_potential_trivial_const_param(&self) -> bool {
+    ///
+    /// Does not ensure that the path resolves to a const param, the caller should check this.
+    pub fn is_potential_trivial_const_arg(&self) -> bool {
         let this = if let ExprKind::Block(block, None) = &self.kind
             && block.stmts.len() == 1
             && let StmtKind::Expr(expr) = &block.stmts[0].kind
@@ -1157,8 +1181,7 @@ impl Expr {
         };
 
         if let ExprKind::Path(None, path) = &this.kind
-            && path.segments.len() == 1
-            && path.segments[0].args.is_none()
+            && path.is_potential_trivial_const_arg()
         {
             true
         } else {
@@ -1179,6 +1202,15 @@ impl Expr {
     pub fn peel_parens(&self) -> &Expr {
         let mut expr = self;
         while let ExprKind::Paren(inner) = &expr.kind {
+            expr = inner;
+        }
+        expr
+    }
+
+    pub fn peel_parens_and_refs(&self) -> &Expr {
+        let mut expr = self;
+        while let ExprKind::Paren(inner) | ExprKind::AddrOf(BorrowKind::Ref, _, inner) = &expr.kind
+        {
             expr = inner;
         }
         expr
@@ -1230,7 +1262,6 @@ impl Expr {
 
     pub fn precedence(&self) -> ExprPrecedence {
         match self.kind {
-            ExprKind::Box(_) => ExprPrecedence::Box,
             ExprKind::Array(_) => ExprPrecedence::Array,
             ExprKind::ConstBlock(_) => ExprPrecedence::ConstBlock,
             ExprKind::Call(..) => ExprPrecedence::Call,
@@ -1249,7 +1280,7 @@ impl Expr {
             ExprKind::Closure(..) => ExprPrecedence::Closure,
             ExprKind::Block(..) => ExprPrecedence::Block,
             ExprKind::TryBlock(..) => ExprPrecedence::TryBlock,
-            ExprKind::Async(..) => ExprPrecedence::Async,
+            ExprKind::Gen(..) => ExprPrecedence::Gen,
             ExprKind::Await(..) => ExprPrecedence::Await,
             ExprKind::Assign(..) => ExprPrecedence::Assign,
             ExprKind::AssignOp(..) => ExprPrecedence::AssignOp,
@@ -1263,6 +1294,7 @@ impl Expr {
             ExprKind::Continue(..) => ExprPrecedence::Continue,
             ExprKind::Ret(..) => ExprPrecedence::Ret,
             ExprKind::InlineAsm(..) => ExprPrecedence::InlineAsm,
+            ExprKind::OffsetOf(..) => ExprPrecedence::OffsetOf,
             ExprKind::MacCall(..) => ExprPrecedence::Mac,
             ExprKind::Struct(..) => ExprPrecedence::Struct,
             ExprKind::Repeat(..) => ExprPrecedence::Repeat,
@@ -1271,6 +1303,7 @@ impl Expr {
             ExprKind::Yield(..) => ExprPrecedence::Yield,
             ExprKind::Yeet(..) => ExprPrecedence::Yeet,
             ExprKind::FormatArgs(..) => ExprPrecedence::FormatArgs,
+            ExprKind::Become(..) => ExprPrecedence::Become,
             ExprKind::Err => ExprPrecedence::Err,
         }
     }
@@ -1290,18 +1323,17 @@ impl Expr {
 
     /// To a first-order approximation, is this a pattern?
     pub fn is_approximately_pattern(&self) -> bool {
-        match &self.peel_parens().kind {
-            ExprKind::Box(_)
-            | ExprKind::Array(_)
-            | ExprKind::Call(_, _)
-            | ExprKind::Tup(_)
-            | ExprKind::Lit(_)
-            | ExprKind::Range(_, _, _)
-            | ExprKind::Underscore
-            | ExprKind::Path(_, _)
-            | ExprKind::Struct(_) => true,
-            _ => false,
-        }
+        matches!(
+            &self.peel_parens().kind,
+            ExprKind::Array(_)
+                | ExprKind::Call(_, _)
+                | ExprKind::Tup(_)
+                | ExprKind::Lit(_)
+                | ExprKind::Range(_, _, _)
+                | ExprKind::Underscore
+                | ExprKind::Path(_, _)
+                | ExprKind::Struct(_)
+        )
     }
 }
 
@@ -1310,7 +1342,7 @@ pub struct Closure {
     pub binder: ClosureBinder,
     pub capture_clause: CaptureBy,
     pub constness: Const,
-    pub asyncness: Async,
+    pub coroutine_kind: Option<CoroutineKind>,
     pub movability: Movability,
     pub fn_decl: P<FnDecl>,
     pub body: P<Expr>,
@@ -1361,10 +1393,9 @@ pub struct StructExpr {
     pub rest: StructRest,
 }
 
+// Adding a new variant? Please update `test_expr` in `tests/ui/macros/stringify.rs`.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub enum ExprKind {
-    /// A `box x` expression.
-    Box(P<Expr>),
     /// An array (`[a, b, c, d]`)
     Array(ThinVec<P<Expr>>),
     /// Allow anonymous constants from an inline `const` block
@@ -1394,7 +1425,7 @@ pub enum ExprKind {
     /// of `if` / `while` expressions. (e.g., `if let 0 = x { .. }`).
     ///
     /// `Span` represents the whole `let pat = expr` statement.
-    Let(P<Pat>, P<Expr>, Span),
+    Let(P<Pat>, P<Expr>, Span, Option<ErrorGuaranteed>),
     /// An `if` block, with an optional `else` block.
     ///
     /// `if expr { block } else { expr }`
@@ -1419,17 +1450,11 @@ pub enum ExprKind {
     Closure(Box<Closure>),
     /// A block (`'label: { ... }`).
     Block(P<Block>, Option<Label>),
-    /// An async block (`async move { ... }`).
-    ///
-    /// The `NodeId` is the `NodeId` for the closure that results from
-    /// desugaring an async block, just like the NodeId field in the
-    /// `Async::Yes` variant. This is necessary in order to create a def for the
-    /// closure which can be used as a parent of any child defs. Defs
-    /// created during lowering cannot be made the parent of any other
-    /// preexisting defs.
-    Async(CaptureBy, NodeId, P<Block>),
-    /// An await expression (`my_future.await`).
-    Await(P<Expr>),
+    /// An `async` block (`async move { ... }`),
+    /// or a `gen` block (`gen move { ... }`)
+    Gen(CaptureBy, P<Block>, GenBlockKind),
+    /// An await expression (`my_future.await`). Span is of await keyword.
+    Await(P<Expr>, Span),
 
     /// A try block (`try { ... }`).
     TryBlock(P<Block>),
@@ -1444,7 +1469,8 @@ pub enum ExprKind {
     /// Access of a named (e.g., `obj.foo`) or unnamed (e.g., `obj.0`) struct field.
     Field(P<Expr>, Ident),
     /// An indexing operation (e.g., `foo[2]`).
-    Index(P<Expr>, P<Expr>),
+    /// The span represents the span of the `[2]`, including brackets.
+    Index(P<Expr>, P<Expr>, Span),
     /// A range (e.g., `1..2`, `1..`, `..2`, `1..=2`, `..=2`; and `..` in destructuring assignment).
     Range(Option<P<Expr>>, Option<P<Expr>>, RangeLimits),
     /// An underscore, used in destructuring assignment to ignore a value.
@@ -1467,6 +1493,9 @@ pub enum ExprKind {
 
     /// Output of the `asm!()` macro.
     InlineAsm(P<InlineAsm>),
+
+    /// Output of the `offset_of!()` macro.
+    OffsetOf(P<Ty>, P<[Ident]>),
 
     /// A macro invocation; pre-expansion.
     MacCall(P<MacCall>),
@@ -1495,6 +1524,11 @@ pub enum ExprKind {
     /// with an optional value to be returned.
     Yeet(Option<P<Expr>>),
 
+    /// A tail call return, with the value to be returned.
+    ///
+    /// While `.0` must be a function call, we check this later, after parsing.
+    Become(P<Expr>),
+
     /// Bytes included via `include_bytes!`
     /// Added for optimization purposes to avoid the need to escape
     /// large binary blobs - should always behave like [`ExprKind::Lit`]
@@ -1506,6 +1540,30 @@ pub enum ExprKind {
 
     /// Placeholder for an expression that wasn't syntactically well formed in some way.
     Err,
+}
+
+/// Used to differentiate between `async {}` blocks and `gen {}` blocks.
+#[derive(Clone, Encodable, Decodable, Debug, PartialEq, Eq)]
+pub enum GenBlockKind {
+    Async,
+    Gen,
+    AsyncGen,
+}
+
+impl fmt::Display for GenBlockKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.modifier().fmt(f)
+    }
+}
+
+impl GenBlockKind {
+    pub fn modifier(&self) -> &'static str {
+        match self {
+            GenBlockKind::Async => "async",
+            GenBlockKind::Gen => "gen",
+            GenBlockKind::AsyncGen => "async gen",
+        }
+    }
 }
 
 /// The explicit `Self` type in a "qualified path". The actual
@@ -1537,20 +1595,12 @@ pub struct QSelf {
 #[derive(Clone, Copy, PartialEq, Encodable, Decodable, Debug, HashStable_Generic)]
 pub enum CaptureBy {
     /// `move |x| y + x`.
-    Value,
+    Value {
+        /// The span of the `move` keyword.
+        move_kw: Span,
+    },
     /// `move` keyword was not specified.
     Ref,
-}
-
-/// The movability of a generator / closure literal:
-/// whether a generator contains self-references, causing it to be `!Unpin`.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable, Debug, Copy)]
-#[derive(HashStable_Generic)]
-pub enum Movability {
-    /// May contain self-references, `!Unpin`.
-    Static,
-    /// Must not contain self-references, `Unpin`.
-    Movable,
 }
 
 /// Closure lifetime binder, `for<'a, 'b>` in `for<'a, 'b> |_: &'a (), _: &'b ()|`.
@@ -1584,7 +1634,6 @@ pub enum ClosureBinder {
 pub struct MacCall {
     pub path: Path,
     pub args: P<DelimArgs>,
-    pub prior_type_ascription: Option<(Span, bool)>,
 }
 
 impl MacCall {
@@ -1668,7 +1717,7 @@ where
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct DelimArgs {
     pub dspan: DelimSpan,
-    pub delim: MacDelimiter,
+    pub delim: Delimiter, // Note: `Delimiter::Invisible` never occurs
     pub tokens: TokenStream,
 }
 
@@ -1676,7 +1725,7 @@ impl DelimArgs {
     /// Whether a macro with these arguments needs a semicolon
     /// when used as a standalone item or statement.
     pub fn need_semicolon(&self) -> bool {
-        !matches!(self, DelimArgs { delim: MacDelimiter::Brace, .. })
+        !matches!(self, DelimArgs { delim: Delimiter::Brace, .. })
     }
 }
 
@@ -1689,32 +1738,6 @@ where
         dspan.hash_stable(ctx, hasher);
         delim.hash_stable(ctx, hasher);
         tokens.hash_stable(ctx, hasher);
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Encodable, Decodable, Debug, HashStable_Generic)]
-pub enum MacDelimiter {
-    Parenthesis,
-    Bracket,
-    Brace,
-}
-
-impl MacDelimiter {
-    pub fn to_token(self) -> Delimiter {
-        match self {
-            MacDelimiter::Parenthesis => Delimiter::Parenthesis,
-            MacDelimiter::Bracket => Delimiter::Bracket,
-            MacDelimiter::Brace => Delimiter::Brace,
-        }
-    }
-
-    pub fn from_token(delim: Delimiter) -> Option<MacDelimiter> {
-        match delim {
-            Delimiter::Parenthesis => Some(MacDelimiter::Parenthesis),
-            Delimiter::Bracket => Some(MacDelimiter::Bracket),
-            Delimiter::Brace => Some(MacDelimiter::Brace),
-            Delimiter::Invisible => None,
-        }
     }
 }
 
@@ -1809,6 +1832,8 @@ pub enum LitKind {
     /// A byte string (`b"foo"`). Not stored as a symbol because it might be
     /// non-utf8, and symbols only allow utf8 strings.
     ByteStr(Lrc<[u8]>, StrStyle),
+    /// A C String (`c"foo"`). Guaranteed to only have `\0` at the end.
+    CStr(Lrc<[u8]>, StrStyle),
     /// A byte char (`b'f'`).
     Byte(u8),
     /// A character literal (`'a'`).
@@ -1863,6 +1888,7 @@ impl LitKind {
             // unsuffixed variants
             LitKind::Str(..)
             | LitKind::ByteStr(..)
+            | LitKind::CStr(..)
             | LitKind::Byte(..)
             | LitKind::Char(..)
             | LitKind::Int(_, LitIntType::Unsuffixed)
@@ -2063,6 +2089,8 @@ pub struct BareFnTy {
 }
 
 /// The various kinds of type recognized by the compiler.
+//
+// Adding a new variant? Please update `test_ty` in `tests/ui/macros/stringify.rs`.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub enum TyKind {
     /// A variable-length slice (`[T]`).
@@ -2079,6 +2107,10 @@ pub enum TyKind {
     Never,
     /// A tuple (`(A, B, C, D,...)`).
     Tup(ThinVec<P<Ty>>),
+    /// An anonymous struct type i.e. `struct { foo: Type }`
+    AnonStruct(ThinVec<FieldDef>),
+    /// An anonymous union type i.e. `union { bar: Type }`
+    AnonUnion(ThinVec<FieldDef>),
     /// A path (`module::module::...::Type`), optionally
     /// "qualified", e.g., `<Vec<T> as SomeTrait>::SomeType`.
     ///
@@ -2252,6 +2284,18 @@ pub enum InlineAsmOperand {
     },
 }
 
+impl InlineAsmOperand {
+    pub fn reg(&self) -> Option<&InlineAsmRegOrRegClass> {
+        match self {
+            Self::In { reg, .. }
+            | Self::Out { reg, .. }
+            | Self::InOut { reg, .. }
+            | Self::SplitInOut { reg, .. } => Some(reg),
+            Self::Const { .. } | Self::Sym { .. } => None,
+        }
+    }
+}
+
 /// Inline assembly.
 ///
 /// E.g., `asm!("NOP");`.
@@ -2325,7 +2369,12 @@ impl Param {
     /// Builds a `Param` object from `ExplicitSelf`.
     pub fn from_self(attrs: AttrVec, eself: ExplicitSelf, eself_ident: Ident) -> Param {
         let span = eself.span.to(eself_ident.span);
-        let infer_ty = P(Ty { id: DUMMY_NODE_ID, kind: TyKind::ImplicitSelf, span, tokens: None });
+        let infer_ty = P(Ty {
+            id: DUMMY_NODE_ID,
+            kind: TyKind::ImplicitSelf,
+            span: eself_ident.span,
+            tokens: None,
+        });
         let (mutbl, ty) = match eself.node {
             SelfKind::Explicit(ty, mutbl) => (mutbl, ty),
             SelfKind::Value(mutbl) => (mutbl, infer_ty),
@@ -2369,10 +2418,10 @@ pub struct FnDecl {
 
 impl FnDecl {
     pub fn has_self(&self) -> bool {
-        self.inputs.get(0).map_or(false, Param::is_self)
+        self.inputs.get(0).is_some_and(Param::is_self)
     }
     pub fn c_variadic(&self) -> bool {
-        self.inputs.last().map_or(false, |arg| matches!(arg.ty.kind, TyKind::CVarArgs))
+        self.inputs.last().is_some_and(|arg| matches!(arg.ty.kind, TyKind::CVarArgs))
     }
 }
 
@@ -2390,22 +2439,47 @@ pub enum Unsafe {
     No,
 }
 
+/// Describes what kind of coroutine markers, if any, a function has.
+///
+/// Coroutine markers are things that cause the function to generate a coroutine, such as `async`,
+/// which makes the function return `impl Future`, or `gen`, which makes the function return `impl
+/// Iterator`.
 #[derive(Copy, Clone, Encodable, Decodable, Debug)]
-pub enum Async {
-    Yes { span: Span, closure_id: NodeId, return_impl_trait_id: NodeId },
-    No,
+pub enum CoroutineKind {
+    /// `async`, which returns an `impl Future`
+    Async { span: Span, closure_id: NodeId, return_impl_trait_id: NodeId },
+    /// `gen`, which returns an `impl Iterator`
+    Gen { span: Span, closure_id: NodeId, return_impl_trait_id: NodeId },
+    /// `async gen`, which returns an `impl AsyncIterator`
+    AsyncGen { span: Span, closure_id: NodeId, return_impl_trait_id: NodeId },
 }
 
-impl Async {
+impl CoroutineKind {
     pub fn is_async(self) -> bool {
-        matches!(self, Async::Yes { .. })
+        matches!(self, CoroutineKind::Async { .. })
     }
 
-    /// In this case this is an `async` return, the `NodeId` for the generated `impl Trait` item.
-    pub fn opt_return_id(self) -> Option<(NodeId, Span)> {
+    pub fn is_gen(self) -> bool {
+        matches!(self, CoroutineKind::Gen { .. })
+    }
+
+    pub fn closure_id(self) -> NodeId {
         match self {
-            Async::Yes { return_impl_trait_id, span, .. } => Some((return_impl_trait_id, span)),
-            Async::No => None,
+            CoroutineKind::Async { closure_id, .. }
+            | CoroutineKind::Gen { closure_id, .. }
+            | CoroutineKind::AsyncGen { closure_id, .. } => closure_id,
+        }
+    }
+
+    /// In this case this is an `async` or `gen` return, the `NodeId` for the generated `impl Trait`
+    /// item.
+    pub fn return_id(self) -> (NodeId, Span) {
+        match self {
+            CoroutineKind::Async { return_impl_trait_id, span, .. }
+            | CoroutineKind::Gen { return_impl_trait_id, span, .. }
+            | CoroutineKind::AsyncGen { return_impl_trait_id, span, .. } => {
+                (return_impl_trait_id, span)
+            }
         }
     }
 }
@@ -2440,6 +2514,16 @@ impl fmt::Debug for ImplPolarity {
             ImplPolarity::Negative(_) => "negative".fmt(f),
         }
     }
+}
+
+#[derive(Copy, Clone, PartialEq, Encodable, Decodable, HashStable_Generic)]
+pub enum BoundPolarity {
+    /// `Type: Trait`
+    Positive,
+    /// `Type: !Trait`
+    Negative(Span),
+    /// `Type: ?Trait`
+    Maybe(Span),
 }
 
 #[derive(Clone, Encodable, Decodable, Debug)]
@@ -2568,8 +2652,8 @@ pub enum AttrStyle {
 }
 
 rustc_index::newtype_index! {
-    #[custom_encodable]
-    #[debug_format = "AttrId({})]"]
+    #[orderable]
+    #[debug_format = "AttrId({})"]
     pub struct AttrId {}
 }
 
@@ -2612,6 +2696,15 @@ pub enum AttrKind {
 pub struct NormalAttr {
     pub item: AttrItem,
     pub tokens: Option<LazyAttrTokenStream>,
+}
+
+impl NormalAttr {
+    pub fn from_ident(ident: Ident) -> Self {
+        Self {
+            item: AttrItem { path: Path::from_ident(ident), args: AttrArgs::Empty, tokens: None },
+            tokens: None,
+        }
+    }
 }
 
 #[derive(Clone, Encodable, Decodable, Debug, HashStable_Generic)]
@@ -2695,7 +2788,11 @@ pub enum VariantData {
     /// Struct variant.
     ///
     /// E.g., `Bar { .. }` as in `enum Foo { Bar { .. } }`.
-    Struct(ThinVec<FieldDef>, bool),
+    Struct {
+        fields: ThinVec<FieldDef>,
+        // FIXME: investigate making this a `Option<ErrorGuaranteed>`
+        recovered: bool,
+    },
     /// Tuple variant.
     ///
     /// E.g., `Bar(..)` as in `enum Foo { Bar(..) }`.
@@ -2710,7 +2807,7 @@ impl VariantData {
     /// Return the fields of this variant.
     pub fn fields(&self) -> &[FieldDef] {
         match self {
-            VariantData::Struct(fields, ..) | VariantData::Tuple(fields, _) => fields,
+            VariantData::Struct { fields, .. } | VariantData::Tuple(fields, _) => fields,
             _ => &[],
         }
     }
@@ -2718,7 +2815,7 @@ impl VariantData {
     /// Return the `NodeId` of this variant's constructor, if it has one.
     pub fn ctor_node_id(&self) -> Option<NodeId> {
         match *self {
-            VariantData::Struct(..) => None,
+            VariantData::Struct { .. } => None,
             VariantData::Tuple(_, id) | VariantData::Unit(id) => Some(id),
         }
     }
@@ -2751,6 +2848,28 @@ impl Item {
     /// Return the span that encompasses the attributes.
     pub fn span_with_attributes(&self) -> Span {
         self.attrs.iter().fold(self.span, |acc, attr| acc.to(attr.span))
+    }
+
+    pub fn opt_generics(&self) -> Option<&Generics> {
+        match &self.kind {
+            ItemKind::ExternCrate(_)
+            | ItemKind::Use(_)
+            | ItemKind::Mod(_, _)
+            | ItemKind::ForeignMod(_)
+            | ItemKind::GlobalAsm(_)
+            | ItemKind::MacCall(_)
+            | ItemKind::MacroDef(_) => None,
+            ItemKind::Static(_) => None,
+            ItemKind::Const(i) => Some(&i.generics),
+            ItemKind::Fn(i) => Some(&i.generics),
+            ItemKind::TyAlias(i) => Some(&i.generics),
+            ItemKind::TraitAlias(generics, _)
+            | ItemKind::Enum(_, generics)
+            | ItemKind::Struct(_, generics)
+            | ItemKind::Union(_, generics) => Some(&generics),
+            ItemKind::Trait(i) => Some(&i.generics),
+            ItemKind::Impl(i) => Some(&i.generics),
+        }
     }
 }
 
@@ -2790,8 +2909,8 @@ impl Extern {
 pub struct FnHeader {
     /// The `unsafe` keyword, if any
     pub unsafety: Unsafe,
-    /// The `async` keyword, if any
-    pub asyncness: Async,
+    /// Whether this is `async`, `gen`, or nothing.
+    pub coroutine_kind: Option<CoroutineKind>,
     /// The `const` keyword, if any
     pub constness: Const,
     /// The `extern` keyword and corresponding ABI string, if any
@@ -2801,9 +2920,9 @@ pub struct FnHeader {
 impl FnHeader {
     /// Does this function header have any qualifiers or is it empty?
     pub fn has_qualifiers(&self) -> bool {
-        let Self { unsafety, asyncness, constness, ext } = self;
+        let Self { unsafety, coroutine_kind, constness, ext } = self;
         matches!(unsafety, Unsafe::Yes(_))
-            || asyncness.is_async()
+            || coroutine_kind.is_some()
             || matches!(constness, Const::Yes(_))
             || !matches!(ext, Extern::None)
     }
@@ -2813,7 +2932,7 @@ impl Default for FnHeader {
     fn default() -> FnHeader {
         FnHeader {
             unsafety: Unsafe::No,
-            asyncness: Async::No,
+            coroutine_kind: None,
             constness: Const::No,
             ext: Extern::None,
         }
@@ -2886,6 +3005,22 @@ pub struct Fn {
 }
 
 #[derive(Clone, Encodable, Decodable, Debug)]
+pub struct StaticItem {
+    pub ty: P<Ty>,
+    pub mutability: Mutability,
+    pub expr: Option<P<Expr>>,
+}
+
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub struct ConstItem {
+    pub defaultness: Defaultness,
+    pub generics: Generics,
+    pub ty: P<Ty>,
+    pub expr: Option<P<Expr>>,
+}
+
+// Adding a new variant? Please update `test_item` in `tests/ui/macros/stringify.rs`.
+#[derive(Clone, Encodable, Decodable, Debug)]
 pub enum ItemKind {
     /// An `extern crate` item, with the optional *original* crate name if the crate was renamed.
     ///
@@ -2898,11 +3033,11 @@ pub enum ItemKind {
     /// A static item (`static`).
     ///
     /// E.g., `static FOO: i32 = 42;` or `static FOO: &'static str = "bar";`.
-    Static(P<Ty>, Mutability, Option<P<Expr>>),
+    Static(Box<StaticItem>),
     /// A constant item (`const`).
     ///
     /// E.g., `const FOO: i32 = 42;`.
-    Const(Defaultness, P<Ty>, Option<P<Expr>>),
+    Const(Box<ConstItem>),
     /// A function declaration (`fn`).
     ///
     /// E.g., `fn foo(bar: usize) -> usize { .. }`.
@@ -2957,7 +3092,7 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
-    pub fn article(&self) -> &str {
+    pub fn article(&self) -> &'static str {
         use ItemKind::*;
         match self {
             Use(..) | Static(..) | Const(..) | Fn(..) | Mod(..) | GlobalAsm(..) | TyAlias(..)
@@ -2966,7 +3101,7 @@ impl ItemKind {
         }
     }
 
-    pub fn descr(&self) -> &str {
+    pub fn descr(&self) -> &'static str {
         match self {
             ItemKind::ExternCrate(..) => "extern crate",
             ItemKind::Use(..) => "`use` import",
@@ -2992,6 +3127,7 @@ impl ItemKind {
         match self {
             Self::Fn(box Fn { generics, .. })
             | Self::TyAlias(box TyAlias { generics, .. })
+            | Self::Const(box ConstItem { generics, .. })
             | Self::Enum(_, generics)
             | Self::Struct(_, generics)
             | Self::Union(_, generics)
@@ -3018,7 +3154,7 @@ pub type AssocItem = Item<AssocItemKind>;
 pub enum AssocItemKind {
     /// An associated constant, `const $ident: $ty $def?;` where `def ::= "=" $expr? ;`.
     /// If `def` is parsed, then the constant is provided, and otherwise required.
-    Const(Defaultness, P<Ty>, Option<P<Expr>>),
+    Const(Box<ConstItem>),
     /// An associated function.
     Fn(Box<Fn>),
     /// An associated type.
@@ -3030,7 +3166,7 @@ pub enum AssocItemKind {
 impl AssocItemKind {
     pub fn defaultness(&self) -> Defaultness {
         match *self {
-            Self::Const(defaultness, ..)
+            Self::Const(box ConstItem { defaultness, .. })
             | Self::Fn(box Fn { defaultness, .. })
             | Self::Type(box TyAlias { defaultness, .. }) => defaultness,
             Self::MacCall(..) => Defaultness::Final,
@@ -3041,7 +3177,7 @@ impl AssocItemKind {
 impl From<AssocItemKind> for ItemKind {
     fn from(assoc_item_kind: AssocItemKind) -> ItemKind {
         match assoc_item_kind {
-            AssocItemKind::Const(a, b, c) => ItemKind::Const(a, b, c),
+            AssocItemKind::Const(item) => ItemKind::Const(item),
             AssocItemKind::Fn(fn_kind) => ItemKind::Fn(fn_kind),
             AssocItemKind::Type(ty_alias_kind) => ItemKind::TyAlias(ty_alias_kind),
             AssocItemKind::MacCall(a) => ItemKind::MacCall(a),
@@ -3054,7 +3190,7 @@ impl TryFrom<ItemKind> for AssocItemKind {
 
     fn try_from(item_kind: ItemKind) -> Result<AssocItemKind, ItemKind> {
         Ok(match item_kind {
-            ItemKind::Const(a, b, c) => AssocItemKind::Const(a, b, c),
+            ItemKind::Const(item) => AssocItemKind::Const(item),
             ItemKind::Fn(fn_kind) => AssocItemKind::Fn(fn_kind),
             ItemKind::TyAlias(ty_kind) => AssocItemKind::Type(ty_kind),
             ItemKind::MacCall(a) => AssocItemKind::MacCall(a),
@@ -3079,7 +3215,9 @@ pub enum ForeignItemKind {
 impl From<ForeignItemKind> for ItemKind {
     fn from(foreign_item_kind: ForeignItemKind) -> ItemKind {
         match foreign_item_kind {
-            ForeignItemKind::Static(a, b, c) => ItemKind::Static(a, b, c),
+            ForeignItemKind::Static(a, b, c) => {
+                ItemKind::Static(StaticItem { ty: a, mutability: b, expr: c }.into())
+            }
             ForeignItemKind::Fn(fn_kind) => ItemKind::Fn(fn_kind),
             ForeignItemKind::TyAlias(ty_alias_kind) => ItemKind::TyAlias(ty_alias_kind),
             ForeignItemKind::MacCall(a) => ItemKind::MacCall(a),
@@ -3092,7 +3230,9 @@ impl TryFrom<ItemKind> for ForeignItemKind {
 
     fn try_from(item_kind: ItemKind) -> Result<ForeignItemKind, ItemKind> {
         Ok(match item_kind {
-            ItemKind::Static(a, b, c) => ForeignItemKind::Static(a, b, c),
+            ItemKind::Static(box StaticItem { ty: a, mutability: b, expr: c }) => {
+                ForeignItemKind::Static(a, b, c)
+            }
             ItemKind::Fn(fn_kind) => ForeignItemKind::Fn(fn_kind),
             ItemKind::TyAlias(ty_alias_kind) => ForeignItemKind::TyAlias(ty_alias_kind),
             ItemKind::MacCall(a) => ForeignItemKind::MacCall(a),
@@ -3109,17 +3249,17 @@ mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;
     // tidy-alphabetical-start
-    static_assert_size!(AssocItem, 104);
-    static_assert_size!(AssocItemKind, 32);
+    static_assert_size!(AssocItem, 88);
+    static_assert_size!(AssocItemKind, 16);
     static_assert_size!(Attribute, 32);
     static_assert_size!(Block, 32);
     static_assert_size!(Expr, 72);
     static_assert_size!(ExprKind, 40);
-    static_assert_size!(Fn, 152);
+    static_assert_size!(Fn, 160);
     static_assert_size!(ForeignItem, 96);
     static_assert_size!(ForeignItemKind, 24);
     static_assert_size!(GenericArg, 24);
-    static_assert_size!(GenericBound, 56);
+    static_assert_size!(GenericBound, 64);
     static_assert_size!(Generics, 40);
     static_assert_size!(Impl, 136);
     static_assert_size!(Item, 136);

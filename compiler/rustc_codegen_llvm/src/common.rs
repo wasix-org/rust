@@ -1,23 +1,20 @@
 //! Code that is useful in various codegen modules.
 
-use crate::consts::{self, const_alloc_to_llvm};
+use crate::consts::const_alloc_to_llvm;
 pub use crate::context::CodegenCx;
 use crate::llvm::{self, BasicBlock, Bool, ConstantInt, False, OperandBundleDef, True};
 use crate::type_::Type;
-use crate::type_of::LayoutLlvmExt;
 use crate::value::Value;
 
 use rustc_ast::Mutability;
-use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::*;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::stable_hasher::{Hash128, HashStable, StableHasher};
 use rustc_hir::def_id::DefId;
 use rustc_middle::bug;
 use rustc_middle::mir::interpret::{ConstAllocation, GlobalAlloc, Scalar};
-use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::cstore::{DllCallingConvention, DllImport, PeImportNameType};
-use rustc_target::abi::{self, AddressSpace, HasDataLayout, Pointer, Size};
+use rustc_target::abi::{self, AddressSpace, HasDataLayout, Pointer};
 use rustc_target::spec::Target;
 
 use libc::{c_char, c_uint};
@@ -130,6 +127,10 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         unsafe { llvm::LLVMGetUndef(t) }
     }
 
+    fn const_poison(&self, t: &'ll Type) -> &'ll Value {
+        unsafe { llvm::LLVMGetPoison(t) }
+    }
+
     fn const_int(&self, t: &'ll Type, i: i64) -> &'ll Value {
         unsafe { llvm::LLVMConstInt(t, i as u64, True) }
     }
@@ -165,6 +166,10 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         self.const_uint(self.type_i64(), i)
     }
 
+    fn const_u128(&self, i: u128) -> &'ll Value {
+        self.const_uint_big(self.type_i128(), i)
+    }
+
     fn const_usize(&self, i: u64) -> &'ll Value {
         let bit_size = self.data_layout().pointer_size.bits();
         if bit_size < 64 {
@@ -198,17 +203,14 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 unsafe {
                     llvm::LLVMSetInitializer(g, sc);
                     llvm::LLVMSetGlobalConstant(g, True);
+                    llvm::LLVMSetUnnamedAddress(g, llvm::UnnamedAddr::Global);
                     llvm::LLVMRustSetLinkage(g, llvm::Linkage::InternalLinkage);
                 }
                 (s.to_owned(), g)
             })
             .1;
         let len = s.len();
-        let cs = consts::ptrcast(
-            str_global,
-            self.type_ptr_to(self.layout_of(self.tcx.types.str_).llvm_type(self)),
-        );
-        (cs, self.const_usize(len as u64))
+        (str_global, self.const_usize(len as u64))
     }
 
     fn const_struct(&self, elts: &[&'ll Value], packed: bool) -> &'ll Value {
@@ -244,8 +246,8 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 }
             }
             Scalar::Ptr(ptr, _size) => {
-                let (alloc_id, offset) = ptr.into_parts();
-                let (base_addr, base_addr_space) = match self.tcx.global_alloc(alloc_id) {
+                let (prov, offset) = ptr.into_parts();
+                let (base_addr, base_addr_space) = match self.tcx.global_alloc(prov.alloc_id()) {
                     GlobalAlloc::Memory(alloc) => {
                         let init = const_alloc_to_llvm(self, alloc);
                         let alloc = alloc.inner();
@@ -257,7 +259,7 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                             let hash = self.tcx.with_stable_hashing_context(|mut hcx| {
                                 let mut hasher = StableHasher::new();
                                 alloc.hash_stable(&mut hcx, &mut hasher);
-                                hasher.finish::<u128>()
+                                hasher.finish::<Hash128>()
                             });
                             llvm::set_value_name(value, format!("alloc_{hash:032x}").as_bytes());
                         }
@@ -283,9 +285,9 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                     }
                 };
                 let llval = unsafe {
-                    llvm::LLVMRustConstInBoundsGEP2(
+                    llvm::LLVMConstInBoundsGEP2(
                         self.type_i8(),
-                        self.const_bitcast(base_addr, self.type_i8p_ext(base_addr_space)),
+                        self.const_bitcast(base_addr, self.type_ptr_ext(base_addr_space)),
                         &self.const_usize(offset.bytes()),
                         1,
                     )
@@ -303,37 +305,19 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         const_alloc_to_llvm(self, alloc)
     }
 
-    fn from_const_alloc(
-        &self,
-        layout: TyAndLayout<'tcx>,
-        alloc: ConstAllocation<'tcx>,
-        offset: Size,
-    ) -> PlaceRef<'tcx, &'ll Value> {
-        let alloc_align = alloc.inner().align;
-        assert_eq!(alloc_align, layout.align.abi);
-        let llty = self.type_ptr_to(layout.llvm_type(self));
-        let llval = if layout.size == Size::ZERO {
-            let llval = self.const_usize(alloc_align.bytes());
-            unsafe { llvm::LLVMConstIntToPtr(llval, llty) }
-        } else {
-            let init = const_alloc_to_llvm(self, alloc);
-            let base_addr = self.static_addr_of(init, alloc_align, None);
-
-            let llval = unsafe {
-                llvm::LLVMRustConstInBoundsGEP2(
-                    self.type_i8(),
-                    self.const_bitcast(base_addr, self.type_i8p()),
-                    &self.const_usize(offset.bytes()),
-                    1,
-                )
-            };
-            self.const_bitcast(llval, llty)
-        };
-        PlaceRef::new_sized(llval, layout)
+    fn const_bitcast(&self, val: &'ll Value, ty: &'ll Type) -> &'ll Value {
+        self.const_bitcast(val, ty)
     }
 
-    fn const_ptrcast(&self, val: &'ll Value, ty: &'ll Type) -> &'ll Value {
-        consts::ptrcast(val, ty)
+    fn const_ptr_byte_offset(&self, base_addr: Self::Value, offset: abi::Size) -> Self::Value {
+        unsafe {
+            llvm::LLVMConstInBoundsGEP2(
+                self.type_i8(),
+                base_addr,
+                &self.const_usize(offset.bytes()),
+                1,
+            )
+        }
     }
 }
 
@@ -374,8 +358,7 @@ pub(crate) fn get_dllimport<'tcx>(
     name: &str,
 ) -> Option<&'tcx DllImport> {
     tcx.native_library(id)
-        .map(|lib| lib.dll_imports.iter().find(|di| di.name.as_str() == name))
-        .flatten()
+        .and_then(|lib| lib.dll_imports.iter().find(|di| di.name.as_str() == name))
 }
 
 pub(crate) fn is_mingw_gnu_toolchain(target: &Target) -> bool {
@@ -428,10 +411,10 @@ pub(crate) fn i686_decorated_name(
             DllCallingConvention::C => {}
             DllCallingConvention::Stdcall(arg_list_size)
             | DllCallingConvention::Fastcall(arg_list_size) => {
-                write!(&mut decorated_name, "@{}", arg_list_size).unwrap();
+                write!(&mut decorated_name, "@{arg_list_size}").unwrap();
             }
             DllCallingConvention::Vectorcall(arg_list_size) => {
-                write!(&mut decorated_name, "@@{}", arg_list_size).unwrap();
+                write!(&mut decorated_name, "@@{arg_list_size}").unwrap();
             }
         }
     }

@@ -1,3 +1,5 @@
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 //! Tests that we can propagate into places that are projections into unions
 // compile-flags: -Zunsound-mir-opts
 fn val() -> u32 {

@@ -1,6 +1,6 @@
+use clippy_config::msrvs::{self, Msrv};
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::macros::span_is_local;
-use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::path_def_id;
 use clippy_utils::source::snippet_opt;
 use rustc_errors::Applicability;
@@ -10,8 +10,9 @@ use rustc_hir::{
     TyKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::{hir::nested_filter::OnlyBodies, ty};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_middle::hir::nested_filter::OnlyBodies;
+use rustc_middle::ty;
+use rustc_session::impl_lint_pass;
 use rustc_span::symbol::{kw, sym};
 use rustc_span::{Span, Symbol};
 
@@ -23,7 +24,7 @@ declare_clippy_lint! {
     /// According the std docs implementing `From<..>` is preferred since it gives you `Into<..>` for free where the reverse isn't true.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// struct StringWrapper(String);
     ///
     /// impl Into<StringWrapper> for String {
@@ -33,7 +34,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// struct StringWrapper(String);
     ///
     /// impl From<String> for StringWrapper {
@@ -76,9 +77,10 @@ impl<'tcx> LateLintPass<'tcx> for FromOverInto {
             && let Some(into_trait_seg) = hir_trait_ref.path.segments.last()
             // `impl Into<target_ty> for self_ty`
             && let Some(GenericArgs { args: [GenericArg::Type(target_ty)], .. }) = into_trait_seg.args
-            && let Some(middle_trait_ref) = cx.tcx.impl_trait_ref(item.owner_id).map(ty::EarlyBinder::subst_identity)
+            && let Some(middle_trait_ref) = cx.tcx.impl_trait_ref(item.owner_id)
+                                                  .map(ty::EarlyBinder::instantiate_identity)
             && cx.tcx.is_diagnostic_item(sym::Into, middle_trait_ref.def_id)
-            && !matches!(middle_trait_ref.substs.type_at(1).kind(), ty::Alias(ty::Opaque, _))
+            && !matches!(middle_trait_ref.args.type_at(1).kind(), ty::Alias(ty::Opaque, _))
         {
             span_lint_and_then(
                 cx,
@@ -86,7 +88,8 @@ impl<'tcx> LateLintPass<'tcx> for FromOverInto {
                 cx.tcx.sess.source_map().guess_head_span(item.span),
                 "an implementation of `From` is preferred since it gives you `Into<_>` for free where the reverse isn't true",
                 |diag| {
-                    // If the target type is likely foreign mention the orphan rules as it's a common source of confusion
+                    // If the target type is likely foreign mention the orphan rules as it's a common source of
+                    // confusion
                     if path_def_id(cx, target_ty.peel_refs()).map_or(true, |id| !id.is_local()) {
                         diag.help(
                             "`impl From<Local> for Foreign` is allowed by the orphan rules, for more information see\n\
@@ -94,7 +97,10 @@ impl<'tcx> LateLintPass<'tcx> for FromOverInto {
                         );
                     }
 
-                    let message = format!("replace the `Into` implentation with `From<{}>`", middle_trait_ref.self_ty());
+                    let message = format!(
+                        "replace the `Into` implementation with `From<{}>`",
+                        middle_trait_ref.self_ty()
+                    );
                     if let Some(suggestions) = convert_to_from(cx, into_trait_seg, target_ty, self_ty, impl_item_ref) {
                         diag.multipart_suggestion(message, suggestions, Applicability::MachineApplicable);
                     } else {
@@ -108,12 +114,12 @@ impl<'tcx> LateLintPass<'tcx> for FromOverInto {
     extract_msrv_attr!(LateContext);
 }
 
-/// Finds the occurences of `Self` and `self`
+/// Finds the occurrences of `Self` and `self`
 struct SelfFinder<'a, 'tcx> {
     cx: &'a LateContext<'tcx>,
-    /// Occurences of `Self`
+    /// Occurrences of `Self`
     upper: Vec<Span>,
-    /// Occurences of `self`
+    /// Occurrences of `self`
     lower: Vec<Span>,
     /// If any of the `self`/`Self` usages were from an expansion, or the body contained a binding
     /// already named `val`
@@ -134,9 +140,10 @@ impl<'a, 'tcx> Visitor<'tcx> for SelfFinder<'a, 'tcx> {
                 kw::SelfUpper => self.upper.push(segment.ident.span),
                 _ => continue,
             }
+
+            self.invalid |= segment.ident.span.from_expansion();
         }
 
-        self.invalid |= path.span.from_expansion();
         if !self.invalid {
             walk_path(self, path);
         }
@@ -156,11 +163,20 @@ fn convert_to_from(
     self_ty: &Ty<'_>,
     impl_item_ref: &ImplItemRef,
 ) -> Option<Vec<(Span, String)>> {
+    if !target_ty.find_self_aliases().is_empty() {
+        // It's tricky to expand self-aliases correctly, we'll ignore it to not cause a
+        // bad suggestion/fix.
+        return None;
+    }
     let impl_item = cx.tcx.hir().impl_item(impl_item_ref.id);
-    let ImplItemKind::Fn(ref sig, body_id) = impl_item.kind else { return None };
+    let ImplItemKind::Fn(ref sig, body_id) = impl_item.kind else {
+        return None;
+    };
     let body = cx.tcx.hir().body(body_id);
     let [input] = body.params else { return None };
-    let PatKind::Binding(.., self_ident, None) = input.pat.kind else { return None };
+    let PatKind::Binding(.., self_ident, None) = input.pat.kind else {
+        return None;
+    };
 
     let from = snippet_opt(cx, self_ty.span)?;
     let into = snippet_opt(cx, target_ty.span)?;

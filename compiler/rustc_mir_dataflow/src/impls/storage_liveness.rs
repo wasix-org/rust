@@ -1,10 +1,11 @@
-pub use super::*;
-
-use crate::{CallReturnPlaces, GenKill, Results, ResultsRefCursor};
+use rustc_index::bit_set::BitSet;
 use rustc_middle::mir::visit::{NonMutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
+
 use std::borrow::Cow;
-use std::cell::RefCell;
+
+use super::MaybeBorrowedLocals;
+use crate::{GenKill, ResultsCursor};
 
 #[derive(Clone)]
 pub struct MaybeStorageLive<'a> {
@@ -22,12 +23,12 @@ impl<'tcx, 'a> crate::AnalysisDomain<'tcx> for MaybeStorageLive<'a> {
 
     const NAME: &'static str = "maybe_storage_live";
 
-    fn bottom_value(&self, body: &mir::Body<'tcx>) -> Self::Domain {
+    fn bottom_value(&self, body: &Body<'tcx>) -> Self::Domain {
         // bottom = dead
         BitSet::new_empty(body.local_decls.len())
     }
 
-    fn initialize_start_block(&self, body: &mir::Body<'tcx>, on_entry: &mut Self::Domain) {
+    fn initialize_start_block(&self, body: &Body<'tcx>, on_entry: &mut Self::Domain) {
         assert_eq!(body.local_decls.len(), self.always_live_locals.domain_size());
         for local in self.always_live_locals.iter() {
             on_entry.insert(local);
@@ -42,10 +43,14 @@ impl<'tcx, 'a> crate::AnalysisDomain<'tcx> for MaybeStorageLive<'a> {
 impl<'tcx, 'a> crate::GenKillAnalysis<'tcx> for MaybeStorageLive<'a> {
     type Idx = Local;
 
+    fn domain_size(&self, body: &Body<'tcx>) -> usize {
+        body.local_decls.len()
+    }
+
     fn statement_effect(
-        &self,
+        &mut self,
         trans: &mut impl GenKill<Self::Idx>,
-        stmt: &mir::Statement<'tcx>,
+        stmt: &Statement<'tcx>,
         _: Location,
     ) {
         match stmt.kind {
@@ -55,18 +60,19 @@ impl<'tcx, 'a> crate::GenKillAnalysis<'tcx> for MaybeStorageLive<'a> {
         }
     }
 
-    fn terminator_effect(
-        &self,
-        _trans: &mut impl GenKill<Self::Idx>,
-        _: &mir::Terminator<'tcx>,
+    fn terminator_effect<'mir>(
+        &mut self,
+        _trans: &mut Self::Domain,
+        terminator: &'mir Terminator<'tcx>,
         _: Location,
-    ) {
+    ) -> TerminatorEdges<'mir, 'tcx> {
         // Terminators have no effect
+        terminator.edges()
     }
 
     fn call_return_effect(
-        &self,
-        _trans: &mut impl GenKill<Self::Idx>,
+        &mut self,
+        _trans: &mut Self::Domain,
         _block: BasicBlock,
         _return_places: CallReturnPlaces<'_, 'tcx>,
     ) {
@@ -74,38 +80,103 @@ impl<'tcx, 'a> crate::GenKillAnalysis<'tcx> for MaybeStorageLive<'a> {
     }
 }
 
-type BorrowedLocalsResults<'a, 'tcx> = ResultsRefCursor<'a, 'a, 'tcx, MaybeBorrowedLocals>;
-
-/// Dataflow analysis that determines whether each local requires storage at a
-/// given location; i.e. whether its storage can go away without being observed.
-pub struct MaybeRequiresStorage<'mir, 'tcx> {
-    body: &'mir Body<'tcx>,
-    borrowed_locals: RefCell<BorrowedLocalsResults<'mir, 'tcx>>,
+#[derive(Clone)]
+pub struct MaybeStorageDead {
+    always_live_locals: BitSet<Local>,
 }
 
-impl<'mir, 'tcx> MaybeRequiresStorage<'mir, 'tcx> {
-    pub fn new(
-        body: &'mir Body<'tcx>,
-        borrowed_locals: &'mir Results<'tcx, MaybeBorrowedLocals>,
-    ) -> Self {
-        MaybeRequiresStorage {
-            body,
-            borrowed_locals: RefCell::new(ResultsRefCursor::new(&body, borrowed_locals)),
+impl MaybeStorageDead {
+    pub fn new(always_live_locals: BitSet<Local>) -> Self {
+        MaybeStorageDead { always_live_locals }
+    }
+}
+
+impl<'tcx> crate::AnalysisDomain<'tcx> for MaybeStorageDead {
+    type Domain = BitSet<Local>;
+
+    const NAME: &'static str = "maybe_storage_dead";
+
+    fn bottom_value(&self, body: &Body<'tcx>) -> Self::Domain {
+        // bottom = live
+        BitSet::new_empty(body.local_decls.len())
+    }
+
+    fn initialize_start_block(&self, body: &Body<'tcx>, on_entry: &mut Self::Domain) {
+        assert_eq!(body.local_decls.len(), self.always_live_locals.domain_size());
+        // Do not iterate on return place and args, as they are trivially always live.
+        for local in body.vars_and_temps_iter() {
+            if !self.always_live_locals.contains(local) {
+                on_entry.insert(local);
+            }
         }
     }
 }
 
-impl<'mir, 'tcx> crate::AnalysisDomain<'tcx> for MaybeRequiresStorage<'mir, 'tcx> {
+impl<'tcx> crate::GenKillAnalysis<'tcx> for MaybeStorageDead {
+    type Idx = Local;
+
+    fn domain_size(&self, body: &Body<'tcx>) -> usize {
+        body.local_decls.len()
+    }
+
+    fn statement_effect(
+        &mut self,
+        trans: &mut impl GenKill<Self::Idx>,
+        stmt: &Statement<'tcx>,
+        _: Location,
+    ) {
+        match stmt.kind {
+            StatementKind::StorageLive(l) => trans.kill(l),
+            StatementKind::StorageDead(l) => trans.gen(l),
+            _ => (),
+        }
+    }
+
+    fn terminator_effect<'mir>(
+        &mut self,
+        _: &mut Self::Domain,
+        terminator: &'mir Terminator<'tcx>,
+        _: Location,
+    ) -> TerminatorEdges<'mir, 'tcx> {
+        // Terminators have no effect
+        terminator.edges()
+    }
+
+    fn call_return_effect(
+        &mut self,
+        _trans: &mut Self::Domain,
+        _block: BasicBlock,
+        _return_places: CallReturnPlaces<'_, 'tcx>,
+    ) {
+        // Nothing to do when a call returns successfully
+    }
+}
+
+type BorrowedLocalsResults<'mir, 'tcx> = ResultsCursor<'mir, 'tcx, MaybeBorrowedLocals>;
+
+/// Dataflow analysis that determines whether each local requires storage at a
+/// given location; i.e. whether its storage can go away without being observed.
+pub struct MaybeRequiresStorage<'mir, 'tcx> {
+    borrowed_locals: BorrowedLocalsResults<'mir, 'tcx>,
+}
+
+impl<'mir, 'tcx> MaybeRequiresStorage<'mir, 'tcx> {
+    pub fn new(borrowed_locals: BorrowedLocalsResults<'mir, 'tcx>) -> Self {
+        MaybeRequiresStorage { borrowed_locals }
+    }
+}
+
+impl<'tcx> crate::AnalysisDomain<'tcx> for MaybeRequiresStorage<'_, 'tcx> {
     type Domain = BitSet<Local>;
 
     const NAME: &'static str = "requires_storage";
 
-    fn bottom_value(&self, body: &mir::Body<'tcx>) -> Self::Domain {
+    fn bottom_value(&self, body: &Body<'tcx>) -> Self::Domain {
         // bottom = dead
         BitSet::new_empty(body.local_decls.len())
     }
 
-    fn initialize_start_block(&self, body: &mir::Body<'tcx>, on_entry: &mut Self::Domain) {
+    fn initialize_start_block(&self, body: &Body<'tcx>, on_entry: &mut Self::Domain) {
         // The resume argument is live on function entry (we don't care about
         // the `self` argument)
         for arg in body.args_iter().skip(1) {
@@ -114,17 +185,21 @@ impl<'mir, 'tcx> crate::AnalysisDomain<'tcx> for MaybeRequiresStorage<'mir, 'tcx
     }
 }
 
-impl<'mir, 'tcx> crate::GenKillAnalysis<'tcx> for MaybeRequiresStorage<'mir, 'tcx> {
+impl<'tcx> crate::GenKillAnalysis<'tcx> for MaybeRequiresStorage<'_, 'tcx> {
     type Idx = Local;
 
+    fn domain_size(&self, body: &Body<'tcx>) -> usize {
+        body.local_decls.len()
+    }
+
     fn before_statement_effect(
-        &self,
+        &mut self,
         trans: &mut impl GenKill<Self::Idx>,
-        stmt: &mir::Statement<'tcx>,
+        stmt: &Statement<'tcx>,
         loc: Location,
     ) {
         // If a place is borrowed in a statement, it needs storage for that statement.
-        self.borrowed_locals.borrow().analysis().statement_effect(trans, stmt, loc);
+        self.borrowed_locals.mut_analysis().statement_effect(trans, stmt, loc);
 
         match &stmt.kind {
             StatementKind::StorageDead(l) => trans.kill(*l),
@@ -139,6 +214,7 @@ impl<'mir, 'tcx> crate::GenKillAnalysis<'tcx> for MaybeRequiresStorage<'mir, 'tc
             // Nothing to do for these. Match exhaustively so this fails to compile when new
             // variants are added.
             StatementKind::AscribeUserType(..)
+            | StatementKind::PlaceMention(..)
             | StatementKind::Coverage(..)
             | StatementKind::FakeRead(..)
             | StatementKind::ConstEvalCounter
@@ -150,9 +226,9 @@ impl<'mir, 'tcx> crate::GenKillAnalysis<'tcx> for MaybeRequiresStorage<'mir, 'tc
     }
 
     fn statement_effect(
-        &self,
+        &mut self,
         trans: &mut impl GenKill<Self::Idx>,
-        _: &mir::Statement<'tcx>,
+        _: &Statement<'tcx>,
         loc: Location,
     ) {
         // If we move from a place then it only stops needing storage *after*
@@ -161,13 +237,16 @@ impl<'mir, 'tcx> crate::GenKillAnalysis<'tcx> for MaybeRequiresStorage<'mir, 'tc
     }
 
     fn before_terminator_effect(
-        &self,
-        trans: &mut impl GenKill<Self::Idx>,
-        terminator: &mir::Terminator<'tcx>,
+        &mut self,
+        trans: &mut Self::Domain,
+        terminator: &Terminator<'tcx>,
         loc: Location,
     ) {
         // If a place is borrowed in a terminator, it needs storage for that terminator.
-        self.borrowed_locals.borrow().analysis().terminator_effect(trans, terminator, loc);
+        self.borrowed_locals
+            .mut_analysis()
+            .transfer_function(trans)
+            .visit_terminator(terminator, loc);
 
         match &terminator.kind {
             TerminatorKind::Call { destination, .. } => {
@@ -176,7 +255,7 @@ impl<'mir, 'tcx> crate::GenKillAnalysis<'tcx> for MaybeRequiresStorage<'mir, 'tc
 
             // Note that we do *not* gen the `resume_arg` of `Yield` terminators. The reason for
             // that is that a `yield` will return from the function, and `resume_arg` is written
-            // only when the generator is later resumed. Unlike `Call`, this doesn't require the
+            // only when the coroutine is later resumed. Unlike `Call`, this doesn't require the
             // place to have storage *before* the yield, only after.
             TerminatorKind::Yield { .. } => {}
 
@@ -199,27 +278,26 @@ impl<'mir, 'tcx> crate::GenKillAnalysis<'tcx> for MaybeRequiresStorage<'mir, 'tc
 
             // Nothing to do for these. Match exhaustively so this fails to compile when new
             // variants are added.
-            TerminatorKind::Abort
+            TerminatorKind::UnwindTerminate(_)
             | TerminatorKind::Assert { .. }
             | TerminatorKind::Drop { .. }
-            | TerminatorKind::DropAndReplace { .. }
             | TerminatorKind::FalseEdge { .. }
             | TerminatorKind::FalseUnwind { .. }
-            | TerminatorKind::GeneratorDrop
+            | TerminatorKind::CoroutineDrop
             | TerminatorKind::Goto { .. }
-            | TerminatorKind::Resume
+            | TerminatorKind::UnwindResume
             | TerminatorKind::Return
             | TerminatorKind::SwitchInt { .. }
             | TerminatorKind::Unreachable => {}
         }
     }
 
-    fn terminator_effect(
-        &self,
-        trans: &mut impl GenKill<Self::Idx>,
-        terminator: &mir::Terminator<'tcx>,
+    fn terminator_effect<'t>(
+        &mut self,
+        trans: &mut Self::Domain,
+        terminator: &'t Terminator<'tcx>,
         loc: Location,
-    ) {
+    ) -> TerminatorEdges<'t, 'tcx> {
         match terminator.kind {
             // For call terminators the destination requires storage for the call
             // and after the call returns successfully, but not after a panic.
@@ -237,64 +315,55 @@ impl<'mir, 'tcx> crate::GenKillAnalysis<'tcx> for MaybeRequiresStorage<'mir, 'tc
             // Nothing to do for these. Match exhaustively so this fails to compile when new
             // variants are added.
             TerminatorKind::Yield { .. }
-            | TerminatorKind::Abort
+            | TerminatorKind::UnwindTerminate(_)
             | TerminatorKind::Assert { .. }
             | TerminatorKind::Drop { .. }
-            | TerminatorKind::DropAndReplace { .. }
             | TerminatorKind::FalseEdge { .. }
             | TerminatorKind::FalseUnwind { .. }
-            | TerminatorKind::GeneratorDrop
+            | TerminatorKind::CoroutineDrop
             | TerminatorKind::Goto { .. }
-            | TerminatorKind::Resume
+            | TerminatorKind::UnwindResume
             | TerminatorKind::Return
             | TerminatorKind::SwitchInt { .. }
             | TerminatorKind::Unreachable => {}
         }
 
         self.check_for_move(trans, loc);
+        terminator.edges()
     }
 
     fn call_return_effect(
-        &self,
-        trans: &mut impl GenKill<Self::Idx>,
+        &mut self,
+        trans: &mut Self::Domain,
         _block: BasicBlock,
         return_places: CallReturnPlaces<'_, 'tcx>,
     ) {
         return_places.for_each(|place| trans.gen(place.local));
     }
-
-    fn yield_resume_effect(
-        &self,
-        trans: &mut impl GenKill<Self::Idx>,
-        _resume_block: BasicBlock,
-        resume_place: mir::Place<'tcx>,
-    ) {
-        trans.gen(resume_place.local);
-    }
 }
 
-impl<'mir, 'tcx> MaybeRequiresStorage<'mir, 'tcx> {
+impl<'tcx> MaybeRequiresStorage<'_, 'tcx> {
     /// Kill locals that are fully moved and have not been borrowed.
-    fn check_for_move(&self, trans: &mut impl GenKill<Local>, loc: Location) {
-        let mut visitor = MoveVisitor { trans, borrowed_locals: &self.borrowed_locals };
-        visitor.visit_location(&self.body, loc);
+    fn check_for_move(&mut self, trans: &mut impl GenKill<Local>, loc: Location) {
+        let body = self.borrowed_locals.body();
+        let mut visitor = MoveVisitor { trans, borrowed_locals: &mut self.borrowed_locals };
+        visitor.visit_location(body, loc);
     }
 }
 
 struct MoveVisitor<'a, 'mir, 'tcx, T> {
-    borrowed_locals: &'a RefCell<BorrowedLocalsResults<'mir, 'tcx>>,
+    borrowed_locals: &'a mut BorrowedLocalsResults<'mir, 'tcx>,
     trans: &'a mut T,
 }
 
-impl<'a, 'mir, 'tcx, T> Visitor<'tcx> for MoveVisitor<'a, 'mir, 'tcx, T>
+impl<'tcx, T> Visitor<'tcx> for MoveVisitor<'_, '_, 'tcx, T>
 where
     T: GenKill<Local>,
 {
     fn visit_local(&mut self, local: Local, context: PlaceContext, loc: Location) {
         if PlaceContext::NonMutatingUse(NonMutatingUseContext::Move) == context {
-            let mut borrowed_locals = self.borrowed_locals.borrow_mut();
-            borrowed_locals.seek_before_primary_effect(loc);
-            if !borrowed_locals.contains(local) {
+            self.borrowed_locals.seek_before_primary_effect(loc);
+            if !self.borrowed_locals.contains(local) {
                 self.trans.kill(local);
             }
         }

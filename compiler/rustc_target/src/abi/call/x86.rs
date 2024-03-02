@@ -1,5 +1,5 @@
 use crate::abi::call::{ArgAttribute, FnAbi, PassMode, Reg, RegKind};
-use crate::abi::{HasDataLayout, TyAbiInterface};
+use crate::abi::{Abi, Align, HasDataLayout, TyAbiInterface, TyAndLayout};
 use crate::spec::HasTargetSpec;
 
 #[derive(PartialEq)]
@@ -14,7 +14,7 @@ where
     C: HasDataLayout + HasTargetSpec,
 {
     if !fn_abi.ret.is_ignore() {
-        if fn_abi.ret.layout.is_aggregate() {
+        if fn_abi.ret.layout.is_aggregate() && fn_abi.ret.layout.is_sized() {
             // Returning a structure. Most often, this will use
             // a hidden first argument. On some platforms, though,
             // small structs are returned as integers.
@@ -50,11 +50,79 @@ where
     }
 
     for arg in fn_abi.args.iter_mut() {
-        if arg.is_ignore() {
+        if arg.is_ignore() || !arg.layout.is_sized() {
             continue;
         }
-        if arg.layout.is_aggregate() {
-            arg.make_indirect_byval();
+
+        // FIXME: MSVC 2015+ will pass the first 3 vector arguments in [XYZ]MM0-2
+        // See https://reviews.llvm.org/D72114 for Clang behavior
+
+        let t = cx.target_spec();
+        let align_4 = Align::from_bytes(4).unwrap();
+        let align_16 = Align::from_bytes(16).unwrap();
+
+        if t.is_like_msvc
+            && arg.layout.is_adt()
+            && let Some(max_repr_align) = arg.layout.max_repr_align
+            && max_repr_align > align_4
+        {
+            // MSVC has special rules for overaligned arguments: https://reviews.llvm.org/D72114.
+            // Summarized here:
+            // - Arguments with _requested_ alignment > 4 are passed indirectly.
+            // - For backwards compatibility, arguments with natural alignment > 4 are still passed
+            //   on stack (via `byval`). For example, this includes `double`, `int64_t`,
+            //   and structs containing them, provided they lack an explicit alignment attribute.
+            assert!(
+                arg.layout.align.abi >= max_repr_align,
+                "abi alignment {:?} less than requested alignment {max_repr_align:?}",
+                arg.layout.align.abi,
+            );
+            arg.make_indirect();
+        } else if arg.layout.is_aggregate() {
+            // We need to compute the alignment of the `byval` argument. The rules can be found in
+            // `X86_32ABIInfo::getTypeStackAlignInBytes` in Clang's `TargetInfo.cpp`. Summarized
+            // here, they are:
+            //
+            // 1. If the natural alignment of the type is <= 4, the alignment is 4.
+            //
+            // 2. Otherwise, on Linux, the alignment of any vector type is the natural alignment.
+            // This doesn't matter here because we only pass aggregates via `byval`, not vectors.
+            //
+            // 3. Otherwise, on Apple platforms, the alignment of anything that contains a vector
+            // type is 16.
+            //
+            // 4. If none of these conditions are true, the alignment is 4.
+
+            fn contains_vector<'a, Ty, C>(cx: &C, layout: TyAndLayout<'a, Ty>) -> bool
+            where
+                Ty: TyAbiInterface<'a, C> + Copy,
+            {
+                match layout.abi {
+                    Abi::Uninhabited | Abi::Scalar(_) | Abi::ScalarPair(..) => false,
+                    Abi::Vector { .. } => true,
+                    Abi::Aggregate { .. } => {
+                        for i in 0..layout.fields.count() {
+                            if contains_vector(cx, layout.field(cx, i)) {
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                }
+            }
+
+            let byval_align = if arg.layout.align.abi < align_4 {
+                // (1.)
+                align_4
+            } else if t.is_like_osx && contains_vector(cx, arg.layout) {
+                // (3.)
+                align_16
+            } else {
+                // (4.)
+                align_4
+            };
+
+            arg.make_indirect_byval(Some(byval_align));
         } else {
             arg.extend_integer_width_to(32);
         }
@@ -75,13 +143,13 @@ where
         for arg in fn_abi.args.iter_mut() {
             let attrs = match arg.mode {
                 PassMode::Ignore
-                | PassMode::Indirect { attrs: _, extra_attrs: None, on_stack: _ } => {
+                | PassMode::Indirect { attrs: _, meta_attrs: None, on_stack: _ } => {
                     continue;
                 }
                 PassMode::Direct(ref mut attrs) => attrs,
                 PassMode::Pair(..)
-                | PassMode::Indirect { attrs: _, extra_attrs: Some(_), on_stack: _ }
-                | PassMode::Cast(..) => {
+                | PassMode::Indirect { attrs: _, meta_attrs: Some(_), on_stack: _ }
+                | PassMode::Cast { .. } => {
                     unreachable!("x86 shouldn't be passing arguments by {:?}", arg.mode)
                 }
             };

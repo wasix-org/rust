@@ -1,4 +1,4 @@
-error: evaluate(Binder(TraitPredicate(<A as std::marker::Send>, polarity:Positive), [])) = Ok(EvaluatedToOk)
+error: evaluate(Binder { value: TraitPredicate(<A as std::marker::Send>, polarity:Positive), bound_vars: [] }) = Ok(EvaluatedToOk)
   --> $DIR/cache-reached-depth-ice.rs:43:5
    |
 LL | fn test<X: ?Sized + Send>() {}
@@ -7,5 +7,5 @@ LL | fn test<X: ?Sized + Send>() {}
 LL |     test::<A>();
    |     ^^^^^^^^^
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 

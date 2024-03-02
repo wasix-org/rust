@@ -1,48 +1,35 @@
 #![allow(rustc::bad_opt_access)]
-use crate::interface::parse_cfgspecs;
-
-use rustc_data_structures::fx::FxHashSet;
+use crate::interface::parse_cfg;
+use rustc_data_structures::profiling::TimePassesFormat;
 use rustc_errors::{emitter::HumanReadableErrorType, registry, ColorConfig};
-use rustc_session::config::rustc_optgroups;
-use rustc_session::config::Input;
-use rustc_session::config::InstrumentXRay;
-use rustc_session::config::TraitSolver;
-use rustc_session::config::{build_configuration, build_session_options, to_crate_config};
 use rustc_session::config::{
-    BranchProtection, Externs, OomStrategy, OutputType, OutputTypes, PAuthKey, PacRet,
-    ProcMacroExecutionStrategy, SymbolManglingVersion, WasiExecModel,
+    build_configuration, build_session_options, rustc_optgroups, BranchProtection, CFGuard, Cfg,
+    DebugInfo, DumpMonoStatsFormat, ErrorOutputType, ExternEntry, ExternLocation, Externs,
+    FunctionReturn, InliningThreshold, Input, InstrumentCoverage, InstrumentXRay,
+    LinkSelfContained, LinkerPluginLto, LocationDetail, LtoCli, MirSpanview, NextSolverConfig,
+    OomStrategy, Options, OutFileName, OutputType, OutputTypes, PAuthKey, PacRet, Passes, Polonius,
+    ProcMacroExecutionStrategy, Strip, SwitchWithOptPath, SymbolManglingVersion, WasiExecModel,
 };
-use rustc_session::config::{CFGuard, ExternEntry, LinkerPluginLto, LtoCli, SwitchWithOptPath};
-use rustc_session::config::{DumpMonoStatsFormat, MirSpanview};
-use rustc_session::config::{ErrorOutputType, ExternLocation, LocationDetail, Options, Strip};
-use rustc_session::config::{InstrumentCoverage, Passes};
 use rustc_session::lint::Level;
 use rustc_session::search_paths::SearchPath;
 use rustc_session::utils::{CanonicalizedPath, NativeLib, NativeLibKind};
-use rustc_session::CompilerIO;
-use rustc_session::{build_session, getopts, Session};
+use rustc_session::{build_session, getopts, CompilerIO, EarlyDiagCtxt, Session};
 use rustc_span::edition::{Edition, DEFAULT_EDITION};
 use rustc_span::symbol::sym;
-use rustc_span::FileName;
-use rustc_span::SourceFileHashAlgorithm;
+use rustc_span::{FileName, SourceFileHashAlgorithm};
 use rustc_target::spec::{CodeModel, LinkerFlavorCli, MergeFunctions, PanicStrategy, RelocModel};
 use rustc_target::spec::{RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TlsModel};
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-type CfgSpecs = FxHashSet<(String, Option<String>)>;
+fn mk_session(matches: getopts::Matches) -> (Session, Cfg) {
+    let mut early_dcx = EarlyDiagCtxt::new(ErrorOutputType::default());
+    early_dcx.initialize_checked_jobserver();
 
-fn build_session_options_and_crate_config(matches: getopts::Matches) -> (Options, CfgSpecs) {
-    let sessopts = build_session_options(&matches);
-    let cfg = parse_cfgspecs(matches.opt_strs("cfg"));
-    (sessopts, cfg)
-}
-
-fn mk_session(matches: getopts::Matches) -> (Session, CfgSpecs) {
     let registry = registry::Registry::new(&[]);
-    let (sessopts, cfg) = build_session_options_and_crate_config(matches);
+    let sessopts = build_session_options(&mut early_dcx, &matches);
     let temps_dir = sessopts.unstable_opts.temps_dir.as_deref().map(PathBuf::from);
     let io = CompilerIO {
         input: Input::Str { name: FileName::Custom(String::new()), input: String::new() },
@@ -50,7 +37,22 @@ fn mk_session(matches: getopts::Matches) -> (Session, CfgSpecs) {
         output_file: None,
         temps_dir,
     };
-    let sess = build_session(sessopts, io, None, registry, vec![], Default::default(), None, None);
+    let sess = build_session(
+        early_dcx,
+        sessopts,
+        io,
+        None,
+        registry,
+        vec![],
+        Default::default(),
+        None,
+        None,
+        "",
+        None,
+        Arc::default(),
+        Default::default(),
+    );
+    let cfg = parse_cfg(&sess.dcx(), matches.opt_strs("cfg"));
     (sess, cfg)
 }
 
@@ -67,6 +69,7 @@ where
         is_private_dep: false,
         add_prelude: true,
         nounused_dep: false,
+        force: false,
     }
 }
 
@@ -117,7 +120,7 @@ fn test_switch_implies_cfg_test() {
     rustc_span::create_default_session_globals_then(|| {
         let matches = optgroups().parse(&["--test".to_string()]).unwrap();
         let (sess, cfg) = mk_session(matches);
-        let cfg = build_configuration(&sess, to_crate_config(cfg));
+        let cfg = build_configuration(&sess, cfg);
         assert!(cfg.contains(&(sym::test, None)));
     });
 }
@@ -128,7 +131,7 @@ fn test_switch_implies_cfg_test_unless_cfg_test() {
     rustc_span::create_default_session_globals_then(|| {
         let matches = optgroups().parse(&["--test".to_string(), "--cfg=test".to_string()]).unwrap();
         let (sess, cfg) = mk_session(matches);
-        let cfg = build_configuration(&sess, to_crate_config(cfg));
+        let cfg = build_configuration(&sess, cfg);
         let mut test_items = cfg.iter().filter(|&&(name, _)| name == sym::test);
         assert!(test_items.next().is_some());
         assert!(test_items.next().is_none());
@@ -140,20 +143,20 @@ fn test_can_print_warnings() {
     rustc_span::create_default_session_globals_then(|| {
         let matches = optgroups().parse(&["-Awarnings".to_string()]).unwrap();
         let (sess, _) = mk_session(matches);
-        assert!(!sess.diagnostic().can_emit_warnings());
+        assert!(!sess.dcx().can_emit_warnings());
     });
 
     rustc_span::create_default_session_globals_then(|| {
         let matches =
             optgroups().parse(&["-Awarnings".to_string(), "-Dwarnings".to_string()]).unwrap();
         let (sess, _) = mk_session(matches);
-        assert!(sess.diagnostic().can_emit_warnings());
+        assert!(sess.dcx().can_emit_warnings());
     });
 
     rustc_span::create_default_session_globals_then(|| {
         let matches = optgroups().parse(&["-Adead_code".to_string()]).unwrap();
         let (sess, _) = mk_session(matches);
-        assert!(sess.diagnostic().can_emit_warnings());
+        assert!(sess.dcx().can_emit_warnings());
     });
 }
 
@@ -163,8 +166,14 @@ fn test_output_types_tracking_hash_different_paths() {
     let mut v2 = Options::default();
     let mut v3 = Options::default();
 
-    v1.output_types = OutputTypes::new(&[(OutputType::Exe, Some(PathBuf::from("./some/thing")))]);
-    v2.output_types = OutputTypes::new(&[(OutputType::Exe, Some(PathBuf::from("/some/thing")))]);
+    v1.output_types = OutputTypes::new(&[(
+        OutputType::Exe,
+        Some(OutFileName::Real(PathBuf::from("./some/thing"))),
+    )]);
+    v2.output_types = OutputTypes::new(&[(
+        OutputType::Exe,
+        Some(OutFileName::Real(PathBuf::from("/some/thing"))),
+    )]);
     v3.output_types = OutputTypes::new(&[(OutputType::Exe, None)]);
 
     assert_non_crate_hash_different(&v1, &v2);
@@ -178,13 +187,13 @@ fn test_output_types_tracking_hash_different_construction_order() {
     let mut v2 = Options::default();
 
     v1.output_types = OutputTypes::new(&[
-        (OutputType::Exe, Some(PathBuf::from("./some/thing"))),
-        (OutputType::Bitcode, Some(PathBuf::from("./some/thing.bc"))),
+        (OutputType::Exe, Some(OutFileName::Real(PathBuf::from("./some/thing")))),
+        (OutputType::Bitcode, Some(OutFileName::Real(PathBuf::from("./some/thing.bc")))),
     ]);
 
     v2.output_types = OutputTypes::new(&[
-        (OutputType::Bitcode, Some(PathBuf::from("./some/thing.bc"))),
-        (OutputType::Exe, Some(PathBuf::from("./some/thing"))),
+        (OutputType::Bitcode, Some(OutFileName::Real(PathBuf::from("./some/thing.bc")))),
+        (OutputType::Exe, Some(OutFileName::Real(PathBuf::from("./some/thing")))),
     ]);
 
     assert_same_hash(&v1, &v2);
@@ -292,35 +301,36 @@ fn test_search_paths_tracking_hash_different_order() {
     let mut v3 = Options::default();
     let mut v4 = Options::default();
 
+    let early_dcx = EarlyDiagCtxt::new(JSON);
     const JSON: ErrorOutputType = ErrorOutputType::Json {
         pretty: false,
         json_rendered: HumanReadableErrorType::Default(ColorConfig::Never),
     };
 
     // Reference
-    v1.search_paths.push(SearchPath::from_cli_opt("native=abc", JSON));
-    v1.search_paths.push(SearchPath::from_cli_opt("crate=def", JSON));
-    v1.search_paths.push(SearchPath::from_cli_opt("dependency=ghi", JSON));
-    v1.search_paths.push(SearchPath::from_cli_opt("framework=jkl", JSON));
-    v1.search_paths.push(SearchPath::from_cli_opt("all=mno", JSON));
+    v1.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "native=abc"));
+    v1.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "crate=def"));
+    v1.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "dependency=ghi"));
+    v1.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "framework=jkl"));
+    v1.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "all=mno"));
 
-    v2.search_paths.push(SearchPath::from_cli_opt("native=abc", JSON));
-    v2.search_paths.push(SearchPath::from_cli_opt("dependency=ghi", JSON));
-    v2.search_paths.push(SearchPath::from_cli_opt("crate=def", JSON));
-    v2.search_paths.push(SearchPath::from_cli_opt("framework=jkl", JSON));
-    v2.search_paths.push(SearchPath::from_cli_opt("all=mno", JSON));
+    v2.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "native=abc"));
+    v2.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "dependency=ghi"));
+    v2.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "crate=def"));
+    v2.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "framework=jkl"));
+    v2.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "all=mno"));
 
-    v3.search_paths.push(SearchPath::from_cli_opt("crate=def", JSON));
-    v3.search_paths.push(SearchPath::from_cli_opt("framework=jkl", JSON));
-    v3.search_paths.push(SearchPath::from_cli_opt("native=abc", JSON));
-    v3.search_paths.push(SearchPath::from_cli_opt("dependency=ghi", JSON));
-    v3.search_paths.push(SearchPath::from_cli_opt("all=mno", JSON));
+    v3.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "crate=def"));
+    v3.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "framework=jkl"));
+    v3.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "native=abc"));
+    v3.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "dependency=ghi"));
+    v3.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "all=mno"));
 
-    v4.search_paths.push(SearchPath::from_cli_opt("all=mno", JSON));
-    v4.search_paths.push(SearchPath::from_cli_opt("native=abc", JSON));
-    v4.search_paths.push(SearchPath::from_cli_opt("crate=def", JSON));
-    v4.search_paths.push(SearchPath::from_cli_opt("dependency=ghi", JSON));
-    v4.search_paths.push(SearchPath::from_cli_opt("framework=jkl", JSON));
+    v4.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "all=mno"));
+    v4.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "native=abc"));
+    v4.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "crate=def"));
+    v4.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "dependency=ghi"));
+    v4.search_paths.push(SearchPath::from_cli_opt(&early_dcx, "framework=jkl"));
 
     assert_same_hash(&v1, &v2);
     assert_same_hash(&v1, &v3);
@@ -545,11 +555,12 @@ fn test_codegen_options_tracking_hash() {
     untracked!(ar, String::from("abc"));
     untracked!(codegen_units, Some(42));
     untracked!(default_linker_libraries, true);
+    untracked!(dlltool, Some(PathBuf::from("custom_dlltool.exe")));
     untracked!(extra_filename, String::from("extra-filename"));
     untracked!(incremental, Some(String::from("abc")));
     // `link_arg` is omitted because it just forwards to `link_args`.
     untracked!(link_args, vec![String::from("abc"), String::from("def")]);
-    untracked!(link_self_contained, Some(true));
+    untracked!(link_self_contained, LinkSelfContained::on());
     untracked!(linker, Some(PathBuf::from("linker")));
     untracked!(linker_flavor, Some(LinkerFlavorCli::Gcc));
     untracked!(no_stack_check, true);
@@ -573,12 +584,12 @@ fn test_codegen_options_tracking_hash() {
     tracked!(code_model, Some(CodeModel::Large));
     tracked!(control_flow_guard, CFGuard::Checks);
     tracked!(debug_assertions, Some(true));
-    tracked!(debuginfo, 0xdeadbeef);
+    tracked!(debuginfo, DebugInfo::Limited);
     tracked!(embed_bitcode, false);
     tracked!(force_frame_pointers, Some(false));
     tracked!(force_unwind_tables, Some(true));
     tracked!(inline_threshold, Some(0xf007ba11));
-    tracked!(instrument_coverage, Some(InstrumentCoverage::All));
+    tracked!(instrument_coverage, InstrumentCoverage::All);
     tracked!(link_dead_code, Some(true));
     tracked!(linker_plugin_lto, LinkerPluginLto::LinkerPluginAuto);
     tracked!(llvm_args, vec![String::from("1"), String::from("2")]);
@@ -648,11 +659,8 @@ fn test_unstable_options_tracking_hash() {
     // tidy-alphabetical-start
     untracked!(assert_incr_state, Some(String::from("loaded")));
     untracked!(deduplicate_diagnostics, false);
-    untracked!(dep_tasks, true);
-    untracked!(dlltool, Some(PathBuf::from("custom_dlltool.exe")));
     untracked!(dont_buffer_diagnostics, true);
     untracked!(dump_dep_graph, true);
-    untracked!(dump_drop_tracking_cfg, Some("cfg.dot".to_string()));
     untracked!(dump_mir, Some(String::from("abc")));
     untracked!(dump_mir_dataflow, true);
     untracked!(dump_mir_dir, String::from("abc"));
@@ -669,21 +677,20 @@ fn test_unstable_options_tracking_hash() {
     untracked!(incremental_info, true);
     untracked!(incremental_verify_ich, true);
     untracked!(input_stats, true);
-    untracked!(keep_hygiene_data, true);
     untracked!(link_native_libraries, false);
     untracked!(llvm_time_trace, true);
-    untracked!(ls, true);
+    untracked!(ls, vec!["all".to_owned()]);
     untracked!(macro_backtrace, true);
     untracked!(meta_stats, true);
-    untracked!(mir_pretty_relative_line_numbers, true);
+    untracked!(mir_include_spans, true);
     untracked!(nll_facts, true);
     untracked!(no_analysis, true);
     untracked!(no_leak_check, true);
     untracked!(no_parallel_llvm, true);
     untracked!(parse_only, true);
-    untracked!(perf_stats, true);
     // `pre_link_arg` is omitted because it just forwards to `pre_link_args`.
     untracked!(pre_link_args, vec![String::from("abc"), String::from("def")]);
+    untracked!(print_codegen_stats, true);
     untracked!(print_llvm_passes, true);
     untracked!(print_mono_items, Some(String::from("abc")));
     untracked!(print_type_sizes, true);
@@ -699,6 +706,7 @@ fn test_unstable_options_tracking_hash() {
     untracked!(threads, 99);
     untracked!(time_llvm_passes, true);
     untracked!(time_passes, true);
+    untracked!(time_passes_format, TimePassesFormat::Json);
     untracked!(trace_macros, true);
     untracked!(track_diagnostics, true);
     untracked!(trim_diagnostic_paths, false);
@@ -707,6 +715,7 @@ fn test_unstable_options_tracking_hash() {
     untracked!(unstable_options, true);
     untracked!(validate_mir, true);
     untracked!(verbose, true);
+    untracked!(write_long_types_to_disk, false);
     // tidy-alphabetical-end
 
     macro_rules! tracked {
@@ -735,17 +744,20 @@ fn test_unstable_options_tracking_hash() {
     );
     tracked!(codegen_backend, Some("abc".to_string()));
     tracked!(crate_attr, vec!["abc".to_string()]);
+    tracked!(cross_crate_inline_threshold, InliningThreshold::Always);
     tracked!(debug_info_for_profiling, true);
     tracked!(debug_macros, true);
+    tracked!(default_hidden_visibility, Some(true));
     tracked!(dep_info_omit_d_target, true);
-    tracked!(drop_tracking, true);
     tracked!(dual_proc_macros, true);
     tracked!(dwarf_version, Some(5));
     tracked!(emit_thin_lto, false);
     tracked!(export_executable_symbols, true);
     tracked!(fewer_names, Some(true));
+    tracked!(flatten_format_args, false);
     tracked!(force_unstable_if_unmarked, true);
     tracked!(fuel, Some(("abc".to_string(), 99)));
+    tracked!(function_return, FunctionReturn::ThunkExtern);
     tracked!(function_sections, Some(false));
     tracked!(human_readable_cgu_names, true);
     tracked!(incremental_ignore_spans, true);
@@ -753,24 +765,30 @@ fn test_unstable_options_tracking_hash() {
     tracked!(inline_mir, Some(true));
     tracked!(inline_mir_hint_threshold, Some(123));
     tracked!(inline_mir_threshold, Some(123));
-    tracked!(instrument_coverage, Some(InstrumentCoverage::All));
     tracked!(instrument_mcount, true);
     tracked!(instrument_xray, Some(InstrumentXRay::default()));
     tracked!(link_directives, false);
     tracked!(link_only, true);
+    tracked!(llvm_module_flag, vec![("bar".to_string(), 123, "max".to_string())]);
     tracked!(llvm_plugins, vec![String::from("plugin_name")]);
     tracked!(location_detail, LocationDetail { file: true, line: false, column: false });
     tracked!(maximal_hir_to_mir_coverage, true);
     tracked!(merge_functions, Some(MergeFunctions::Disabled));
     tracked!(mir_emit_retag, true);
     tracked!(mir_enable_passes, vec![("DestProp".to_string(), false)]);
+    tracked!(mir_keep_place_mention, true);
     tracked!(mir_opt_level, Some(4));
     tracked!(move_size_limit, Some(4096));
     tracked!(mutable_noalias, false);
+    tracked!(
+        next_solver,
+        Some(NextSolverConfig { coherence: true, globally: false, dump_tree: Default::default() })
+    );
     tracked!(no_generate_arange_section, true);
     tracked!(no_jump_tables, true);
     tracked!(no_link, true);
     tracked!(no_profiler_runtime, true);
+    tracked!(no_trait_vptr, true);
     tracked!(no_unique_section_names, true);
     tracked!(oom, OomStrategy::Panic);
     tracked!(osx_rpath_install_name, true);
@@ -778,7 +796,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(panic_abort_tests, true);
     tracked!(panic_in_drop, PanicStrategy::Abort);
     tracked!(plt, Some(true));
-    tracked!(polonius, true);
+    tracked!(polonius, Polonius::Legacy);
     tracked!(precise_enum_drop_elaboration, false);
     tracked!(print_fuel, Some("abc".to_string()));
     tracked!(profile, true);
@@ -790,21 +808,23 @@ fn test_unstable_options_tracking_hash() {
     tracked!(remap_cwd_prefix, Some(PathBuf::from("abc")));
     tracked!(report_delayed_bugs, true);
     tracked!(sanitizer, SanitizerSet::ADDRESS);
+    tracked!(sanitizer_cfi_canonical_jump_tables, None);
+    tracked!(sanitizer_cfi_generalize_pointers, Some(true));
+    tracked!(sanitizer_cfi_normalize_integers, Some(true));
     tracked!(sanitizer_memory_track_origins, 2);
     tracked!(sanitizer_recover, SanitizerSet::ADDRESS);
     tracked!(saturating_float_casts, Some(true));
     tracked!(share_generics, Some(true));
     tracked!(show_span, Some(String::from("abc")));
     tracked!(simulate_remapped_rust_src_base, Some(PathBuf::from("/rustc/abc")));
+    tracked!(split_lto_unit, Some(true));
     tracked!(src_hash_algorithm, Some(SourceFileHashAlgorithm::Sha1));
     tracked!(stack_protector, StackProtector::All);
-    tracked!(symbol_mangling_version, Some(SymbolManglingVersion::V0));
     tracked!(teach, true);
     tracked!(thinlto, Some(true));
     tracked!(thir_unsafeck, true);
     tracked!(tiny_const_eval_limit, true);
     tracked!(tls_model, Some(TlsModel::GeneralDynamic));
-    tracked!(trait_solver, TraitSolver::Chalk);
     tracked!(translate_remapped_path_to_local_path, false);
     tracked!(trap_unreachable, Some(false));
     tracked!(treat_err_as_bug, NonZeroUsize::new(1));
@@ -834,7 +854,9 @@ fn test_edition_parsing() {
     let options = Options::default();
     assert!(options.edition == DEFAULT_EDITION);
 
+    let mut early_dcx = EarlyDiagCtxt::new(ErrorOutputType::default());
+
     let matches = optgroups().parse(&["--edition=2018".to_string()]).unwrap();
-    let (sessopts, _) = build_session_options_and_crate_config(matches);
+    let sessopts = build_session_options(&mut early_dcx, &matches);
     assert!(sessopts.edition == Edition::Edition2018)
 }

@@ -13,42 +13,33 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         ast_block: BlockId,
         source_info: SourceInfo,
     ) -> BlockAnd<()> {
-        let Block {
-            region_scope,
-            opt_destruction_scope,
-            span,
-            ref stmts,
-            expr,
-            targeted_by_break,
-            safety_mode,
-        } = self.thir[ast_block];
+        let Block { region_scope, span, ref stmts, expr, targeted_by_break, safety_mode } =
+            self.thir[ast_block];
         let expr = expr.map(|expr| &self.thir[expr]);
-        self.in_opt_scope(opt_destruction_scope.map(|de| (de, source_info)), move |this| {
-            this.in_scope((region_scope, source_info), LintLevel::Inherited, move |this| {
-                if targeted_by_break {
-                    this.in_breakable_scope(None, destination, span, |this| {
-                        Some(this.ast_block_stmts(
-                            destination,
-                            block,
-                            span,
-                            &stmts,
-                            expr,
-                            safety_mode,
-                            region_scope,
-                        ))
-                    })
-                } else {
-                    this.ast_block_stmts(
+        self.in_scope((region_scope, source_info), LintLevel::Inherited, move |this| {
+            if targeted_by_break {
+                this.in_breakable_scope(None, destination, span, |this| {
+                    Some(this.ast_block_stmts(
                         destination,
                         block,
                         span,
-                        &stmts,
+                        stmts,
                         expr,
                         safety_mode,
                         region_scope,
-                    )
-                }
-            })
+                    ))
+                })
+            } else {
+                this.ast_block_stmts(
+                    destination,
+                    block,
+                    span,
+                    stmts,
+                    expr,
+                    safety_mode,
+                    region_scope,
+                )
+            }
         })
     }
 
@@ -92,20 +83,15 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
         let source_info = this.source_info(span);
         for stmt in stmts {
-            let Stmt { ref kind, opt_destruction_scope } = this.thir[*stmt];
+            let Stmt { ref kind } = this.thir[*stmt];
             match kind {
                 StmtKind::Expr { scope, expr } => {
                     this.block_context.push(BlockFrame::Statement { ignores_expr_result: true });
+                    let si = (*scope, source_info);
                     unpack!(
-                        block = this.in_opt_scope(
-                            opt_destruction_scope.map(|de| (de, source_info)),
-                            |this| {
-                                let si = (*scope, source_info);
-                                this.in_scope(si, LintLevel::Inherited, |this| {
-                                    this.stmt_expr(block, &this.thir[*expr], Some(*scope))
-                                })
-                            }
-                        )
+                        block = this.in_scope(si, LintLevel::Inherited, |this| {
+                            this.stmt_expr(block, &this.thir[*expr], Some(*scope))
+                        })
                     );
                 }
                 StmtKind::Let {
@@ -115,6 +101,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     initializer: Some(initializer),
                     lint_level,
                     else_block: Some(else_block),
+                    span: _,
                 } => {
                     // When lowering the statement `let <pat> = <expr> else { <else> };`,
                     // the `<else>` block is nested in the parent scope enclosing this statement.
@@ -220,43 +207,38 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                     let init = &this.thir[*initializer];
                     let initializer_span = init.span;
+                    let scope = (*init_scope, source_info);
                     let failure = unpack!(
-                        block = this.in_opt_scope(
-                            opt_destruction_scope.map(|de| (de, source_info)),
-                            |this| {
-                                let scope = (*init_scope, source_info);
-                                this.in_scope(scope, *lint_level, |this| {
-                                    this.declare_bindings(
-                                        visibility_scope,
-                                        remainder_span,
-                                        pattern,
-                                        None,
-                                        Some((Some(&destination), initializer_span)),
-                                    );
-                                    this.visit_primary_bindings(
-                                        pattern,
-                                        UserTypeProjections::none(),
-                                        &mut |this, _, _, _, node, span, _, _| {
-                                            this.storage_live_binding(
-                                                block,
-                                                node,
-                                                span,
-                                                OutsideGuard,
-                                                true,
-                                            );
-                                        },
-                                    );
-                                    this.ast_let_else(
+                        block = this.in_scope(scope, *lint_level, |this| {
+                            this.declare_bindings(
+                                visibility_scope,
+                                remainder_span,
+                                pattern,
+                                None,
+                                Some((Some(&destination), initializer_span)),
+                            );
+                            this.visit_primary_bindings(
+                                pattern,
+                                UserTypeProjections::none(),
+                                &mut |this, _, _, _, node, span, _, _| {
+                                    this.storage_live_binding(
                                         block,
-                                        init,
-                                        initializer_span,
-                                        *else_block,
-                                        &last_remainder_scope,
-                                        pattern,
-                                    )
-                                })
-                            }
-                        )
+                                        node,
+                                        span,
+                                        OutsideGuard,
+                                        true,
+                                    );
+                                },
+                            );
+                            this.ast_let_else(
+                                block,
+                                init,
+                                initializer_span,
+                                *else_block,
+                                &last_remainder_scope,
+                                pattern,
+                            )
+                        })
                     );
                     this.cfg.goto(failure, source_info, failure_entry);
 
@@ -278,6 +260,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     initializer,
                     lint_level,
                     else_block: None,
+                    span: _,
                 } => {
                     let ignores_expr_result = matches!(pattern.kind, PatKind::Wild);
                     this.block_context.push(BlockFrame::Statement { ignores_expr_result });
@@ -296,25 +279,20 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     if let Some(init) = initializer {
                         let init = &this.thir[*init];
                         let initializer_span = init.span;
+                        let scope = (*init_scope, source_info);
 
                         unpack!(
-                            block = this.in_opt_scope(
-                                opt_destruction_scope.map(|de| (de, source_info)),
-                                |this| {
-                                    let scope = (*init_scope, source_info);
-                                    this.in_scope(scope, *lint_level, |this| {
-                                        this.declare_bindings(
-                                            visibility_scope,
-                                            remainder_span,
-                                            pattern,
-                                            None,
-                                            Some((None, initializer_span)),
-                                        );
-                                        this.expr_into_pattern(block, &pattern, init)
-                                        // irrefutable pattern
-                                    })
-                                },
-                            )
+                            block = this.in_scope(scope, *lint_level, |this| {
+                                this.declare_bindings(
+                                    visibility_scope,
+                                    remainder_span,
+                                    pattern,
+                                    None,
+                                    Some((None, initializer_span)),
+                                );
+                                this.expr_into_pattern(block, &pattern, init)
+                                // irrefutable pattern
+                            })
                         )
                     } else {
                         let scope = (*init_scope, source_info);
@@ -349,7 +327,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
 
             let popped = this.block_context.pop();
-            assert!(popped.map_or(false, |bf| bf.is_statement()));
+            assert!(popped.is_some_and(|bf| bf.is_statement()));
         }
 
         // Then, the block may have an optional trailing expression which is a “return” value
@@ -365,7 +343,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             unpack!(block = this.expr_into_dest(destination, block, expr));
             let popped = this.block_context.pop();
 
-            assert!(popped.map_or(false, |bf| bf.is_tail_expr()));
+            assert!(popped.is_some_and(|bf| bf.is_tail_expr()));
         } else {
             // If a block has no trailing expression, then it is given an implicit return type.
             // This return type is usually `()`, unless the block is diverging, in which case the

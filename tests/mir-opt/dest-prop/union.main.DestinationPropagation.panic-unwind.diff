@@ -1,0 +1,25 @@
+- // MIR for `main` before DestinationPropagation
++ // MIR for `main` after DestinationPropagation
+  
+  fn main() -> () {
+      let mut _0: ();
+      let _1: main::Un;
+      scope 1 {
+          debug un => _1;
+          scope 2 {
+          }
+          scope 4 (inlined std::mem::drop::<u32>) {
+              debug _x => const 1_u32;
+          }
+      }
+      scope 3 (inlined val) {
+      }
+  
+      bb0: {
+          StorageLive(_1);
+          _1 = Un { us: const 1_u32 };
+          StorageDead(_1);
+          return;
+      }
+  }
+  

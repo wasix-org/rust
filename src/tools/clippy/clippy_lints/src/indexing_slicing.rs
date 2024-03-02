@@ -7,7 +7,7 @@ use rustc_ast::ast::RangeLimits;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_session::impl_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -26,7 +26,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let x = [1, 2, 3, 4];
     /// // Index within bounds
     ///
@@ -65,7 +65,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # #![allow(unused)]
     ///
     /// # let x = vec![0; 5];
@@ -103,7 +103,7 @@ impl<'tcx> LateLintPass<'tcx> for IndexingSlicing {
             return;
         }
 
-        if let ExprKind::Index(array, index) = &expr.kind {
+        if let ExprKind::Index(array, index, _) = &expr.kind {
             let note = "the suggestion might not be applicable in constant blocks";
             let ty = cx.typeck_results().expr_ty(array).peel_refs();
             if let Some(range) = higher::Range::hir(index) {
@@ -170,7 +170,7 @@ impl<'tcx> LateLintPass<'tcx> for IndexingSlicing {
                         return;
                     }
                     // Index is a constant uint.
-                    if let Some(..) = constant(cx, cx.typeck_results(), index) {
+                    if constant(cx, cx.typeck_results(), index).is_some() {
                         // Let rustc's `const_err` lint handle constant `usize` indexing on arrays.
                         return;
                     }
@@ -191,18 +191,14 @@ impl<'tcx> LateLintPass<'tcx> for IndexingSlicing {
 /// Returns a tuple of options with the start and end (exclusive) values of
 /// the range. If the start or end is not constant, None is returned.
 fn to_const_range(cx: &LateContext<'_>, range: higher::Range<'_>, array_size: u128) -> (Option<u128>, Option<u128>) {
-    let s = range
-        .start
-        .map(|expr| constant(cx, cx.typeck_results(), expr).map(|(c, _)| c));
+    let s = range.start.map(|expr| constant(cx, cx.typeck_results(), expr));
     let start = match s {
         Some(Some(Constant::Int(x))) => Some(x),
         Some(_) => None,
         None => Some(0),
     };
 
-    let e = range
-        .end
-        .map(|expr| constant(cx, cx.typeck_results(), expr).map(|(c, _)| c));
+    let e = range.end.map(|expr| constant(cx, cx.typeck_results(), expr));
     let end = match e {
         Some(Some(Constant::Int(x))) => {
             if range.limits == RangeLimits::Closed {

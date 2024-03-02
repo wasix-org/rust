@@ -1,11 +1,10 @@
-use clippy_utils::{
-    diagnostics::span_lint_and_sugg, is_res_lang_ctor, path_res, peel_hir_expr_refs, peel_ref_operators, sugg,
-    ty::is_type_diagnostic_item,
-};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::ty::is_type_diagnostic_item;
+use clippy_utils::{is_res_lang_ctor, path_res, peel_hir_expr_refs, peel_ref_operators, sugg};
 use rustc_errors::Applicability;
 use rustc_hir::{BinOpKind, Expr, ExprKind, LangItem};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
 declare_clippy_lint! {
@@ -22,13 +21,13 @@ declare_clippy_lint! {
     /// way relies on `T: PartialEq` to do the comparison, which is unneeded.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn foo(f: Option<u32>) -> &'static str {
     ///     if f != None { "yay" } else { "nay" }
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// fn foo(f: Option<u32>) -> &'static str {
     ///     if f.is_some() { "yay" } else { "nay" }
     /// }

@@ -1,3 +1,4 @@
+use hir::TypeInfo;
 use stdx::format_to;
 use syntax::{
     ast::{self, AstNode},
@@ -28,39 +29,51 @@ use crate::{utils::suggest_name, AssistContext, AssistId, AssistKind, Assists};
 // }
 // ```
 pub(crate) fn extract_variable(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
-    if ctx.has_empty_selection() {
+    let node = if ctx.has_empty_selection() {
+        if let Some(expr_stmt) = ctx.find_node_at_offset::<ast::ExprStmt>() {
+            expr_stmt.syntax().clone()
+        } else if let Some(expr) = ctx.find_node_at_offset::<ast::Expr>() {
+            expr.syntax().ancestors().find_map(valid_target_expr)?.syntax().clone()
+        } else {
+            return None;
+        }
+    } else {
+        match ctx.covering_element() {
+            NodeOrToken::Node(it) => it,
+            NodeOrToken::Token(it) if it.kind() == COMMENT => {
+                cov_mark::hit!(extract_var_in_comment_is_not_applicable);
+                return None;
+            }
+            NodeOrToken::Token(it) => it.parent()?,
+        }
+    };
+
+    let node = node.ancestors().take_while(|anc| anc.text_range() == node.text_range()).last()?;
+    let range = node.text_range();
+
+    let to_extract = node
+        .descendants()
+        .take_while(|it| range.contains_range(it.text_range()))
+        .find_map(valid_target_expr)?;
+
+    let ty = ctx.sema.type_of_expr(&to_extract).map(TypeInfo::adjusted);
+    if matches!(&ty, Some(ty_info) if ty_info.is_unit()) {
         return None;
     }
 
-    let node = match ctx.covering_element() {
-        NodeOrToken::Node(it) => it,
-        NodeOrToken::Token(it) if it.kind() == COMMENT => {
-            cov_mark::hit!(extract_var_in_comment_is_not_applicable);
-            return None;
-        }
-        NodeOrToken::Token(it) => it.parent()?,
-    };
-    let node = node.ancestors().take_while(|anc| anc.text_range() == node.text_range()).last()?;
-    let to_extract = node
-        .descendants()
-        .take_while(|it| ctx.selection_trimmed().contains_range(it.text_range()))
-        .find_map(valid_target_expr)?;
+    let parent = to_extract.syntax().parent().and_then(ast::Expr::cast);
+    let needs_adjust = parent
+        .as_ref()
+        .map_or(false, |it| matches!(it, ast::Expr::FieldExpr(_) | ast::Expr::MethodCallExpr(_)));
 
-    if let Some(ty_info) = ctx.sema.type_of_expr(&to_extract) {
-        if ty_info.adjusted().is_unit() {
-            return None;
-        }
-    }
-
-    let reference_modifier = match get_receiver_type(ctx, &to_extract) {
+    let reference_modifier = match ty.filter(|_| needs_adjust) {
         Some(receiver_type) if receiver_type.is_mutable_reference() => "&mut ",
         Some(receiver_type) if receiver_type.is_reference() => "&",
         _ => "",
     };
 
-    let parent_ref_expr = to_extract.syntax().parent().and_then(ast::RefExpr::cast);
-    let var_modifier = match parent_ref_expr {
-        Some(expr) if expr.mut_token().is_some() => "mut ",
+    let var_modifier = match parent {
+        Some(ast::Expr::RefExpr(expr)) if expr.mut_token().is_some() => "mut ",
         _ => "",
     };
 
@@ -164,22 +177,6 @@ fn valid_target_expr(node: SyntaxNode) -> Option<ast::Expr> {
     }
 }
 
-fn get_receiver_type(ctx: &AssistContext<'_>, expression: &ast::Expr) -> Option<hir::Type> {
-    let receiver = get_receiver(expression.clone())?;
-    Some(ctx.sema.type_of_expr(&receiver)?.original())
-}
-
-/// In the expression `a.b.c.x()`, find `a`
-fn get_receiver(expression: ast::Expr) -> Option<ast::Expr> {
-    match expression {
-        ast::Expr::FieldExpr(field) if field.expr().is_some() => {
-            let nested_expression = &field.expr()?;
-            get_receiver(nested_expression.to_owned())
-        }
-        _ => Some(expression),
-    }
-}
-
 #[derive(Debug)]
 enum Anchor {
     Before(SyntaxNode),
@@ -248,6 +245,138 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_extract_var_simple_without_select() {
+        check_assist(
+            extract_variable,
+            r#"
+fn main() -> i32 {
+    if true {
+        1
+    } else {
+        2
+    }$0
+}
+"#,
+            r#"
+fn main() -> i32 {
+    let $0var_name = if true {
+        1
+    } else {
+        2
+    };
+    var_name
+}
+"#,
+        );
+
+        check_assist(
+            extract_variable,
+            r#"
+fn foo() -> i32 { 1 }
+fn main() {
+    foo();$0
+}
+"#,
+            r#"
+fn foo() -> i32 { 1 }
+fn main() {
+    let $0foo = foo();
+}
+"#,
+        );
+
+        check_assist(
+            extract_variable,
+            r#"
+fn main() {
+    let a = Some(2);
+    a.is_some();$0
+}
+"#,
+            r#"
+fn main() {
+    let a = Some(2);
+    let $0is_some = a.is_some();
+}
+"#,
+        );
+
+        check_assist(
+            extract_variable,
+            r#"
+fn main() {
+    "hello"$0;
+}
+"#,
+            r#"
+fn main() {
+    let $0var_name = "hello";
+}
+"#,
+        );
+
+        check_assist(
+            extract_variable,
+            r#"
+fn main() {
+    1  + 2$0;
+}
+"#,
+            r#"
+fn main() {
+    let $0var_name = 1  + 2;
+}
+"#,
+        );
+
+        check_assist(
+            extract_variable,
+            r#"
+fn main() {
+    match () {
+        () if true => 1,
+        _ => 2,
+    };$0
+}
+"#,
+            r#"
+fn main() {
+    let $0var_name = match () {
+        () if true => 1,
+        _ => 2,
+    };
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn test_extract_var_unit_expr_without_select_not_applicable() {
+        check_assist_not_applicable(
+            extract_variable,
+            r#"
+fn foo() {}
+fn main() {
+    foo()$0;
+}
+"#,
+        );
+
+        check_assist_not_applicable(
+            extract_variable,
+            r#"
+fn foo() {
+    let mut i = 3;
+    if i >= 0 {
+        i += 1;
+    } else {
+        i -= 1;
+    }$0
+}"#,
+        );
+    }
+
+    #[test]
     fn test_extract_var_simple() {
         check_assist(
             extract_variable,
@@ -287,7 +416,7 @@ fn foo() {
             extract_variable,
             r"
 fn foo() {
-    $0{ let x = 0; x }$0
+    $0{ let x = 0; x }$0;
     something_else();
 }",
             r"
@@ -944,12 +1073,22 @@ struct S {
     vec: Vec<u8>
 }
 
+struct Vec<T>;
+impl<T> Vec<T> {
+    fn push(&mut self, _:usize) {}
+}
+
 fn foo(s: &mut S) {
     $0s.vec$0.push(0);
 }"#,
             r#"
 struct S {
     vec: Vec<u8>
+}
+
+struct Vec<T>;
+impl<T> Vec<T> {
+    fn push(&mut self, _:usize) {}
 }
 
 fn foo(s: &mut S) {
@@ -973,6 +1112,10 @@ struct X {
 struct S {
     vec: Vec<u8>
 }
+struct Vec<T>;
+impl<T> Vec<T> {
+    fn push(&mut self, _:usize) {}
+}
 
 fn foo(f: &mut Y) {
     $0f.field.field.vec$0.push(0);
@@ -986,6 +1129,10 @@ struct X {
 }
 struct S {
     vec: Vec<u8>
+}
+struct Vec<T>;
+impl<T> Vec<T> {
+    fn push(&mut self, _:usize) {}
 }
 
 fn foo(f: &mut Y) {
@@ -1123,7 +1270,7 @@ struct S {
 }
 
 fn foo(s: S) {
-    let $0x = s.sub;
+    let $0x = &s.sub;
     x.do_thing();
 }"#,
         );
@@ -1189,7 +1336,7 @@ impl X {
 
 fn foo() {
     let local = &mut S::new();
-    let $0x = &mut local.sub;
+    let $0x = &local.sub;
     x.do_thing();
 }"#,
         );

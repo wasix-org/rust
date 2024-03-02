@@ -1,22 +1,20 @@
 // https://github.com/rust-lang/rust/issues/100252
 
-#![feature(no_core)]
-#![no_core]
-
 mod bar {
-    // @set baz = "$.index[*][?(@.kind=='struct')].id"
+    // @set baz = "$.index[*][?(@.name == 'Baz')].id"
     pub struct Baz;
-    // @set impl = "$.index[*][?(@.kind=='impl')].id"
+    // @set impl = "$.index[*][?(@.docs == 'impl')].id"
+    /// impl
     impl Baz {
-        // @set doit = "$.index[*][?(@.kind=='function')].id"
+        // @set doit = "$.index[*][?(@.name == 'doit')].id"
         pub fn doit() {}
     }
 }
 
-// @set import = "$.index[*][?(@.kind=='import')].id"
+// @set import = "$.index[*][?(@.inner.import)].id"
 pub use bar::Baz;
 
-// @is "$.index[*][?(@.kind=='module')].inner.items[*]" $import
-// @is "$.index[*][?(@.kind=='import')].inner.id" $baz
-// @is "$.index[*][?(@.kind=='struct')].inner.impls[*]" $impl
-// @is "$.index[*][?(@.kind=='impl')].inner.items[*]" $doit
+// @is "$.index[*].inner.module.items[*]" $import
+// @is "$.index[*].inner.import.id" $baz
+// @has "$.index[*][?(@.name == 'Baz')].inner.struct.impls[*]" $impl
+// @is "$.index[*][?(@.docs=='impl')].inner.impl.items[*]" $doit

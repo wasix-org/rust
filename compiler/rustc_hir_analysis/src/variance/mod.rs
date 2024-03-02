@@ -6,8 +6,8 @@
 use rustc_arena::DroplessArena;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_middle::ty::query::Providers;
-use rustc_middle::ty::{self, CrateVariancesMap, SubstsRef, Ty, TyCtxt};
+use rustc_middle::query::Providers;
+use rustc_middle::ty::{self, CrateVariancesMap, GenericArgsRef, Ty, TyCtxt};
 use rustc_middle::ty::{TypeSuperVisitable, TypeVisitable};
 use std::ops::ControlFlow;
 
@@ -38,7 +38,7 @@ fn crate_variances(tcx: TyCtxt<'_>, (): ()) -> CrateVariancesMap<'_> {
     solve::solve_constraints(constraints_cx)
 }
 
-fn variances_of(tcx: TyCtxt<'_>, item_def_id: DefId) -> &[ty::Variance] {
+fn variances_of(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Variance] {
     // Skip items with no generics - there's nothing to infer in them.
     if tcx.generics_of(item_def_id).count() == 0 {
         return &[];
@@ -51,20 +51,24 @@ fn variances_of(tcx: TyCtxt<'_>, item_def_id: DefId) -> &[ty::Variance] {
         | DefKind::Struct
         | DefKind::Union
         | DefKind::Variant
-        | DefKind::Ctor(..) => {}
-        DefKind::OpaqueTy | DefKind::ImplTraitPlaceholder => {
-            return variance_of_opaque(tcx, item_def_id.expect_local());
+        | DefKind::Ctor(..) => {
+            // These are inferred.
+            let crate_map = tcx.crate_variances(());
+            return crate_map.variances.get(&item_def_id.to_def_id()).copied().unwrap_or(&[]);
         }
-        _ => {
-            // Variance not relevant.
-            span_bug!(tcx.def_span(item_def_id), "asked to compute variance for wrong kind of item")
+        DefKind::TyAlias if tcx.type_alias_is_lazy(item_def_id) => {
+            // These are inferred.
+            let crate_map = tcx.crate_variances(());
+            return crate_map.variances.get(&item_def_id.to_def_id()).copied().unwrap_or(&[]);
         }
+        DefKind::OpaqueTy => {
+            return variance_of_opaque(tcx, item_def_id);
+        }
+        _ => {}
     }
 
-    // Everything else must be inferred.
-
-    let crate_map = tcx.crate_variances(());
-    crate_map.variances.get(&item_def_id).copied().unwrap_or(&[])
+    // Variance not relevant.
+    span_bug!(tcx.def_span(item_def_id), "asked to compute variance for wrong kind of item");
 }
 
 #[instrument(level = "trace", skip(tcx), ret)]
@@ -84,17 +88,17 @@ fn variance_of_opaque(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Varianc
 
     impl<'tcx> OpaqueTypeLifetimeCollector<'tcx> {
         #[instrument(level = "trace", skip(self), ret)]
-        fn visit_opaque(&mut self, def_id: DefId, substs: SubstsRef<'tcx>) -> ControlFlow<!> {
+        fn visit_opaque(&mut self, def_id: DefId, args: GenericArgsRef<'tcx>) -> ControlFlow<!> {
             if def_id != self.root_def_id && self.tcx.is_descendant_of(def_id, self.root_def_id) {
                 let child_variances = self.tcx.variances_of(def_id);
-                for (a, v) in substs.iter().zip(child_variances) {
+                for (a, v) in args.iter().zip(child_variances) {
                     if *v != ty::Bivariant {
                         a.visit_with(self)?;
                     }
                 }
                 ControlFlow::Continue(())
             } else {
-                substs.visit_with(self)
+                args.visit_with(self)
             }
         }
     }
@@ -102,22 +106,19 @@ fn variance_of_opaque(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Varianc
     impl<'tcx> ty::TypeVisitor<TyCtxt<'tcx>> for OpaqueTypeLifetimeCollector<'tcx> {
         #[instrument(level = "trace", skip(self), ret)]
         fn visit_region(&mut self, r: ty::Region<'tcx>) -> ControlFlow<Self::BreakTy> {
-            if let ty::RegionKind::ReEarlyBound(ebr) = r.kind() {
+            if let ty::RegionKind::ReEarlyParam(ebr) = r.kind() {
                 self.variances[ebr.index as usize] = ty::Invariant;
             }
-            r.super_visit_with(self)
+            ControlFlow::Continue(())
         }
 
         #[instrument(level = "trace", skip(self), ret)]
         fn visit_ty(&mut self, t: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
             match t.kind() {
-                ty::Alias(_, ty::AliasTy { def_id, substs, .. })
-                    if matches!(
-                        self.tcx.def_kind(*def_id),
-                        DefKind::OpaqueTy | DefKind::ImplTraitPlaceholder
-                    ) =>
+                ty::Alias(_, ty::AliasTy { def_id, args, .. })
+                    if matches!(self.tcx.def_kind(*def_id), DefKind::OpaqueTy) =>
                 {
-                    self.visit_opaque(*def_id, substs)
+                    self.visit_opaque(*def_id, args)
                 }
                 _ => t.super_visit_with(self),
             }
@@ -126,7 +127,15 @@ fn variance_of_opaque(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Varianc
 
     // By default, RPIT are invariant wrt type and const generics, but they are bivariant wrt
     // lifetime generics.
-    let mut variances: Vec<_> = std::iter::repeat(ty::Invariant).take(generics.count()).collect();
+    let variances = std::iter::repeat(ty::Invariant).take(generics.count());
+
+    let mut variances: Vec<_> = match tcx.opaque_type_origin(item_def_id) {
+        rustc_hir::OpaqueTyOrigin::FnReturn(_) | rustc_hir::OpaqueTyOrigin::AsyncFn(_) => {
+            variances.collect()
+        }
+        // But TAIT are invariant for all generics
+        rustc_hir::OpaqueTyOrigin::TyAlias { .. } => return tcx.arena.alloc_from_iter(variances),
+    };
 
     // Mark all lifetimes from parent generics as unused (Bivariant).
     // This will be overridden later if required.
@@ -148,39 +157,34 @@ fn variance_of_opaque(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Varianc
 
     let mut collector =
         OpaqueTypeLifetimeCollector { tcx, root_def_id: item_def_id.to_def_id(), variances };
-    let id_substs = ty::InternalSubsts::identity_for_item(tcx, item_def_id.to_def_id());
-    for pred in tcx.bound_explicit_item_bounds(item_def_id.to_def_id()).transpose_iter() {
-        let pred = pred.map_bound(|(pred, _)| *pred).subst(tcx, id_substs);
+    let id_args = ty::GenericArgs::identity_for_item(tcx, item_def_id);
+    for (pred, _) in tcx.explicit_item_bounds(item_def_id).iter_instantiated_copied(tcx, id_args) {
         debug!(?pred);
 
-        // We only ignore opaque type substs if the opaque type is the outermost type.
+        // We only ignore opaque type args if the opaque type is the outermost type.
         // The opaque type may be nested within itself via recursion in e.g.
         // type Foo<'a> = impl PartialEq<Foo<'a>>;
         // which thus mentions `'a` and should thus accept hidden types that borrow 'a
         // instead of requiring an additional `+ 'a`.
         match pred.kind().skip_binder() {
-            ty::PredicateKind::Clause(ty::Clause::Trait(ty::TraitPredicate {
-                trait_ref: ty::TraitRef { def_id: _, substs, .. },
-                constness: _,
+            ty::ClauseKind::Trait(ty::TraitPredicate {
+                trait_ref: ty::TraitRef { def_id: _, args, .. },
                 polarity: _,
-            })) => {
-                for subst in &substs[1..] {
+            }) => {
+                for subst in &args[1..] {
                     subst.visit_with(&mut collector);
                 }
             }
-            ty::PredicateKind::Clause(ty::Clause::Projection(ty::ProjectionPredicate {
-                projection_ty: ty::AliasTy { substs, .. },
+            ty::ClauseKind::Projection(ty::ProjectionPredicate {
+                projection_ty: ty::AliasTy { args, .. },
                 term,
-            })) => {
-                for subst in &substs[1..] {
+            }) => {
+                for subst in &args[1..] {
                     subst.visit_with(&mut collector);
                 }
                 term.visit_with(&mut collector);
             }
-            ty::PredicateKind::Clause(ty::Clause::TypeOutlives(ty::OutlivesPredicate(
-                _,
-                region,
-            ))) => {
+            ty::ClauseKind::TypeOutlives(ty::OutlivesPredicate(_, region)) => {
                 region.visit_with(&mut collector);
             }
             _ => {
@@ -188,5 +192,5 @@ fn variance_of_opaque(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Varianc
             }
         }
     }
-    tcx.arena.alloc_from_iter(collector.variances.into_iter())
+    tcx.arena.alloc_from_iter(collector.variances)
 }

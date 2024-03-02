@@ -167,7 +167,7 @@
 //!     fn node_label(&self, n: &Nd) -> dot::LabelText<'_> {
 //!         dot::LabelText::LabelStr(self.nodes[*n].into())
 //!     }
-//!     fn edge_label<'b>(&'b self, _: &Ed) -> dot::LabelText<'b> {
+//!     fn edge_label(&self, _: &Ed<'_>) -> dot::LabelText<'_> {
 //!         dot::LabelText::LabelStr("&sube;".into())
 //!     }
 //! }
@@ -177,8 +177,8 @@
 //!     type Edge = Ed<'a>;
 //!     fn nodes(&self) -> dot::Nodes<'a,Nd> { (0..self.nodes.len()).collect() }
 //!     fn edges(&'a self) -> dot::Edges<'a,Ed<'a>> { self.edges.iter().collect() }
-//!     fn source(&self, e: &Ed) -> Nd { let & &(s,_) = e; s }
-//!     fn target(&self, e: &Ed) -> Nd { let & &(_,t) = e; t }
+//!     fn source(&self, e: &Ed<'_>) -> Nd { let & &(s,_) = e; s }
+//!     fn target(&self, e: &Ed<'_>) -> Nd { let & &(_,t) = e; t }
 //! }
 //!
 //! # pub fn main() { render_to(&mut Vec::new()) }
@@ -226,11 +226,11 @@
 //!     fn node_id(&'a self, n: &Nd<'a>) -> dot::Id<'a> {
 //!         dot::Id::new(format!("N{}", n.0)).unwrap()
 //!     }
-//!     fn node_label<'b>(&'b self, n: &Nd<'b>) -> dot::LabelText<'b> {
+//!     fn node_label(&self, n: &Nd<'_>) -> dot::LabelText<'_> {
 //!         let &(i, _) = n;
 //!         dot::LabelText::LabelStr(self.nodes[i].into())
 //!     }
-//!     fn edge_label<'b>(&'b self, _: &Ed<'b>) -> dot::LabelText<'b> {
+//!     fn edge_label(&self, _: &Ed<'_>) -> dot::LabelText<'_> {
 //!         dot::LabelText::LabelStr("&sube;".into())
 //!     }
 //! }
@@ -273,6 +273,9 @@
     html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/",
     test(attr(allow(unused_variables), deny(warnings)))
 )]
+#![feature(rustdoc_internals)]
+#![doc(rust_logo)]
+#![allow(internal_features)]
 #![deny(rustc::untranslatable_diagnostic)]
 #![deny(rustc::diagnostic_outside_of_impl)]
 
@@ -518,33 +521,6 @@ impl<'a> LabelText<'a> {
             EscStr(ref s) => format!("\"{}\"", LabelText::escape_str(s)),
             HtmlStr(ref s) => format!("<{s}>"),
         }
-    }
-
-    /// Decomposes content into string suitable for making EscStr that
-    /// yields same content as self. The result obeys the law
-    /// render(`lt`) == render(`EscStr(lt.pre_escaped_content())`) for
-    /// all `lt: LabelText`.
-    fn pre_escaped_content(self) -> Cow<'a, str> {
-        match self {
-            EscStr(s) => s,
-            LabelStr(s) => {
-                if s.contains('\\') {
-                    s.escape_default().to_string().into()
-                } else {
-                    s
-                }
-            }
-            HtmlStr(s) => s,
-        }
-    }
-
-    /// Puts `suffix` on a line below this label, with a blank line separator.
-    pub fn suffix_line(self, suffix: LabelText<'_>) -> LabelText<'static> {
-        let mut prefix = self.pre_escaped_content().into_owned();
-        let suffix = suffix.pre_escaped_content();
-        prefix.push_str(r"\n\n");
-        prefix.push_str(&suffix);
-        EscStr(prefix.into())
     }
 }
 

@@ -1,15 +1,15 @@
 use super::callee::DeferredCallResolution;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_hir as hir;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::HirIdMap;
-use rustc_infer::infer;
-use rustc_infer::infer::{DefiningAnchor, InferCtxt, InferOk, TyCtxtInferExt};
+use rustc_infer::infer::{InferCtxt, InferOk, TyCtxtInferExt};
+use rustc_middle::traits::DefiningAnchor;
 use rustc_middle::ty::visit::TypeVisitableExt;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::def_id::LocalDefIdMap;
-use rustc_span::{self, Span};
+use rustc_span::Span;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
 use rustc_trait_selection::traits::{self, PredicateObligation, TraitEngine, TraitEngineExt as _};
 
@@ -30,7 +30,7 @@ pub struct Inherited<'tcx> {
 
     pub(super) typeck_results: RefCell<ty::TypeckResults<'tcx>>,
 
-    pub(super) locals: RefCell<HirIdMap<super::LocalTy<'tcx>>>,
+    pub(super) locals: RefCell<HirIdMap<Ty<'tcx>>>,
 
     pub(super) fulfillment_cx: RefCell<Box<dyn TraitEngine<'tcx>>>,
 
@@ -55,17 +55,15 @@ pub struct Inherited<'tcx> {
 
     pub(super) deferred_asm_checks: RefCell<Vec<(&'tcx hir::InlineAsm<'tcx>, hir::HirId)>>,
 
-    pub(super) deferred_generator_interiors:
-        RefCell<Vec<(LocalDefId, hir::BodyId, Ty<'tcx>, hir::GeneratorKind)>>,
-
-    pub(super) body_id: Option<hir::BodyId>,
+    pub(super) deferred_coroutine_interiors:
+        RefCell<Vec<(LocalDefId, hir::BodyId, Ty<'tcx>, hir::CoroutineKind)>>,
 
     /// Whenever we introduce an adjustment from `!` into a type variable,
     /// we record that type variable here. This is later used to inform
     /// fallback. See the `fallback` module for details.
-    pub(super) diverging_type_vars: RefCell<FxHashSet<Ty<'tcx>>>,
+    pub(super) diverging_type_vars: RefCell<UnordSet<Ty<'tcx>>>,
 
-    pub(super) infer_var_info: RefCell<FxHashMap<ty::TyVid, ty::InferVarInfo>>,
+    pub(super) infer_var_info: RefCell<UnordMap<ty::TyVid, ty::InferVarInfo>>,
 }
 
 impl<'tcx> Deref for Inherited<'tcx> {
@@ -75,62 +73,29 @@ impl<'tcx> Deref for Inherited<'tcx> {
     }
 }
 
-/// A temporary returned by `Inherited::build(...)`. This is necessary
-/// for multiple `InferCtxt` to share the same `typeck_results`
-/// without using `Rc` or something similar.
-pub struct InheritedBuilder<'tcx> {
-    infcx: infer::InferCtxtBuilder<'tcx>,
-    def_id: LocalDefId,
-    typeck_results: RefCell<ty::TypeckResults<'tcx>>,
-}
-
 impl<'tcx> Inherited<'tcx> {
-    pub fn build(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> InheritedBuilder<'tcx> {
-        let hir_owner = tcx.hir().local_def_id_to_hir_id(def_id).owner;
+    pub fn new(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Self {
+        let hir_owner = tcx.local_def_id_to_hir_id(def_id).owner;
 
-        InheritedBuilder {
-            infcx: tcx
-                .infer_ctxt()
-                .ignoring_regions()
-                .with_opaque_type_inference(DefiningAnchor::Bind(hir_owner.def_id)),
-            def_id,
-            typeck_results: RefCell::new(ty::TypeckResults::new(hir_owner)),
-        }
-    }
-}
-
-impl<'tcx> InheritedBuilder<'tcx> {
-    pub fn enter<F, R>(mut self, f: F) -> R
-    where
-        F: FnOnce(&Inherited<'tcx>) -> R,
-    {
-        let def_id = self.def_id;
-        f(&Inherited::new(self.infcx.build(), def_id, self.typeck_results))
-    }
-}
-
-impl<'tcx> Inherited<'tcx> {
-    fn new(
-        infcx: InferCtxt<'tcx>,
-        def_id: LocalDefId,
-        typeck_results: RefCell<ty::TypeckResults<'tcx>>,
-    ) -> Self {
-        let tcx = infcx.tcx;
-        let body_id = tcx.hir().maybe_body_owned_by(def_id);
+        let infcx = tcx
+            .infer_ctxt()
+            .ignoring_regions()
+            .with_opaque_type_inference(DefiningAnchor::Bind(def_id))
+            .build();
+        let typeck_results = RefCell::new(ty::TypeckResults::new(hir_owner));
 
         Inherited {
             typeck_results,
+            fulfillment_cx: RefCell::new(<dyn TraitEngine<'_>>::new(&infcx)),
             infcx,
-            fulfillment_cx: RefCell::new(<dyn TraitEngine<'_>>::new(tcx)),
             locals: RefCell::new(Default::default()),
             deferred_sized_obligations: RefCell::new(Vec::new()),
             deferred_call_resolutions: RefCell::new(Default::default()),
             deferred_cast_checks: RefCell::new(Vec::new()),
             deferred_transmute_checks: RefCell::new(Vec::new()),
             deferred_asm_checks: RefCell::new(Vec::new()),
-            deferred_generator_interiors: RefCell::new(Vec::new()),
+            deferred_coroutine_interiors: RefCell::new(Vec::new()),
             diverging_type_vars: RefCell::new(Default::default()),
-            body_id,
             infer_var_info: RefCell::new(Default::default()),
         }
     }
@@ -164,30 +129,34 @@ impl<'tcx> Inherited<'tcx> {
         let infer_var_info = &mut self.infer_var_info.borrow_mut();
 
         // (*) binder skipped
-        if let ty::PredicateKind::Clause(ty::Clause::Trait(tpred)) = obligation.predicate.kind().skip_binder()
-            && let Some(ty) = self.shallow_resolve(tpred.self_ty()).ty_vid().map(|t| self.root_var(t))
-            && self.tcx.lang_items().sized_trait().map_or(false, |st| st != tpred.trait_ref.def_id)
+        if let ty::PredicateKind::Clause(ty::ClauseKind::Trait(tpred)) =
+            obligation.predicate.kind().skip_binder()
+            && let Some(ty) =
+                self.shallow_resolve(tpred.self_ty()).ty_vid().map(|t| self.root_var(t))
+            && self.tcx.lang_items().sized_trait().is_some_and(|st| st != tpred.trait_ref.def_id)
         {
             let new_self_ty = self.tcx.types.unit;
 
             // Then construct a new obligation with Self = () added
             // to the ParamEnv, and see if it holds.
-            let o = obligation.with(self.tcx,
-                obligation
-                    .predicate
-                    .kind()
-                    .rebind(
-                        // (*) binder moved here
-                        ty::PredicateKind::Clause(ty::Clause::Trait(tpred.with_self_ty(self.tcx, new_self_ty)))
-                    ),
+            let o = obligation.with(
+                self.tcx,
+                obligation.predicate.kind().rebind(
+                    // (*) binder moved here
+                    ty::PredicateKind::Clause(ty::ClauseKind::Trait(
+                        tpred.with_self_ty(self.tcx, new_self_ty),
+                    )),
+                ),
             );
             // Don't report overflow errors. Otherwise equivalent to may_hold.
-            if let Ok(result) = self.probe(|_| self.evaluate_obligation(&o)) && result.may_apply() {
+            if let Ok(result) = self.probe(|_| self.evaluate_obligation(&o))
+                && result.may_apply()
+            {
                 infer_var_info.entry(ty).or_default().self_in_trait = true;
             }
         }
 
-        if let ty::PredicateKind::Clause(ty::Clause::Projection(predicate)) =
+        if let ty::PredicateKind::Clause(ty::ClauseKind::Projection(predicate)) =
             obligation.predicate.kind().skip_binder()
         {
             // If the projection predicate (Foo::Bar == X) has X as a non-TyVid,

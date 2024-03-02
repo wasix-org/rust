@@ -3,7 +3,7 @@ use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::macros::{find_assert_args, root_macro_call_first_node, PanicExpn};
 use rustc_hir::Expr;
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
 declare_clippy_lint! {
@@ -31,14 +31,20 @@ declare_lint_pass!(AssertionsOnConstants => [ASSERTIONS_ON_CONSTANTS]);
 
 impl<'tcx> LateLintPass<'tcx> for AssertionsOnConstants {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
-        let Some(macro_call) = root_macro_call_first_node(cx, e) else { return };
+        let Some(macro_call) = root_macro_call_first_node(cx, e) else {
+            return;
+        };
         let is_debug = match cx.tcx.get_diagnostic_name(macro_call.def_id) {
             Some(sym::debug_assert_macro) => true,
             Some(sym::assert_macro) => false,
             _ => return,
         };
-        let Some((condition, panic_expn)) = find_assert_args(cx, e, macro_call.expn) else { return };
-        let Some((Constant::Bool(val), _)) = constant(cx, cx.typeck_results(), condition) else { return };
+        let Some((condition, panic_expn)) = find_assert_args(cx, e, macro_call.expn) else {
+            return;
+        };
+        let Some(Constant::Bool(val)) = constant(cx, cx.typeck_results(), condition) else {
+            return;
+        };
         if val {
             span_lint_and_help(
                 cx,

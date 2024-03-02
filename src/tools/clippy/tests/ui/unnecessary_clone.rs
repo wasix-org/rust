@@ -2,7 +2,7 @@
 #![warn(clippy::clone_on_ref_ptr)]
 #![allow(unused)]
 #![allow(clippy::redundant_clone, clippy::uninlined_format_args, clippy::unnecessary_wraps)]
-
+//@no-rustfix
 use std::cell::RefCell;
 use std::rc::{self, Rc};
 use std::sync::{self, Arc};
@@ -21,33 +21,34 @@ fn clone_on_ref_ptr() {
     let arc_weak = Arc::downgrade(&arc);
 
     rc.clone();
+    //~^ ERROR: using `.clone()` on a ref-counted pointer
+    //~| NOTE: `-D clippy::clone-on-ref-ptr` implied by `-D warnings`
     Rc::clone(&rc);
 
     arc.clone();
+    //~^ ERROR: using `.clone()` on a ref-counted pointer
     Arc::clone(&arc);
 
     rcweak.clone();
+    //~^ ERROR: using `.clone()` on a ref-counted pointer
     rc::Weak::clone(&rcweak);
 
     arc_weak.clone();
+    //~^ ERROR: using `.clone()` on a ref-counted pointer
     sync::Weak::clone(&arc_weak);
 
     let x = Arc::new(SomeImpl);
     let _: Arc<dyn SomeTrait> = x.clone();
+    //~^ ERROR: using `.clone()` on a ref-counted pointer
 }
 
 fn clone_on_copy_generic<T: Copy>(t: T) {
     t.clone();
+    //~^ ERROR: using `clone` on type `T` which implements the `Copy` trait
+    //~| NOTE: `-D clippy::clone-on-copy` implied by `-D warnings`
 
     Some(t).clone();
-}
-
-fn clone_on_double_ref() {
-    let x = vec![1];
-    let y = &&x;
-    let z: &Vec<_> = y.clone();
-
-    println!("{:p} {:p}", *y, z);
+    //~^ ERROR: using `clone` on type `Option<T>` which implements the `Copy` trait
 }
 
 mod many_derefs {
@@ -82,12 +83,8 @@ mod many_derefs {
     fn go1() {
         let a = A;
         let _: E = a.clone();
+        //~^ ERROR: using `clone` on type `E` which implements the `Copy` trait
         let _: E = *****a;
-    }
-
-    fn check(mut encoded: &[u8]) {
-        let _ = &mut encoded.clone();
-        let _ = &encoded.clone();
     }
 }
 
@@ -106,5 +103,6 @@ mod issue2076 {
     fn func() -> Option<Rc<u8>> {
         let rc = Rc::new(42);
         Some(try_opt!(Some(rc)).clone())
+        //~^ ERROR: using `.clone()` on a ref-counted pointer
     }
 }

@@ -1,10 +1,12 @@
 use gccjit::{Function, FunctionType, GlobalKind, LValue, RValue, Type};
+#[cfg(feature="master")]
+use gccjit::{FnAttribute, ToRValue};
 use rustc_codegen_ssa::traits::BaseTypeMethods;
 use rustc_middle::ty::Ty;
 use rustc_span::Symbol;
 use rustc_target::abi::call::FnAbi;
 
-use crate::abi::FnAbiGccExt;
+use crate::abi::{FnAbiGcc, FnAbiGccExt};
 use crate::context::CodegenCx;
 use crate::intrinsic::llvm;
 
@@ -38,12 +40,10 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         global
     }
 
-    /*pub fn declare_func(&self, name: &str, return_type: Type<'gcc>, params: &[Type<'gcc>], variadic: bool) -> RValue<'gcc> {
-        self.linkage.set(FunctionType::Exported);
-        let func = declare_raw_fn(self, name, () /*llvm::CCallConv*/, return_type, params, variadic);
-        // FIXME(antoyo): this is a wrong cast. That requires changing the compiler API.
-        unsafe { std::mem::transmute(func) }
-    }*/
+    pub fn declare_func(&self, name: &str, return_type: Type<'gcc>, params: &[Type<'gcc>], variadic: bool) -> Function<'gcc> {
+        self.linkage.set(FunctionType::Extern);
+        declare_raw_fn(self, name, () /*llvm::CCallConv*/, return_type, params, variadic)
+    }
 
     pub fn declare_global(&self, name: &str, ty: Type<'gcc>, global_kind: GlobalKind, is_tls: bool, link_section: Option<Symbol>) -> LValue<'gcc> {
         let global = self.context.new_global(None, global_kind, ty, name);
@@ -79,12 +79,22 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
         unsafe { std::mem::transmute(func) }
     }
 
-    pub fn declare_fn(&self, name: &str, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> RValue<'gcc> {
-        let (return_type, params, variadic, on_stack_param_indices) = fn_abi.gcc_type(self);
-        let func = declare_raw_fn(self, name, () /*fn_abi.llvm_cconv()*/, return_type, &params, variadic);
+    pub fn declare_fn(&self, name: &str, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Function<'gcc> {
+        let FnAbiGcc {
+            return_type,
+            arguments_type,
+            is_c_variadic,
+            on_stack_param_indices,
+            #[cfg(feature="master")]
+            fn_attributes,
+        } = fn_abi.gcc_type(self);
+        let func = declare_raw_fn(self, name, () /*fn_abi.llvm_cconv()*/, return_type, &arguments_type, is_c_variadic);
         self.on_stack_function_params.borrow_mut().insert(func, on_stack_param_indices);
-        // FIXME(antoyo): this is a wrong cast. That requires changing the compiler API.
-        unsafe { std::mem::transmute(func) }
+        #[cfg(feature="master")]
+        for fn_attr in fn_attributes {
+            func.add_attribute(fn_attr);
+        }
+        func
     }
 
     pub fn define_global(&self, name: &str, ty: Type<'gcc>, is_tls: bool, link_section: Option<Symbol>) -> LValue<'gcc> {
@@ -117,6 +127,44 @@ fn declare_raw_fn<'gcc>(cx: &CodegenCx<'gcc, '_>, name: &str, _callconv: () /*ll
                 .collect();
             let func = cx.context.new_function(None, cx.linkage.get(), return_type, &params, mangle_name(name), variadic);
             cx.functions.borrow_mut().insert(name.to_string(), func);
+
+            #[cfg(feature="master")]
+            if name == "rust_eh_personality" {
+                // NOTE: GCC will sometimes change the personality function set on a function from
+                // rust_eh_personality to __gcc_personality_v0 as an optimization.
+                // As such, we need to create a weak alias from __gcc_personality_v0 to
+                // rust_eh_personality in order to avoid a linker error.
+                // This needs to be weak in order to still allow using the standard
+                // __gcc_personality_v0 when the linking to it.
+                // Since aliases don't work (maybe because of a bug in LTO partitioning?), we
+                // create a wrapper function that calls rust_eh_personality.
+
+                let params: Vec<_> = param_types.into_iter().enumerate()
+                    .map(|(index, param)| cx.context.new_parameter(None, *param, &format!("param{}", index))) // TODO(antoyo): set name.
+                    .collect();
+                let gcc_func = cx.context.new_function(None, FunctionType::Exported, return_type, &params, "__gcc_personality_v0", variadic);
+
+                // We need a normal extern function for the crates that access rust_eh_personality
+                // without defining it, otherwise we'll get a compiler error.
+                //
+                // For the crate defining it, that needs to be a weak alias instead.
+                gcc_func.add_attribute(FnAttribute::Weak);
+
+                let block = gcc_func.new_block("start");
+                let mut args = vec![];
+                for param in &params {
+                    args.push(param.to_rvalue());
+                }
+                let call = cx.context.new_call(None, func, &args);
+                if return_type == cx.type_void() {
+                    block.add_eval(None, call);
+                    block.end_with_void_return(None);
+                }
+                else {
+                    block.end_with_return(None, call);
+                }
+            }
+
             func
         };
 
@@ -135,7 +183,7 @@ fn declare_raw_fn<'gcc>(cx: &CodegenCx<'gcc, '_>, name: &str, _callconv: () /*ll
 pub fn mangle_name(name: &str) -> String {
     name.replace(|char: char| {
         if !char.is_alphanumeric() && char != '_' {
-            debug_assert!("$.".contains(char), "Unsupported char in function name: {}", char);
+            debug_assert!("$.*".contains(char), "Unsupported char in function name {}: {}", name, char);
             true
         }
         else {

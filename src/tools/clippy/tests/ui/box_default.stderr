@@ -5,6 +5,7 @@ LL |     let _string: Box<String> = Box::new(Default::default());
    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::default()`
    |
    = note: `-D clippy::box-default` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::box_default)]`
 
 error: `Box::new(_)` of default value
   --> $DIR/box_default.rs:23:17
@@ -73,25 +74,25 @@ LL |     call_ty_fn(Box::new(u8::default()));
    |                ^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::default()`
 
 error: `Box::new(_)` of default value
-  --> $DIR/box_default.rs:40:5
+  --> $DIR/box_default.rs:47:5
    |
 LL |     Box::new(bool::default())
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::<bool>::default()`
 
 error: `Box::new(_)` of default value
-  --> $DIR/box_default.rs:57:28
+  --> $DIR/box_default.rs:64:28
    |
 LL |     let _: Box<dyn Read> = Box::new(ImplementsDefault::default());
    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::<ImplementsDefault>::default()`
 
 error: `Box::new(_)` of default value
-  --> $DIR/box_default.rs:66:17
+  --> $DIR/box_default.rs:73:17
    |
 LL |         let _ = Box::new(WeirdPathed::default());
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::<WeirdPathed>::default()`
 
 error: `Box::new(_)` of default value
-  --> $DIR/box_default.rs:78:18
+  --> $DIR/box_default.rs:85:18
    |
 LL |             Some(Box::new(Foo::default()))
    |                  ^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `Box::<Foo>::default()`

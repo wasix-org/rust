@@ -1,12 +1,7 @@
 //! Completion tests for pattern position.
 use expect_test::{expect, Expect};
 
-use crate::tests::{check_edit, completion_list, BASE_ITEMS_FIXTURE};
-
-fn check_empty(ra_fixture: &str, expect: Expect) {
-    let actual = completion_list(ra_fixture);
-    expect.assert_eq(&actual)
-}
+use crate::tests::{check_edit, check_empty, completion_list, BASE_ITEMS_FIXTURE};
 
 fn check(ra_fixture: &str, expect: Expect) {
     let actual = completion_list(&format!("{BASE_ITEMS_FIXTURE}\n{ra_fixture}"));
@@ -360,6 +355,35 @@ fn outer(Foo { bar$0 }: Foo) {}
 }
 
 #[test]
+fn completes_in_record_field_pat_with_generic_type_alias() {
+    check_empty(
+        r#"
+type Wrap<T> = T;
+
+enum X {
+    A { cool: u32, stuff: u32 },
+    B,
+}
+
+fn main() {
+    let wrapped = Wrap::<X>::A {
+        cool: 100,
+        stuff: 100,
+    };
+
+    if let Wrap::<X>::A { $0 } = &wrapped {};
+}
+"#,
+        expect![[r#"
+            fd cool  u32
+            fd stuff u32
+            kw mut
+            kw ref
+        "#]],
+    )
+}
+
+#[test]
 fn completes_in_fn_param() {
     check_empty(
         r#"
@@ -411,7 +435,7 @@ fn foo() {
 }
 "#,
         expect![[r#"
-            st Bar
+            st Bar     Bar
             kw crate::
             kw self::
         "#]],
@@ -426,7 +450,7 @@ fn foo() {
 }
 "#,
         expect![[r#"
-            st Foo
+            st Foo     Foo
             kw crate::
             kw self::
         "#]],
@@ -614,6 +638,7 @@ fn f(u: U) {
 
     check_empty(
         r#"
+#![rustc_coherence_is_core]
 #[lang = "u32"]
 impl u32 {
     pub const MIN: Self = 0;
@@ -738,6 +763,59 @@ fn f(x: EnumAlias<u8>) {
         expect![[r#"
             bn Tuple(…) Tuple($1)$0
             bn Unit     Unit$0
+        "#]],
+    );
+}
+
+#[test]
+fn pat_no_unstable_item_on_stable() {
+    check_empty(
+        r#"
+//- /main.rs crate:main deps:std
+use std::*;
+fn foo() {
+    let a$0
+}
+//- /std.rs crate:std
+#[unstable]
+pub struct S;
+#[unstable]
+pub enum Enum {
+    Variant
+}
+"#,
+        expect![[r#"
+            md std
+            kw mut
+            kw ref
+        "#]],
+    );
+}
+
+#[test]
+fn pat_unstable_item_on_nightly() {
+    check_empty(
+        r#"
+//- toolchain:nightly
+//- /main.rs crate:main deps:std
+use std::*;
+fn foo() {
+    let a$0
+}
+//- /std.rs crate:std
+#[unstable]
+pub struct S;
+#[unstable]
+pub enum Enum {
+    Variant
+}
+"#,
+        expect![[r#"
+            en Enum
+            md std
+            st S
+            kw mut
+            kw ref
         "#]],
     );
 }

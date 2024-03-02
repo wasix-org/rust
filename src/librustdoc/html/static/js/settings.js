@@ -1,6 +1,6 @@
 // Local js definitions:
-/* global getSettingValue, getVirtualKey, updateLocalStorage, updateTheme */
-/* global addClass, removeClass, onEach, onEachLazy, blurHandler, elemIsInParent */
+/* global getSettingValue, updateLocalStorage, updateTheme */
+/* global addClass, removeClass, onEach, onEachLazy, blurHandler */
 /* global MAIN_ID, getVar, getSettingsButton */
 
 "use strict";
@@ -29,20 +29,12 @@
                     window.rustdoc_remove_line_numbers_from_examples();
                 }
                 break;
-        }
-    }
-
-    function handleKey(ev) {
-        // Don't interfere with browser shortcuts
-        if (ev.ctrlKey || ev.altKey || ev.metaKey) {
-            return;
-        }
-        switch (getVirtualKey(ev)) {
-            case "Enter":
-            case "Return":
-            case "Space":
-                ev.target.checked = !ev.target.checked;
-                ev.preventDefault();
+            case "hide-sidebar":
+                if (value === true) {
+                    addClass(document.documentElement, "hide-sidebar");
+                } else {
+                    removeClass(document.documentElement, "hide-sidebar");
+                }
                 break;
         }
     }
@@ -74,11 +66,9 @@
             if (settingValue !== null) {
                 toggle.checked = settingValue === "true";
             }
-            toggle.onchange = function() {
-                changeSetting(this.id, this.checked);
+            toggle.onchange = () => {
+                changeSetting(toggle.id, toggle.checked);
             };
-            toggle.onkeyup = handleKey;
-            toggle.onkeyrelease = handleKey;
         });
         onEachLazy(settingsElement.querySelectorAll("input[type=\"radio\"]"), elem => {
             const settingId = elem.name;
@@ -86,12 +76,8 @@
             if (settingId === "theme") {
                 const useSystem = getSettingValue("use-system-theme");
                 if (useSystem === "true" || settingValue === null) {
-                    if (useSystem !== "false") {
-                        settingValue = "system preference";
-                    } else {
-                        // This is the default theme.
-                        settingValue = "light";
-                    }
+                    // "light" is the default theme
+                    settingValue = useSystem === "false" ? "light" : "system preference";
                 }
             }
             if (settingValue !== null && settingValue !== "null") {
@@ -208,6 +194,11 @@
                 "default": false,
             },
             {
+                "name": "Hide persistent navigation bar",
+                "js_name": "hide-sidebar",
+                "default": false,
+            },
+            {
                 "name": "Disable keyboard shortcuts",
                 "js_name": "disable-shortcuts",
                 "default": false,
@@ -237,6 +228,13 @@
 
     function displaySettings() {
         settingsMenu.style.display = "";
+        onEachLazy(settingsMenu.querySelectorAll("input[type='checkbox']"), el => {
+            const val = getSettingValue(el.id);
+            const checked = val === "true";
+            if (checked !== el.checked && val !== null) {
+                el.checked = checked;
+            }
+        });
     }
 
     function settingsBlurHandler(event) {
@@ -245,15 +243,15 @@
 
     if (isSettingsPage) {
         // We replace the existing "onclick" callback to do nothing if clicked.
-        getSettingsButton().onclick = function(event) {
+        getSettingsButton().onclick = event => {
             event.preventDefault();
         };
     } else {
         // We replace the existing "onclick" callback.
         const settingsButton = getSettingsButton();
         const settingsMenu = document.getElementById("settings");
-        settingsButton.onclick = function(event) {
-            if (elemIsInParent(event.target, settingsMenu)) {
+        settingsButton.onclick = event => {
+            if (settingsMenu.contains(event.target)) {
                 return;
             }
             event.preventDefault();

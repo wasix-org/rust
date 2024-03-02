@@ -2,6 +2,7 @@ mod builtin_type_shadow;
 mod double_neg;
 mod literal_suffix;
 mod mixed_case_hex_literals;
+mod redundant_at_rest_pattern;
 mod redundant_pattern;
 mod unneeded_field_pattern;
 mod unneeded_wildcard_pattern;
@@ -15,8 +16,8 @@ use rustc_ast::visit::FnKind;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
+use rustc_session::declare_lint_pass;
+use rustc_span::Span;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -27,7 +28,7 @@ declare_clippy_lint! {
     /// the fields that are actually bound.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # struct Foo {
     /// #     a: i32,
     /// #     b: i32,
@@ -42,7 +43,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # struct Foo {
     /// #     a: i32,
     /// #     b: i32,
@@ -70,12 +71,12 @@ declare_clippy_lint! {
     /// It affects code readability.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn foo(a: i32, _a: i32) {}
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// fn bar(a: i32, _b: i32) {}
     /// ```
     #[clippy::version = "pre 1.29.0"]
@@ -93,7 +94,7 @@ declare_clippy_lint! {
     /// decremented.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let mut x = 3;
     /// --x;
     /// ```
@@ -112,14 +113,14 @@ declare_clippy_lint! {
     /// It looks confusing.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let _ =
     /// 0x1a9BAcD
     /// # ;
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let _ =
     /// 0x1A9BACD
     /// # ;
@@ -141,14 +142,14 @@ declare_clippy_lint! {
     /// Suffix style should be consistent.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let _ =
     /// 123832i32
     /// # ;
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let _ =
     /// 123832_i32
     /// # ;
@@ -169,14 +170,14 @@ declare_clippy_lint! {
     /// Suffix style should be consistent.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let _ =
     /// 123832_i32
     /// # ;
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let _ =
     /// 123832i32
     /// # ;
@@ -201,7 +202,7 @@ declare_clippy_lint! {
     /// ### Example
     ///
     /// In Rust:
-    /// ```rust
+    /// ```no_run
     /// fn main() {
     ///     let a = 0123;
     ///     println!("{}", a);
@@ -257,7 +258,7 @@ declare_clippy_lint! {
     /// bindings.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let v = Some("abc");
     /// match v {
     ///     Some(x) => (),
@@ -266,7 +267,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let v = Some("abc");
     /// match v {
     ///     Some(x) => (),
@@ -294,7 +295,7 @@ declare_clippy_lint! {
     /// can match that element as well.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # struct TupleStruct(u32, u32, u32);
     /// # let t = TupleStruct(1, 2, 3);
     /// match t {
@@ -304,7 +305,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # struct TupleStruct(u32, u32, u32);
     /// # let t = TupleStruct(1, 2, 3);
     /// match t {
@@ -318,6 +319,36 @@ declare_clippy_lint! {
     "tuple patterns with a wildcard pattern (`_`) is next to a rest pattern (`..`)"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for `[all @ ..]` patterns.
+    ///
+    /// ### Why is this bad?
+    /// In all cases, `all` works fine and can often make code simpler, as you possibly won't need
+    /// to convert from say a `Vec` to a slice by dereferencing.
+    ///
+    /// ### Example
+    /// ```rust,ignore
+    /// if let [all @ ..] = &*v {
+    ///     // NOTE: Type is a slice here
+    ///     println!("all elements: {all:#?}");
+    /// }
+    /// ```
+    /// Use instead:
+    /// ```rust,ignore
+    /// if let all = v {
+    ///     // NOTE: Type is a `Vec` here
+    ///     println!("all elements: {all:#?}");
+    /// }
+    /// // or
+    /// println!("all elements: {v:#?}");
+    /// ```
+    #[clippy::version = "1.72.0"]
+    pub REDUNDANT_AT_REST_PATTERN,
+    complexity,
+    "checks for `[all @ ..]` where `all` would suffice"
+}
+
 declare_lint_pass!(MiscEarlyLints => [
     UNNEEDED_FIELD_PATTERN,
     DUPLICATE_UNDERSCORE_ARGUMENT,
@@ -329,6 +360,7 @@ declare_lint_pass!(MiscEarlyLints => [
     BUILTIN_TYPE_SHADOW,
     REDUNDANT_PATTERN,
     UNNEEDED_WILDCARD_PATTERN,
+    REDUNDANT_AT_REST_PATTERN,
 ]);
 
 impl EarlyLintPass for MiscEarlyLints {
@@ -339,8 +371,13 @@ impl EarlyLintPass for MiscEarlyLints {
     }
 
     fn check_pat(&mut self, cx: &EarlyContext<'_>, pat: &Pat) {
+        if in_external_macro(cx.sess(), pat.span) {
+            return;
+        }
+
         unneeded_field_pattern::check(cx, pat);
         redundant_pattern::check(cx, pat);
+        redundant_at_rest_pattern::check(cx, pat);
         unneeded_wildcard_pattern::check(cx, pat);
     }
 

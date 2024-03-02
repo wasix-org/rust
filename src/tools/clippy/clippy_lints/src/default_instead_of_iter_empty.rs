@@ -1,11 +1,11 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::last_path_segment;
-use clippy_utils::source::snippet_with_applicability;
-use clippy_utils::{match_def_path, paths};
+use clippy_utils::source::snippet_with_context;
 use rustc_errors::Applicability;
 use rustc_hir::{def, Expr, ExprKind, GenericArg, QPath, TyKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
+use rustc_span::{sym, SyntaxContext};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -14,12 +14,12 @@ declare_clippy_lint! {
     /// ### Why is this bad?
     /// `std::iter::empty()` is the more idiomatic way.
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let _ = std::iter::Empty::<usize>::default();
     /// let iter: std::iter::Empty<usize> = std::iter::Empty::default();
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let _ = std::iter::empty::<usize>();
     /// let iter: std::iter::Empty<usize> = std::iter::empty();
     /// ```
@@ -37,10 +37,12 @@ impl<'tcx> LateLintPass<'tcx> for DefaultIterEmpty {
             && let TyKind::Path(ty_path) = &ty.kind
             && let QPath::Resolved(None, path) = ty_path
             && let def::Res::Def(_, def_id) = &path.res
-            && match_def_path(cx, *def_id, &paths::ITER_EMPTY)
+            && cx.tcx.is_diagnostic_item(sym::IterEmpty, *def_id)
+            && let ctxt = expr.span.ctxt()
+            && ty.span.ctxt() == ctxt
         {
             let mut applicability = Applicability::MachineApplicable;
-            let sugg = make_sugg(cx, ty_path, &mut applicability);
+            let sugg = make_sugg(cx, ty_path, ctxt, &mut applicability);
             span_lint_and_sugg(
                 cx,
                 DEFAULT_INSTEAD_OF_ITER_EMPTY,
@@ -54,14 +56,22 @@ impl<'tcx> LateLintPass<'tcx> for DefaultIterEmpty {
     }
 }
 
-fn make_sugg(cx: &LateContext<'_>, ty_path: &rustc_hir::QPath<'_>, applicability: &mut Applicability) -> String {
+fn make_sugg(
+    cx: &LateContext<'_>,
+    ty_path: &rustc_hir::QPath<'_>,
+    ctxt: SyntaxContext,
+    applicability: &mut Applicability,
+) -> String {
     if let Some(last) = last_path_segment(ty_path).args
         && let Some(iter_ty) = last.args.iter().find_map(|arg| match arg {
             GenericArg::Type(ty) => Some(ty),
             _ => None,
         })
     {
-        format!("std::iter::empty::<{}>()", snippet_with_applicability(cx, iter_ty.span, "..", applicability))
+        format!(
+            "std::iter::empty::<{}>()",
+            snippet_with_context(cx, iter_ty.span, ctxt, "..", applicability).0
+        )
     } else {
         "std::iter::empty()".to_owned()
     }

@@ -7,9 +7,9 @@ LL | #[issue_100199::struct_with_bound]
    = note: this error originates in the attribute macro `issue_100199::struct_with_bound` (in Nightly builds, run with -Z macro-backtrace for more info)
 help: consider importing this trait
    |
-LL | use traits::MyTrait;
+LL + use traits::MyTrait;
    |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0405`.

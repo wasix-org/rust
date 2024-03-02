@@ -15,7 +15,7 @@ use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 use cfg_if::cfg_if;
 
 cfg_if! {
-    if #[cfg(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon"))] {
+    if #[cfg(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita"))] {
         type UserId = u16;
         type GroupId = u16;
     } else if #[cfg(target_os = "nto")] {
@@ -434,6 +434,20 @@ impl From<crate::process::ChildStdin> for OwnedFd {
     }
 }
 
+/// Create a `ChildStdin` from the provided `OwnedFd`.
+///
+/// The provided file descriptor must point to a pipe
+/// with the `CLOEXEC` flag set.
+#[stable(feature = "child_stream_from_fd", since = "1.74.0")]
+impl From<OwnedFd> for process::ChildStdin {
+    #[inline]
+    fn from(fd: OwnedFd) -> process::ChildStdin {
+        let fd = sys::fd::FileDesc::from_inner(fd);
+        let pipe = sys::pipe::AnonPipe::from_inner(fd);
+        process::ChildStdin::from_inner(pipe)
+    }
+}
+
 #[stable(feature = "io_safety", since = "1.63.0")]
 impl AsFd for crate::process::ChildStdout {
     #[inline]
@@ -450,6 +464,20 @@ impl From<crate::process::ChildStdout> for OwnedFd {
     }
 }
 
+/// Create a `ChildStdout` from the provided `OwnedFd`.
+///
+/// The provided file descriptor must point to a pipe
+/// with the `CLOEXEC` flag set.
+#[stable(feature = "child_stream_from_fd", since = "1.74.0")]
+impl From<OwnedFd> for process::ChildStdout {
+    #[inline]
+    fn from(fd: OwnedFd) -> process::ChildStdout {
+        let fd = sys::fd::FileDesc::from_inner(fd);
+        let pipe = sys::pipe::AnonPipe::from_inner(fd);
+        process::ChildStdout::from_inner(pipe)
+    }
+}
+
 #[stable(feature = "io_safety", since = "1.63.0")]
 impl AsFd for crate::process::ChildStderr {
     #[inline]
@@ -463,6 +491,20 @@ impl From<crate::process::ChildStderr> for OwnedFd {
     #[inline]
     fn from(child_stderr: crate::process::ChildStderr) -> OwnedFd {
         child_stderr.into_inner().into_inner().into_inner()
+    }
+}
+
+/// Create a `ChildStderr` from the provided `OwnedFd`.
+///
+/// The provided file descriptor must point to a pipe
+/// with the `CLOEXEC` flag set.
+#[stable(feature = "child_stream_from_fd", since = "1.74.0")]
+impl From<OwnedFd> for process::ChildStderr {
+    #[inline]
+    fn from(fd: OwnedFd) -> process::ChildStderr {
+        let fd = sys::fd::FileDesc::from_inner(fd);
+        let pipe = sys::pipe::AnonPipe::from_inner(fd);
+        process::ChildStderr::from_inner(pipe)
     }
 }
 

@@ -8,8 +8,8 @@
 //! trait, but since the assignment operator (`=`) has no backing trait, there
 //! is no way of overloading its semantics. Additionally, this module does not
 //! provide any mechanism to create new operators. If traitless overloading or
-//! custom operators are required, you should look toward macros or compiler
-//! plugins to extend Rust's syntax.
+//! custom operators are required, you should look toward macros to extend
+//! Rust's syntax.
 //!
 //! Implementations of operator traits should be unsurprising in their
 //! respective contexts, keeping in mind their usual meanings and
@@ -141,10 +141,10 @@
 mod arith;
 mod bit;
 mod control_flow;
+mod coroutine;
 mod deref;
 mod drop;
 mod function;
-mod generator;
 mod index;
 mod index_range;
 mod range;
@@ -198,8 +198,8 @@ pub use self::try_trait::Residual;
 
 pub(crate) use self::try_trait::{ChangeOutputType, NeverShortCircuit};
 
-#[unstable(feature = "generator_trait", issue = "43122")]
-pub use self::generator::{Generator, GeneratorState};
+#[unstable(feature = "coroutine_trait", issue = "43122")]
+pub use self::coroutine::{Coroutine, CoroutineState};
 
 #[unstable(feature = "coerce_unsized", issue = "18598")]
 pub use self::unsize::CoerceUnsized;

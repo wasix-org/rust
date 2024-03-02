@@ -6,7 +6,7 @@
 //!
 //! This crate contains utilities to make this kind of source-gen easy.
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
 
 use std::{
     fmt, fs, mem,
@@ -58,21 +58,21 @@ impl CommentBlock {
         assert!(tag.starts_with(char::is_uppercase));
 
         let tag = format!("{tag}:");
-        // Would be nice if we had `.retain_mut` here!
-        CommentBlock::extract_untagged(text)
-            .into_iter()
-            .filter_map(|mut block| {
-                let first = block.contents.remove(0);
-                first.strip_prefix(&tag).map(|id| {
-                    if block.is_doc {
-                        panic!("Use plain (non-doc) comments with tags like {tag}:\n    {first}");
-                    }
+        let mut blocks = CommentBlock::extract_untagged(text);
+        blocks.retain_mut(|block| {
+            let first = block.contents.remove(0);
+            let Some(id) = first.strip_prefix(&tag) else {
+                return false;
+            };
 
-                    block.id = id.trim().to_string();
-                    block
-                })
-            })
-            .collect()
+            if block.is_doc {
+                panic!("Use plain (non-doc) comments with tags like {tag}:\n    {first}");
+            }
+
+            block.id = id.trim().to_string();
+            true
+        });
+        blocks
     }
 
     pub fn extract_untagged(text: &str) -> Vec<CommentBlock> {

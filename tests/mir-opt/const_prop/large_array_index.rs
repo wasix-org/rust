@@ -1,3 +1,6 @@
+// skip-filecheck
+// unit-test: ConstProp
+// EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // EMIT_MIR_FOR_EACH_BIT_WIDTH
 
 // EMIT_MIR large_array_index.main.ConstProp.diff

@@ -129,7 +129,7 @@ fn check_error_codes_docs(
 
     let mut no_longer_emitted_codes = Vec::new();
 
-    walk(&docs_path, |_| false, &mut |entry, contents| {
+    walk(&docs_path, |_, _| false, &mut |entry, contents| {
         let path = entry.path();
 
         // Error if the file isn't markdown.
@@ -321,7 +321,7 @@ fn check_error_codes_used(
 
     let mut found_codes = Vec::new();
 
-    walk_many(search_paths, filter_dirs, &mut |entry, contents| {
+    walk_many(search_paths, |path, _is_dir| filter_dirs(path), &mut |entry, contents| {
         let path = entry.path();
 
         // Return early if we aren't looking at a source file.
@@ -354,7 +354,12 @@ fn check_error_codes_used(
 
     for code in error_codes {
         if !found_codes.contains(code) && !no_longer_emitted.contains(code) {
-            errors.push(format!("Error code `{code}` exists, but is not emitted by the compiler!"))
+            errors.push(format!(
+                "Error code `{code}` exists, but is not emitted by the compiler!\n\
+                Please mark the code as no longer emitted by adding the following note to the top of the `EXXXX.md` file:\n\
+                `#### Note: this error code is no longer emitted by the compiler`\n\
+                Also, do not forget to mark doctests that no longer apply as `ignore (error is no longer emitted)`."
+            ));
         }
 
         if found_codes.contains(code) && no_longer_emitted.contains(code) {

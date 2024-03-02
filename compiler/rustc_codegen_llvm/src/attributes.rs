@@ -1,11 +1,10 @@
 //! Set and unset common attributes on LLVM values.
 
 use rustc_codegen_ssa::traits::*;
-use rustc_data_structures::small_str::SmallStr;
 use rustc_hir::def_id::DefId;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::{self, TyCtxt};
-use rustc_session::config::OptLevel;
+use rustc_session::config::{FunctionReturn, OptLevel};
 use rustc_span::symbol::sym;
 use rustc_target::spec::abi::Abi;
 use rustc_target::spec::{FramePointer, SanitizerSet, StackProbeType, StackProtector};
@@ -88,6 +87,9 @@ pub fn sanitize_attrs<'ll>(
 
         attrs.push(llvm::AttributeKind::SanitizeMemTag.create_attr(cx.llcx));
     }
+    if enabled.contains(SanitizerSet::SAFESTACK) {
+        attrs.push(llvm::AttributeKind::SanitizeSafeStack.create_attr(cx.llcx));
+    }
     attrs
 }
 
@@ -116,6 +118,15 @@ pub fn frame_pointer_type_attr<'ll>(cx: &CodegenCx<'ll, '_>) -> Option<&'ll Attr
     Some(llvm::CreateAttrStringValue(cx.llcx, "frame-pointer", attr_value))
 }
 
+fn function_return_attr<'ll>(cx: &CodegenCx<'ll, '_>) -> Option<&'ll Attribute> {
+    let function_return_attr = match cx.sess().opts.unstable_opts.function_return {
+        FunctionReturn::Keep => return None,
+        FunctionReturn::ThunkExtern => AttributeKind::FnRetThunkExtern,
+    };
+
+    Some(function_return_attr.create_attr(cx.llcx))
+}
+
 /// Tell LLVM what instrument function to insert.
 #[inline]
 fn instrument_function_attr<'ll>(cx: &CodegenCx<'ll, '_>) -> SmallVec<[&'ll Attribute; 4]> {
@@ -126,12 +137,15 @@ fn instrument_function_attr<'ll>(cx: &CodegenCx<'ll, '_>) -> SmallVec<[&'ll Attr
 
         // The function name varies on platforms.
         // See test/CodeGen/mcount.c in clang.
-        let mcount_name = cx.sess().target.mcount.as_ref();
+        let mcount_name = match &cx.sess().target.llvm_mcount_intrinsic {
+            Some(llvm_mcount_intrinsic) => llvm_mcount_intrinsic.as_ref(),
+            None => cx.sess().target.mcount.as_ref(),
+        };
 
         attrs.push(llvm::CreateAttrStringValue(
             cx.llcx,
             "instrument-function-entry-inlined",
-            &mcount_name,
+            mcount_name,
         ));
     }
     if let Some(options) = &cx.sess().opts.unstable_opts.instrument_xray {
@@ -326,12 +340,17 @@ pub fn from_fn_attrs<'ll, 'tcx>(
         to_add.push(llvm::CreateAttrString(cx.llcx, "use-sample-profile"));
     }
 
-    // FIXME: none of these three functions interact with source level attributes.
+    // FIXME: none of these functions interact with source level attributes.
     to_add.extend(frame_pointer_type_attr(cx));
+    to_add.extend(function_return_attr(cx));
     to_add.extend(instrument_function_attr(cx));
     to_add.extend(nojumptables_attr(cx));
     to_add.extend(probestack_attr(cx));
     to_add.extend(stackprotector_attr(cx));
+
+    if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NO_BUILTINS) {
+        to_add.push(llvm::CreateAttrString(cx.llcx, "no-builtins"));
+    }
 
     if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::COLD) {
         to_add.push(AttributeKind::Cold.create_attr(cx.llcx));
@@ -357,50 +376,44 @@ pub fn from_fn_attrs<'ll, 'tcx>(
     if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::ALLOCATOR)
         || codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::ALLOCATOR_ZEROED)
     {
-        if llvm_util::get_version() >= (15, 0, 0) {
-            to_add.push(create_alloc_family_attr(cx.llcx));
-            // apply to argument place instead of function
-            let alloc_align = AttributeKind::AllocAlign.create_attr(cx.llcx);
-            attributes::apply_to_llfn(llfn, AttributePlace::Argument(1), &[alloc_align]);
-            to_add.push(llvm::CreateAllocSizeAttr(cx.llcx, 0));
-            let mut flags = AllocKindFlags::Alloc | AllocKindFlags::Aligned;
-            if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::ALLOCATOR) {
-                flags |= AllocKindFlags::Uninitialized;
-            } else {
-                flags |= AllocKindFlags::Zeroed;
-            }
-            to_add.push(llvm::CreateAllocKindAttr(cx.llcx, flags));
+        to_add.push(create_alloc_family_attr(cx.llcx));
+        // apply to argument place instead of function
+        let alloc_align = AttributeKind::AllocAlign.create_attr(cx.llcx);
+        attributes::apply_to_llfn(llfn, AttributePlace::Argument(1), &[alloc_align]);
+        to_add.push(llvm::CreateAllocSizeAttr(cx.llcx, 0));
+        let mut flags = AllocKindFlags::Alloc | AllocKindFlags::Aligned;
+        if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::ALLOCATOR) {
+            flags |= AllocKindFlags::Uninitialized;
+        } else {
+            flags |= AllocKindFlags::Zeroed;
         }
+        to_add.push(llvm::CreateAllocKindAttr(cx.llcx, flags));
         // apply to return place instead of function (unlike all other attributes applied in this function)
         let no_alias = AttributeKind::NoAlias.create_attr(cx.llcx);
         attributes::apply_to_llfn(llfn, AttributePlace::ReturnValue, &[no_alias]);
     }
     if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::REALLOCATOR) {
-        if llvm_util::get_version() >= (15, 0, 0) {
-            to_add.push(create_alloc_family_attr(cx.llcx));
-            to_add.push(llvm::CreateAllocKindAttr(
-                cx.llcx,
-                AllocKindFlags::Realloc | AllocKindFlags::Aligned,
-            ));
-            // applies to argument place instead of function place
-            let allocated_pointer = AttributeKind::AllocatedPointer.create_attr(cx.llcx);
-            attributes::apply_to_llfn(llfn, AttributePlace::Argument(0), &[allocated_pointer]);
-            // apply to argument place instead of function
-            let alloc_align = AttributeKind::AllocAlign.create_attr(cx.llcx);
-            attributes::apply_to_llfn(llfn, AttributePlace::Argument(2), &[alloc_align]);
-            to_add.push(llvm::CreateAllocSizeAttr(cx.llcx, 3));
-        }
+        to_add.push(create_alloc_family_attr(cx.llcx));
+        to_add.push(llvm::CreateAllocKindAttr(
+            cx.llcx,
+            AllocKindFlags::Realloc | AllocKindFlags::Aligned,
+        ));
+        // applies to argument place instead of function place
+        let allocated_pointer = AttributeKind::AllocatedPointer.create_attr(cx.llcx);
+        attributes::apply_to_llfn(llfn, AttributePlace::Argument(0), &[allocated_pointer]);
+        // apply to argument place instead of function
+        let alloc_align = AttributeKind::AllocAlign.create_attr(cx.llcx);
+        attributes::apply_to_llfn(llfn, AttributePlace::Argument(2), &[alloc_align]);
+        to_add.push(llvm::CreateAllocSizeAttr(cx.llcx, 3));
         let no_alias = AttributeKind::NoAlias.create_attr(cx.llcx);
         attributes::apply_to_llfn(llfn, AttributePlace::ReturnValue, &[no_alias]);
     }
     if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::DEALLOCATOR) {
-        if llvm_util::get_version() >= (15, 0, 0) {
-            to_add.push(create_alloc_family_attr(cx.llcx));
-            to_add.push(llvm::CreateAllocKindAttr(cx.llcx, AllocKindFlags::Free));
-            // applies to argument place instead of function place
-            let allocated_pointer = AttributeKind::AllocatedPointer.create_attr(cx.llcx);
-            attributes::apply_to_llfn(llfn, AttributePlace::Argument(0), &[allocated_pointer]);
-        }
+        to_add.push(create_alloc_family_attr(cx.llcx));
+        to_add.push(llvm::CreateAllocKindAttr(cx.llcx, AllocKindFlags::Free));
+        // applies to argument place instead of function place
+        let allocated_pointer = AttributeKind::AllocatedPointer.create_attr(cx.llcx);
+        attributes::apply_to_llfn(llfn, AttributePlace::Argument(0), &[allocated_pointer]);
     }
     if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::CMSE_NONSECURE_ENTRY) {
         to_add.push(llvm::CreateAttrString(cx.llcx, "cmse_nonsecure_entry"));
@@ -444,7 +457,7 @@ pub fn from_fn_attrs<'ll, 'tcx>(
     let mut function_features = function_features
         .iter()
         .flat_map(|feat| {
-            llvm_util::to_llvm_features(cx.tcx.sess, feat).into_iter().map(|f| format!("+{}", f))
+            llvm_util::to_llvm_features(cx.tcx.sess, feat).into_iter().map(|f| format!("+{f}"))
         })
         .chain(codegen_fn_attrs.instruction_set.iter().map(|x| match x {
             InstructionSetAttr::ArmA32 => "-thumb-mode".to_string(),
@@ -456,7 +469,7 @@ pub fn from_fn_attrs<'ll, 'tcx>(
         // If this function is an import from the environment but the wasm
         // import has a specific module/name, apply them here.
         if let Some(module) = wasm_import_module(cx.tcx, instance.def_id()) {
-            to_add.push(llvm::CreateAttrStringValue(cx.llcx, "wasm-import-module", &module));
+            to_add.push(llvm::CreateAttrStringValue(cx.llcx, "wasm-import-module", module));
 
             let name =
                 codegen_fn_attrs.link_name.unwrap_or_else(|| cx.tcx.item_name(instance.def_id()));
@@ -478,8 +491,8 @@ pub fn from_fn_attrs<'ll, 'tcx>(
 
     let global_features = cx.tcx.global_backend_features(()).iter().map(|s| s.as_str());
     let function_features = function_features.iter().map(|s| s.as_str());
-    let target_features =
-        global_features.chain(function_features).intersperse(",").collect::<SmallStr<1024>>();
+    let target_features: String =
+        global_features.chain(function_features).intersperse(",").collect();
     if !target_features.is_empty() {
         to_add.push(llvm::CreateAttrStringValue(cx.llcx, "target-features", &target_features));
     }

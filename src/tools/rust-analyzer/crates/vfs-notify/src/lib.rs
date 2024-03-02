@@ -7,7 +7,7 @@
 //! Hopefully, one day a reliable file watching/walking crate appears on
 //! crates.io, and we can reduce this to trivial glue code.
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![warn(rust_2018_idioms, unused_lifetimes)]
 
 use std::fs;
 
@@ -21,7 +21,7 @@ use walkdir::WalkDir;
 pub struct NotifyHandle {
     // Relative order of fields below is significant.
     sender: Sender<Message>,
-    _thread: jod_thread::JoinHandle,
+    _thread: stdx::thread::JoinHandle,
 }
 
 #[derive(Debug)]
@@ -34,7 +34,7 @@ impl loader::Handle for NotifyHandle {
     fn spawn(sender: loader::Sender) -> NotifyHandle {
         let actor = NotifyActor::new(sender);
         let (sender, receiver) = unbounded::<Message>();
-        let thread = jod_thread::Builder::new()
+        let thread = stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker)
             .name("VfsLoader".to_owned())
             .spawn(move || actor.run(receiver))
             .expect("failed to spawn thread");

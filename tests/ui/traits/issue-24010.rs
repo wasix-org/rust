@@ -1,4 +1,6 @@
 // run-pass
+// revisions: classic next
+//[next] compile-flags: -Znext-solver
 
 trait Foo: Fn(i32) -> i32 + Send {}
 

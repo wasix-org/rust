@@ -1,5 +1,5 @@
 error: concrete type differs from previous defining opaque type use
-  --> $DIR/issue-86465.rs:10:5
+  --> $DIR/issue-86465.rs:6:5
    |
 LL |     (a, a)
    |     ^^^^^^
@@ -7,5 +7,5 @@ LL |     (a, a)
    |     expected `&'a u32`, got `&'b u32`
    |     this expression supplies two conflicting concrete types for the same opaque type
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 

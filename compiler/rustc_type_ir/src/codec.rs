@@ -1,4 +1,4 @@
-use crate::Interner;
+use crate::{Interner, PredicateKind};
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_serialize::{Decoder, Encoder};
@@ -27,10 +27,11 @@ pub trait TyEncoder: Encoder {
     const CLEAR_CROSS_CRATE: bool;
 
     fn position(&self) -> usize;
+
     fn type_shorthands(&mut self) -> &mut FxHashMap<<Self::I as Interner>::Ty, usize>;
-    fn predicate_shorthands(
-        &mut self,
-    ) -> &mut FxHashMap<<Self::I as Interner>::PredicateKind, usize>;
+
+    fn predicate_shorthands(&mut self) -> &mut FxHashMap<PredicateKind<Self::I>, usize>;
+
     fn encode_alloc_id(&mut self, alloc_id: &<Self::I as Interner>::AllocId);
 }
 
@@ -39,10 +40,6 @@ pub trait TyDecoder: Decoder {
     const CLEAR_CROSS_CRATE: bool;
 
     fn interner(&self) -> Self::I;
-
-    fn peek_byte(&self) -> u8;
-
-    fn position(&self) -> usize;
 
     fn cached_ty_for_shorthand<F>(
         &mut self,

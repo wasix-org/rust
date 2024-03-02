@@ -1,5 +1,5 @@
 use super::ScalarInt;
-use crate::mir::interpret::{AllocId, Scalar};
+use crate::mir::interpret::Scalar;
 use crate::ty::{self, Ty, TyCtxt};
 use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 
@@ -24,7 +24,7 @@ pub enum ValTree<'tcx> {
     Leaf(ScalarInt),
 
     //SliceOrStr(ValSlice<'tcx>),
-    // dont use SliceOrStr for now
+    // don't use SliceOrStr for now
     /// The fields of any kind of aggregate. Structs, tuples and arrays are represented by
     /// listing their fields' values in order.
     ///
@@ -67,7 +67,7 @@ impl<'tcx> ValTree<'tcx> {
         Self::Leaf(i)
     }
 
-    pub fn try_to_scalar(self) -> Option<Scalar<AllocId>> {
+    pub fn try_to_scalar(self) -> Option<Scalar> {
         self.try_to_scalar_int().map(Scalar::Int)
     }
 
@@ -79,7 +79,7 @@ impl<'tcx> ValTree<'tcx> {
     }
 
     pub fn try_to_target_usize(self, tcx: TyCtxt<'tcx>) -> Option<u64> {
-        self.try_to_scalar_int().map(|s| s.try_to_target_usize(tcx).ok()).flatten()
+        self.try_to_scalar_int().and_then(|s| s.try_to_target_usize(tcx).ok())
     }
 
     /// Get the values inside the ValTree as a slice of bytes. This only works for
