@@ -2,7 +2,7 @@ name: CI
 on:
   push:
     branches:
-      - "**"
+      - "wasix*"
   pull_request:
   workflow_call:
 jobs:
@@ -12,7 +12,7 @@ jobs:
       - name: show git config
         run: |
           env
-          cat ~/.config/git/config || true
+          cat  ~/.config/git/config || true
           cat ~/.gitconfig || true
           ls -lha ./wasix-libc || true
 
@@ -69,17 +69,23 @@ jobs:
     needs: build-libc
     strategy:
       matrix:
-        os: [ubuntu-latest-8-cores, macos-12, windows-latest-8-cores]
-        arch: [x86, aarch64]
-        exclude:
-          - os: windows-latest-8-cores
+        include:
+          - name: Windows (x86)
+            os: windows-latest-8-cores
+            arch: x86
+
+          - name: Ubuntu (x86)
+            os: ubuntu-latest-8-cores
+            arch: x86
+
+          - name: Mac (x86)
+            os: macos-12-large
+            arch: x86
+
+          - name: Mac (aarch64)
+            os: macos-13-xlarge
             arch: aarch64
-          - os: windows-latest-8-cores
-            arch: aarch64
-          - os: ubuntu-latest-8-cores
-            arch: aarch64
-          - os: ubuntu-latest-8-cores
-            arch: aarch64
+
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install Rust
@@ -189,40 +195,29 @@ jobs:
 
       # Mac - aarch64
 
-      # Not running this on GitHub Actions yet, because the underlying runners use x86_64 and not aarch64.
-      # This results in a cross-compile, which results in an erroneous build.
+      - name: Build (Mac Os, aarch64)
+        shell: bash
+        if: contains(matrix.os, 'macos') && matrix.arch == 'aarch64'
+        env:
+          WASIX_NO_UPDATE_REPOS: "1"
+          GITHUB_ACTIONS: "false"
+          WASIX_COMPONENTS: rust
+          WASIX_RUST_HOST: aarch64-apple-darwin
+        run: |
+          cd cargo-wasix
+          # NOTE: must unset GITHUB_ACTIONS env var, because Rst bootstrap checks for it.
+          # (see bootstrap config.rs)
+          GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
 
-      # TODO: Come back to this and enable it once GitHub Actions supports aarch64 runners.
-
-      # - name: Build (Mac Os, aarch64)
-      #   shell: bash
-      #   if: contains(matrix.os, 'macos-12') && matrix.arch == 'aarch64'
-      #   env:
-      #     WASIX_NO_UPDATE_REPOS: "1"
-      #     GITHUB_ACTIONS: "false"
-      #     WASIX_COMPONENTS: rust
-      #     WASIX_RUST_HOST: aarch64-apple-darwin
-      #   run: |
-      #     cd cargo-wasix
-      #     # NOTE: must unset GITHUB_ACTIONS env var, because Rst bootstrap checks for it.
-      #     # (see bootstrap config.rs)
-      #     GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
-
-      # - name: Copy wasm* builds from x86_64-apple-darwin to aarch64-apple-darwin
-      #   shell: bash
-      #   if: contains(matrix.os, 'macos-12') && matrix.arch == 'aarch64'
-      #   run: |
-      #     cp -r wasix-rust/build/x86_64-apple-darwin/stage2/lib/rustlib/wasm* wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib
-
-      # - name: Archive build output (Mac OS - aarch64)
-      #   uses: actions/upload-artifact@v3
-      #   if: contains(matrix.os, 'macos-12') && matrix.arch == 'aarch64'
-      #   with:
-      #     name: rust-toolchain-aarch64-apple-darwin
-      #     path: |
-      #       wasix-rust/build/aarch64-apple-darwin/stage2
-      #       !wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib/src
-      #       !wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib/rustc-src
+      - name: Archive build output (Mac OS - aarch64)
+        uses: actions/upload-artifact@v3
+        if: contains(matrix.os, 'macos') && matrix.arch == 'aarch64'
+        with:
+          name: rust-toolchain-aarch64-apple-darwin
+          path: |
+            wasix-rust/build/aarch64-apple-darwin/stage2
+            !wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib/src
+            !wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib/rustc-src
 
       # Windows
 
