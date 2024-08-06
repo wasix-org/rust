@@ -127,6 +127,13 @@ impl Thread {
         }
     }
 
+    pub unsafe fn new_reactor<F>(_p: F) -> io::Result<Thread>
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        unsupported()
+    }
+
     pub fn yield_now() {
         let ret = unsafe { wasi::sched_yield() };
         debug_assert_eq!(ret, Ok(()));
@@ -197,5 +204,16 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
         } else {
             crate::sys::unsupported()
         }
+    }
+}
+
+pub mod guard {
+    pub type Guard = !;
+    #[allow(dead_code)]
+    pub unsafe fn current() -> Option<Guard> {
+        None
+    }
+    pub unsafe fn init() -> Option<Guard> {
+        None
     }
 }
