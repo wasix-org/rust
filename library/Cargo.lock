@@ -85,7 +85,7 @@ checksum = "3264b043b8e977326c1ee9e723da2c1f8d09a99df52cacf00b4dbce5ac54414d"
 dependencies = [
  "cfg-if",
  "compiler_builtins",
- "libc",
+ "libc 0.2.161",
  "rustc-std-workspace-core",
  "windows-sys",
 ]
@@ -158,6 +158,14 @@ dependencies = [
 
 [[package]]
 name = "libc"
+version = "0.2.155"
+source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.155#cbaadd9965b725ba984a371b817e559d9da36187"
+dependencies = [
+ "rustc-std-workspace-core",
+]
+
+[[package]]
+name = "libc"
 version = "0.2.161"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e9489c2807c139ffd9c1794f4af0ebe86a828db53ecdc7fea2111d0fed085d1"
@@ -207,7 +215,7 @@ dependencies = [
  "cfg-if",
  "compiler_builtins",
  "core",
- "libc",
+ "libc 0.2.161",
 ]
 
 [[package]]
@@ -218,7 +226,7 @@ dependencies = [
  "cfg-if",
  "compiler_builtins",
  "core",
- "libc",
+ "libc 0.2.161",
  "unwind",
 ]
 
@@ -334,7 +342,7 @@ dependencies = [
  "fortanix-sgx-abi",
  "hashbrown",
  "hermit-abi",
- "libc",
+ "libc 0.2.155",
  "memchr",
  "miniz_oxide",
  "object",
@@ -349,6 +357,7 @@ dependencies = [
  "std_detect",
  "unwind",
  "wasi",
+ "wasix",
  "windows-targets 0.0.0",
 ]
 
@@ -358,7 +367,7 @@ version = "0.1.5"
 dependencies = [
  "cfg-if",
  "compiler_builtins",
- "libc",
+ "libc 0.2.161",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -378,7 +387,7 @@ version = "0.0.0"
 dependencies = [
  "core",
  "getopts",
- "libc",
+ "libc 0.2.161",
  "std",
 ]
 
@@ -400,7 +409,7 @@ dependencies = [
  "cfg-if",
  "compiler_builtins",
  "core",
- "libc",
+ "libc 0.2.161",
  "unwinding",
 ]
 
@@ -424,6 +433,18 @@ dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
+]
+
+[[package]]
+name = "wasix"
+version = "0.12.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1fbb4ef9bbca0c1170e0b00dd28abc9e3b68669821600cad1caaed606583c6d"
+dependencies = [
+ "compiler_builtins",
+ "rustc-std-workspace-alloc",
+ "rustc-std-workspace-core",
+ "wasi",
 ]
 
 [[package]]

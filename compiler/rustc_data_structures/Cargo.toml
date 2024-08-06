@@ -46,7 +46,7 @@ features = [
 libc = "0.2"
 # tidy-alphabetical-end
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 # tidy-alphabetical-start
 memmap2 = "0.2.1"
 # tidy-alphabetical-end
