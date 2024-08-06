@@ -35,7 +35,7 @@ Session.vim
 
 ## Configuration
 /bootstrap.toml
-/config.toml
+#/config.toml
 /Makefile
 config.mk
 config.stamp

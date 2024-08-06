@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-# tidy-alphabetical-start
+  # tidy-alphabetical-start
   "compiler/rustc",
   "src/build_helper",
   "src/rustc-std-workspace/rustc-std-workspace-alloc",
@@ -46,7 +46,7 @@ members = [
   "src/tools/unstable-book-gen",
   "src/tools/wasm-component-ld",
   "src/tools/x",
-# tidy-alphabetical-end
+  # tidy-alphabetical-end
 ]
 
 exclude = [
@@ -93,3 +93,5 @@ codegen-units = 1
 # For git dependencies, also add your source to ALLOWED_SOURCES in src/tools/tidy/src/extdeps.rs.
 #[patch.crates-io]
 
+[patch.crates-io]
+libc = { git = "https://github.com/wasix-org/libc.git", branch = "wasix-0.2.155" }
