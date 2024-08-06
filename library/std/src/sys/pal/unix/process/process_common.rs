@@ -1,4 +1,6 @@
-#[cfg(all(test, not(target_os = "emscripten")))]
+#![cfg_attr(target_os = "wasi", allow(unused, dead_code))]
+
+#[cfg(all(test, not(any(target_os = "emscripten", target_os = "wasi"))))]
 mod tests;
 
 use crate::os::unix::prelude::*;
@@ -353,6 +355,21 @@ impl Command {
 
     pub fn stderr(&mut self, stderr: Stdio) {
         self.stderr = Some(stderr);
+    }
+
+    #[allow(dead_code)]
+    pub fn get_stdin(&self) -> Option<&Stdio> {
+        self.stdin.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub fn get_stdout(&self) -> Option<&Stdio> {
+        self.stdout.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub fn get_stderr(&self) -> Option<&Stdio> {
+        self.stderr.as_ref()
     }
 
     pub fn env_mut(&mut self) -> &mut CommandEnv {

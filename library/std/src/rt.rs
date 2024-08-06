@@ -15,6 +15,7 @@
 #![doc(hidden)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(unused_macros)]
+#![cfg_attr(target_vendor = "wasmer", allow(dead_code))]
 
 // Re-export some of our utilities which are expected by other crates.
 pub use crate::panicking::{begin_panic, panic_count};
