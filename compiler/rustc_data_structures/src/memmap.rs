@@ -3,13 +3,13 @@ use std::io;
 use std::ops::{Deref, DerefMut};
 
 /// A trivial wrapper for [`memmap2::Mmap`] (or `Vec<u8>` on WASM).
-#[cfg(not(any(miri, target_arch = "wasm32")))]
+#[cfg(not(any(miri, target_family = "wasm")))]
 pub struct Mmap(memmap2::Mmap);
 
-#[cfg(any(miri, target_arch = "wasm32"))]
+#[cfg(any(miri, target_family = "wasm"))]
 pub struct Mmap(Vec<u8>);
 
-#[cfg(not(any(miri, target_arch = "wasm32")))]
+#[cfg(not(any(miri, target_family = "wasm")))]
 impl Mmap {
     /// # Safety
     ///
@@ -29,7 +29,7 @@ impl Mmap {
     }
 }
 
-#[cfg(any(miri, target_arch = "wasm32"))]
+#[cfg(any(miri, target_feature = "wasm"))]
 impl Mmap {
     #[inline]
     pub unsafe fn map(mut file: File) -> io::Result<Self> {

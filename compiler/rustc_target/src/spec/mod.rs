@@ -1392,9 +1392,9 @@ impl StackProbeType {
                     .and_then(|o| o.as_array())
                     .ok_or_else(|| "expected `min-llvm-version-for-inline` to be an array")?;
                 let mut iter = min_version.into_iter().map(|v| {
-                    let int = v.as_u64().ok_or_else(
-                        || "expected `min-llvm-version-for-inline` values to be integers",
-                    )?;
+                    let int = v.as_u64().ok_or_else(|| {
+                        "expected `min-llvm-version-for-inline` values to be integers"
+                    })?;
                     u32::try_from(int)
                         .map_err(|_| "`min-llvm-version-for-inline` values don't convert to u32")
                 });
@@ -1925,7 +1925,9 @@ supported_targets! {
     ("wasm32-wasip2", wasm32_wasip2),
     ("wasm32-wasip1-threads", wasm32_wasip1_threads),
     ("wasm32-wali-linux-musl", wasm32_wali_linux_musl),
+    ("wasm32-wasmer-wasi", wasm32_wasmer_wasi),
     ("wasm64-unknown-unknown", wasm64_unknown_unknown),
+    ("wasm64-wasmer-wasi", wasm64_wasmer_wasi),
 
     ("thumbv6m-none-eabi", thumbv6m_none_eabi),
     ("thumbv7m-none-eabi", thumbv7m_none_eabi),

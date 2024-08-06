@@ -107,7 +107,7 @@ extern "C" {
     pub fn good19(_: &String);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 extern "C" {
     pub fn good1(size: *const c_int);
     pub fn good2(size: *const c_uint);
