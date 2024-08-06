@@ -6342,3 +6342,8 @@ dependencies = [
  "quote",
  "syn 2.0.87",
 ]
+
+[[patch.unused]]
+name = "libc"
+version = "0.2.155"
+source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.155#cbaadd9965b725ba984a371b817e559d9da36187"

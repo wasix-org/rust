@@ -19,7 +19,7 @@ panic_abort = { path = "../panic_abort" }
 core = { path = "../core", public = true }
 compiler_builtins = { version = "=0.1.138" }
 unwind = { path = "../unwind" }
-hashbrown = { version = "0.15", default-features = false, features = [
+hashbrown = { version = "0.15.0", default-features = false, features = [
     'rustc-dep-of-std',
 ] }
 std_detect = { path = "../stdarch/crates/std_detect", default-features = false, features = [
@@ -34,9 +34,7 @@ miniz_oxide = { version = "0.7.0", optional = true, default-features = false }
 addr2line = { version = "0.22.0", optional = true, default-features = false }
 
 [target.'cfg(not(all(windows, target_env = "msvc")))'.dependencies]
-libc = { version = "0.2.162", default-features = false, features = [
-    'rustc-dep-of-std',
-], public = true }
+libc = { git = "https://github.com/wasix-org/libc.git", branch = "wasix-0.2.155", version = "0.2.155", default-features = false, features = ['rustc-dep-of-std'], public = true }
 
 [target.'cfg(all(not(target_os = "aix"), not(all(windows, target_env = "msvc", not(target_vendor = "uwp")))))'.dependencies]
 object = { version = "0.36.0", default-features = false, optional = true, features = [
@@ -76,10 +74,16 @@ hermit-abi = { version = "0.4.0", features = [
     'rustc-dep-of-std',
 ], public = true }
 
-[target.'cfg(target_os = "wasi")'.dependencies]
+[target.'cfg(all(target_os = "wasi", not(target_vendor = "wasmer")))'.dependencies]
 wasi = { version = "0.11.0", features = [
     'rustc-dep-of-std',
 ], default-features = false }
+
+[target.wasm32-wasmer-wasi.dependencies]
+wasi = { package = "wasix", version = "0.12.9", features = ['rustc-dep-of-std'], default-features = false, public = true }
+
+[target.wasm64-wasmer-wasi.dependencies]
+wasi = { package = "wasix", version = "0.12.9", features = ['rustc-dep-of-std'], default-features = false, public = true }
 
 [target.'cfg(target_os = "uefi")'.dependencies]
 r-efi = { version = "4.5.0", features = ['rustc-dep-of-std'] }
@@ -140,6 +144,7 @@ level = "warn"
 check-cfg = [
     'cfg(bootstrap)',
     'cfg(target_arch, values("xtensa"))',
+    'cfg(target_vendor, values("wasmer"))',
     # std use #[path] imports to portable-simd `std_float` crate
     # and to the `backtrace` crate which messes-up with Cargo list
     # of declared features, we therefor expect any feature cfg
