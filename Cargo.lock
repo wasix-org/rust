@@ -2133,7 +2133,7 @@ checksum = "db13adb97ab515a3691f56e4dbab09283d0b86cb45abd991d8634a9d6f501760"
 [[package]]
 name = "libc"
 version = "0.2.155"
-source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.155#6ed87502b08f65c4f4d7119948fabe9370f5b032"
+source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.155#cbaadd9965b725ba984a371b817e559d9da36187"
 dependencies = [
  "rustc-std-workspace-core",
 ]
