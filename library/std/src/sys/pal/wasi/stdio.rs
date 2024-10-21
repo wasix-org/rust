@@ -29,7 +29,7 @@ impl io::Read for Stdin {
     }
 
     fn read_vectored(&mut self, data: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
-        ManuallyDrop::new(unsafe { WasiFd::from_raw_fd(self.as_raw_fd()) }).read(data)
+        ManuallyDrop::new(unsafe { WasiFd::from_raw_fd(self.as_raw_fd()) }).read_vectored(data)
     }
 
     #[inline]
@@ -57,7 +57,7 @@ impl io::Write for Stdout {
     }
 
     fn write_vectored(&mut self, data: &[IoSlice<'_>]) -> io::Result<usize> {
-        ManuallyDrop::new(unsafe { WasiFd::from_raw_fd(self.as_raw_fd()) }).write(data)
+        ManuallyDrop::new(unsafe { WasiFd::from_raw_fd(self.as_raw_fd()) }).write_vectored(data)
     }
 
     #[inline]
@@ -88,7 +88,7 @@ impl io::Write for Stderr {
     }
 
     fn write_vectored(&mut self, data: &[IoSlice<'_>]) -> io::Result<usize> {
-        ManuallyDrop::new(unsafe { WasiFd::from_raw_fd(self.as_raw_fd()) }).write(data)
+        ManuallyDrop::new(unsafe { WasiFd::from_raw_fd(self.as_raw_fd()) }).write_vectored(data)
     }
 
     #[inline]

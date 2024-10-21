@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::unsupported;
 use crate::ffi::CStr;
 use crate::io;

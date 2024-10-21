@@ -1,240 +1,275 @@
-# This file defines our primary CI workflow that runs on pull requests
-# and also on pushes to special branches (auto, try).
-#
-# The actual definition of the executed jobs is calculated by a Python
-# script located at src/ci/github-actions/calculate-job-matrix.py, which
-# uses job definition data from src/ci/github-actions/jobs.yml.
-# You should primarily modify the `jobs.yml` file if you want to modify
-# what jobs are executed in CI.
-
 name: CI
 on:
   push:
     branches:
-      - auto
-      - try
-      - try-perf
-      - automation/bors/try
+      - "wasix*"
   pull_request:
-    branches:
-      - "**"
-
-permissions:
-  contents: read
-  packages: write
-
-defaults:
-  run:
-    # On Linux, macOS, and Windows, use the system-provided bash as the default
-    # shell. (This should only make a difference on Windows, where the default
-    # shell is PowerShell.)
-    shell: bash
-
-concurrency:
-  # For a given workflow, if we push to the same branch, cancel all previous builds on that branch.
-  # We add an exception for try builds (try branch) and unrolled rollup builds (try-perf), which
-  # are all triggered on the same branch, but which should be able to run concurrently.
-  group: ${{ github.workflow }}-${{ ((github.ref == 'refs/heads/try' || github.ref == 'refs/heads/try-perf') && github.sha) || github.ref }}
-  cancel-in-progress: true
-env:
-  TOOLSTATE_REPO: "https://github.com/rust-lang-nursery/rust-toolstate"
-  # This will be empty in PR jobs.
-  TOOLSTATE_REPO_ACCESS_TOKEN: ${{ secrets.TOOLSTATE_REPO_ACCESS_TOKEN }}
+  workflow_call:
 jobs:
-  # The job matrix for `calculate_matrix` is defined in src/ci/github-actions/jobs.yml.
-  # It calculates which jobs should be executed, based on the data of the ${{ github }} context.
-  # If you want to modify CI jobs, take a look at src/ci/github-actions/jobs.yml.
-  calculate_matrix:
-    name: Calculate job matrix
-    runs-on: ubuntu-latest
-    outputs:
-      jobs: ${{ steps.jobs.outputs.jobs }}
-      run_type: ${{ steps.jobs.outputs.run_type }}
+  build-libc:
+    runs-on: ubuntu-latest-8-cores
     steps:
-      - name: Checkout the source code
-        uses: actions/checkout@v4
-      - name: Calculate the CI job matrix
-        env:
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-        run: python3 src/ci/github-actions/calculate-job-matrix.py >> $GITHUB_OUTPUT
-        id: jobs
-  job:
-    name: ${{ matrix.name }}
-    needs: [ calculate_matrix ]
-    runs-on: "${{ matrix.os }}"
-    defaults:
-      run:
-        shell: ${{ contains(matrix.os, 'windows') && 'msys2 {0}' || 'bash' }}
-    timeout-minutes: 240
-    env:
-      CI_JOB_NAME: ${{ matrix.image }}
-      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-      # commit of PR sha or commit sha. `GITHUB_SHA` is not accurate for PRs.
-      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      DOCKER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      SCCACHE_BUCKET: rust-lang-ci-sccache2
-      CACHE_DOMAIN: ci-caches.rust-lang.org
-    continue-on-error: ${{ matrix.continue_on_error || false }}
+      - name: show git config
+        run: |
+          env
+          cat  ~/.config/git/config || true
+          cat ~/.gitconfig || true
+          ls -lha ./wasix-libc || true
+
+      - name: Check out wasix-libc
+        uses: actions/checkout@v3
+        with:
+          repository: wasix-org/wasix-libc
+          ref: main
+          path: wasix-libc
+          submodules: "recursive"
+
+      - name: OS Setup (Ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget xz-utils git python3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check out cargo-wasix
+        uses: actions/checkout@v3
+        with:
+          repository: wasix-org/cargo-wasix
+          ref: main
+          path: cargo-wasix
+          fetch-depth: 2
+
+      - name: Print cargo-wasix info
+        run: |
+          cd ./cargo-wasix
+          echo "cargo-wasix commit:"
+          git rev-parse HEAD
+
+      - name: Build
+        shell: bash
+        run: |
+          cd $GITHUB_WORKSPACE/cargo-wasix
+          WASIX_NO_UPDATE_REPOS=1 WASIX_BUILD_DIR=$GITHUB_WORKSPACE WASIX_COMPONENTS=libc cargo run -- wasix build-toolchain
+
+          # Workaround for preserving artifact directory structure
+          # See https://github.com/actions/upload-artifact/issues/174
+          touch $GITHUB_WORKSPACE/.stub
+
+      - name: Archive build output
+        uses: actions/upload-artifact@v3
+        with:
+          name: wasix-libc
+          path: |
+            .stub
+            wasix-libc/sysroot32
+            wasix-libc/sysroot64
+
+  build-rust:
+    needs: build-libc
     strategy:
       matrix:
-        # Check the `calculate_matrix` job to see how is the matrix defined.
-        include: ${{ fromJSON(needs.calculate_matrix.outputs.jobs) }}
+        include:
+          - name: Windows (x86)
+            os: windows-latest-8-cores
+            arch: x86
+
+          - name: Ubuntu (x86)
+            os: ubuntu-latest-8-cores
+            arch: x86
+
+          - name: Mac (x86)
+            os: macos-12-large
+            arch: x86
+
+          - name: Mac (aarch64)
+            os: macos-13-xlarge
+            arch: aarch64
+
+    runs-on: ${{ matrix.os }}
     steps:
-      - if: contains(matrix.os, 'windows')
-        uses: msys2/setup-msys2@v2.22.0
+      - name: Download wasix-libc artifact
+        uses: actions/download-artifact@v3
         with:
-          # i686 jobs use mingw32. x86_64 and cross-compile jobs use mingw64.
-          msystem: ${{ contains(matrix.name, 'i686') && 'mingw32' || 'mingw64' }}
-          # don't try to download updates for already installed packages
-          update: false
-          # don't try to use the msys that comes built-in to the github runner,
-          # so we can control what is installed (i.e. not python)
-          release: true
-          # Inherit the full path from the Windows environment, with MSYS2's */bin/
-          # dirs placed in front. This lets us run Windows-native Python etc.
-          path-type: inherit
-          install: >
-            make
+          name: wasix-libc
 
-      - name: disable git crlf conversion
-        run: git config --global core.autocrlf false
-
-      - name: checkout the source code
-        uses: actions/checkout@v4
+      - name: Check out repository code
+        uses: actions/checkout@v3
         with:
-          fetch-depth: 2
+          path: wasix-rust
+          submodules: "recursive"
+          # Don't clean so downloaded LLVM etc can be reused.
+          clean: false
 
-      # Rust Log Analyzer can't currently detect the PR number of a GitHub
-      # Actions build on its own, so a hint in the log message is needed to
-      # point it in the right direction.
-      - name: configure the PR in which the error message will be posted
-        run: echo "[CI_PR_NUMBER=$num]"
-        env:
-          num: ${{ github.event.number }}
-        if: needs.calculate_matrix.outputs.run_type == 'pr'
+      # We need the full history for the main repo so the build tooling can
+      # determine the cached LLVM download.
+      # - name: Fetch full branch history
+      #   shell: bash
+      #   run: |
+      #     cd wasix-rust
+      #     git fetch --unshallow origin $(git branch --show-current)
 
-      - name: add extra environment variables
-        run: src/ci/scripts/setup-environment.sh
-        env:
-          # Since it's not possible to merge `${{ matrix.env }}` with the other
-          # variables in `job.<name>.env`, the variables defined in the matrix
-          # are passed to the `setup-environment.sh` script encoded in JSON,
-          # which then uses log commands to actually set them.
-          EXTRA_VARIABLES: ${{ toJson(matrix.env) }}
+      #     echo "Branch history fetched!"
 
-      - name: ensure the channel matches the target branch
-        run: src/ci/scripts/verify-channel.sh
+      # - name: Install Rust
+      #   uses: dtolnay/rust-toolchain@stable
 
-      - name: collect CPU statistics
-        run: src/ci/scripts/collect-cpu-stats.sh
-
-      - name: show the current environment
-        run: src/ci/scripts/dump-environment.sh
-
-      - name: install awscli
-        run: src/ci/scripts/install-awscli.sh
-
-      - name: install sccache
-        run: src/ci/scripts/install-sccache.sh
-
-      - name: select Xcode
-        run: src/ci/scripts/select-xcode.sh
-
-      - name: install clang
-        run: src/ci/scripts/install-clang.sh
-
-      - name: install tidy
-        run: src/ci/scripts/install-tidy.sh
-
-      - name: install WIX
-        run: src/ci/scripts/install-wix.sh
-
-      - name: disable git crlf conversion
-        run: src/ci/scripts/disable-git-crlf-conversion.sh
-
-      - name: checkout submodules
-        run: src/ci/scripts/checkout-submodules.sh
-
-      - name: install MinGW
-        run: src/ci/scripts/install-mingw.sh
-
-      - name: install ninja
-        run: src/ci/scripts/install-ninja.sh
-
-      - name: enable ipv6 on Docker
-        run: src/ci/scripts/enable-docker-ipv6.sh
-
-      # Disable automatic line ending conversion (again). On Windows, when we're
-      # installing dependencies, something switches the git configuration directory or
-      # re-enables autocrlf. We've not tracked down the exact cause -- and there may
-      # be multiple -- but this should ensure submodules are checked out with the
-      # appropriate line endings.
-      - name: disable git crlf conversion
-        run: src/ci/scripts/disable-git-crlf-conversion.sh
-
-      - name: ensure line endings are correct
-        run: src/ci/scripts/verify-line-endings.sh
-
-      - name: ensure backported commits are in upstream branches
-        run: src/ci/scripts/verify-backported-commits.sh
-
-      - name: ensure the stable version number is correct
-        run: src/ci/scripts/verify-stable-version-number.sh
-
-      - name: run the build
-        # Redirect stderr to stdout to avoid reordering the two streams in the GHA logs.
-        run: src/ci/scripts/run-build-from-ci.sh 2>&1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.CACHES_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', env.CACHES_AWS_ACCESS_KEY_ID)] }}
-
-      - name: create github artifacts
-        run: src/ci/scripts/create-doc-artifacts.sh
-
-      - name: upload artifacts to github
-        uses: actions/upload-artifact@v4
+      - name: Check out cargo-wasix
+        uses: actions/checkout@v3
         with:
-          # name is set in previous step
-          name: ${{ env.DOC_ARTIFACT_NAME }}
-          path: obj/artifacts/doc
-          if-no-files-found: ignore
-          retention-days: 5
+          repository: wasix-org/cargo-wasix
+          ref: main
+          path: cargo-wasix
 
-      - name: upload artifacts to S3
-        run: src/ci/scripts/upload-artifacts.sh
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.ARTIFACTS_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', env.ARTIFACTS_AWS_ACCESS_KEY_ID)] }}
-        # Adding a condition on DEPLOY=1 or DEPLOY_ALT=1 is not needed as all deploy
-        # builders *should* have the AWS credentials available. Still, explicitly
-        # adding the condition is helpful as this way CI will not silently skip
-        # deploying artifacts from a dist builder if the variables are misconfigured,
-        # erroring about invalid credentials instead.
-        if: github.event_name == 'push' || env.DEPLOY == '1' || env.DEPLOY_ALT == '1'
+      # Mac - x86
 
-  # This job isused to tell bors the final status of the build, as there is no practical way to detect
-  # when a workflow is successful listening to webhooks only in our current bors implementation (homu).
-  outcome:
-    name: bors build finished
-    runs-on: ubuntu-latest
-    needs: [ calculate_matrix, job ]
-    # !cancelled() executes the job regardless of whether the previous jobs passed or failed
-    if: ${{ !cancelled() && contains(fromJSON('["auto", "try"]'), needs.calculate_matrix.outputs.run_type) }}
-    steps:
-      - name: checkout the source code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      # Calculate the exit status of the whole CI workflow.
-      # If all dependent jobs were successful, this exits with 0 (and the outcome job continues successfully).
-      # If a some dependent job has failed, this exits with 1.
-      - name: calculate the correct exit status
-        run: jq --exit-status 'all(.result == "success" or .result == "skipped")' <<< '${{ toJson(needs) }}'
-      # Publish the toolstate if an auto build succeeds (just before push to master)
-      - name: publish toolstate
-        run: src/ci/publish_toolstate.sh
+      - name: Setup (Mac OS)
         shell: bash
-        if: needs.calculate_matrix.outputs.run_type == 'auto'
+        if: contains(matrix.os, 'macos')
+        run: |
+          brew update
+          # Need ninja for building llvm (for aarch64 cross compile)
+          brew install ninja
+
+      # Interlude: install rust now. For some reason, brew install removes cargo, so
+      # we're doing this after as it keeps mac builds happy. This is ultimately a
+      # hack, so if anybody knows why brew install removes cargo, please fix it and
+      # move this step back up to where it originally was.
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        if: ${{ !contains(matrix.os, 'windows') }}
+        with:
+          toolchain: stable
+
+      # Mac - continued
+
+      - name: Build (Mac Os, x86)
+        shell: bash
+        if: contains(matrix.os, 'macos-12') && matrix.arch == 'x86'
         env:
-          TOOLSTATE_ISSUES_API_URL: https://api.github.com/repos/rust-lang/rust/issues
-          TOOLSTATE_PUBLISH: 1
+          WASIX_NO_UPDATE_REPOS: "1"
+          GITHUB_ACTIONS: "false"
+          WASIX_COMPONENTS: rust
+          WASIX_RUST_HOST: x86_64-apple-darwin
+        run: |
+          cd cargo-wasix
+          # NOTE: must unset GITHUB_ACTIONS env var, because Rust bootstrap checks for it.
+          # (see bootstrap config.rs)
+          GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
+
+      - name: Archive build output (Mac OS - x86)
+        uses: actions/upload-artifact@v3
+        if: contains(matrix.os, 'macos') && matrix.arch == 'x86'
+        with:
+          name: rust-toolchain-x86_64-apple-darwin
+          path: |
+            wasix-rust/build/x86_64-apple-darwin/stage2
+            !wasix-rust/build/x86_64-apple-darwin/stage2/lib/rustlib/src
+            !wasix-rust/build/x86_64-apple-darwin/stage2/lib/rustlib/rustc-src
+
+      # Mac - aarch64
+
+      - name: Build (Mac Os, aarch64)
+        shell: bash
+        if: contains(matrix.os, 'macos') && matrix.arch == 'aarch64'
+        env:
+          WASIX_NO_UPDATE_REPOS: "1"
+          GITHUB_ACTIONS: "false"
+          WASIX_COMPONENTS: rust
+          WASIX_RUST_HOST: aarch64-apple-darwin
+        run: |
+          cd cargo-wasix
+          # NOTE: must unset GITHUB_ACTIONS env var, because Rst bootstrap checks for it.
+          # (see bootstrap config.rs)
+          GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
+
+      - name: Archive build output (Mac OS - aarch64)
+        uses: actions/upload-artifact@v3
+        if: contains(matrix.os, 'macos') && matrix.arch == 'aarch64'
+        with:
+          name: rust-toolchain-aarch64-apple-darwin
+          path: |
+            wasix-rust/build/aarch64-apple-darwin/stage2
+            !wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib/src
+            !wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib/rustc-src
+
+      # Linux!
+
+      - name: Setup (Ubuntu)
+        if: matrix.arch == 'x86' && contains(matrix.os, 'ubuntu')
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget xz-utils git python3 ninja-build cmake
+
+      - name: Build (Linux)
+        if: matrix.arch == 'x86' && contains(matrix.os, 'ubuntu')
+        shell: bash
+        env:
+          WASIX_NO_UPDATE_REPOS: "1"
+          WASIX_COMPONENTS: rust
+          WASIX_RUST_HOST: x86_64-unknown-linux-gnu
+        run: |
+          cd cargo-wasix
+          # NOTE: must unset GITHUB_ACTIONS env var, because Rst bootstrap checks for it.
+          # (see bootstrap config.rs)
+          GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
+
+      - name: Archive build output (Linux)
+        uses: actions/upload-artifact@v3
+        if: contains(matrix.os, 'ubuntu')
+        with:
+          name: rust-toolchain-x86_64-unknown-linux-gnu
+          path: |
+            wasix-rust/build/x86_64-unknown-linux-gnu/stage2
+            !wasix-rust/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/src
+            !wasix-rust/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/rustc-src
+
+      # Windows
+
+      # - name: Install chocolatey deps (Windows)
+      #   if: contains(matrix.os, 'windows') && matrix.arch == 'x86'
+      #   shell: bash
+      #   continue-on-error: true
+      #   run: choco install -y visualstudio2019community cmake
+
+      - name: Set up MinGW (Windows)
+        if: contains(matrix.os, 'windows') && matrix.arch == 'x86'
+        uses: e-t-l/setup-mingw@patch-1
+
+      # - name: Install llvm (Windows)
+      #   if: matrix.os == 'self-hosted-windows'
+      #   uses: KyleMayes/install-llvm-action@v1
+      #   with:
+      #     version: "10.0"
+
+      - name: Install ninja (Windows)
+        if: contains(matrix.os, 'windows') && matrix.arch == 'x86'
+        uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Build (Windows)
+        if: contains(matrix.os, 'windows') && matrix.arch == 'x86'
+        continue-on-error: true
+        shell: bash
+        env:
+          WASIX_NO_UPDATE_REPOS: "1"
+          WASIX_COMPONENTS: rust
+          WASIX_RUST_HOST: x86_64-pc-windows-msvc
+          # WASIX_RUST_HOST: x86_64-pc-windows-gnu
+        run: |
+          cd cargo-wasix
+          # NOTE: must unset GITHUB_ACTIONS env var, because Rst bootstrap checks for it.
+          # (see bootstrap config.rs)
+          GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
+
+      - name: Archive build output (Windows)
+        if: contains(matrix.os, 'windows') && matrix.arch == 'x86'
+        uses: actions/upload-artifact@v3
+        with:
+          name: rust-toolchain-x86_64-pc-windows-msvc
+          # name: rust-toolchain-x86_64-pc-windows-gnu
+          path: |
+            wasix-rust/build/x86_64-pc-windows-msvc/stage2
+            !wasix-rust/build/x86_64-pc-windows-msvc/stage2/lib/rustlib/src
+            !wasix-rust/build/x86_64-pc-windows-msvc/stage2/lib/rustlib/rustc-src

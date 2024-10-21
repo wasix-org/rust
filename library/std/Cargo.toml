@@ -35,7 +35,7 @@ miniz_oxide = { version = "0.7.0", optional = true, default-features = false }
 addr2line = { version = "0.22.0", optional = true, default-features = false }
 
 [target.'cfg(not(all(windows, target_env = "msvc")))'.dependencies]
-libc = { version = "0.2.153", default-features = false, features = [
+libc = { git = "https://github.com/wasix-org/libc.git", branch = "wasix-0.2.155", version = "0.2.155", default-features = false, features = [
     'rustc-dep-of-std',
 ], public = true }
 
@@ -77,10 +77,20 @@ hermit-abi = { version = "0.4.0", features = [
     'rustc-dep-of-std',
 ], public = true }
 
-[target.'cfg(target_os = "wasi")'.dependencies]
+[target.'cfg(all(target_os = "wasi", not(target_vendor = "wasmer")))'.dependencies]
 wasi = { version = "0.11.0", features = [
     'rustc-dep-of-std',
 ], default-features = false }
+
+[target.wasm32-wasmer-wasi.dependencies]
+wasi = { package = "wasix", version = "0.12.9", features = [
+    'rustc-dep-of-std',
+], default-features = false, public = true }
+
+[target.wasm64-wasmer-wasi.dependencies]
+wasi = { package = "wasix", version = "0.12.9", features = [
+    'rustc-dep-of-std',
+], default-features = false, public = true }
 
 [target.'cfg(target_os = "uefi")'.dependencies]
 r-efi = { version = "4.5.0", features = ['rustc-dep-of-std'] }
@@ -146,4 +156,5 @@ check-cfg = [
     # and to the `backtrace` crate which messes-up with Cargo list
     # of declared features, we therefor expect any feature cfg
     'cfg(feature, values(any()))',
+    'cfg(target_vendor, values("wasmer"))',
 ]

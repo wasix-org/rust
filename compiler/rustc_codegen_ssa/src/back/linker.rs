@@ -1249,7 +1249,7 @@ impl<'a> WasmLd<'a> {
         //   the one linear memory as `shared`
         //
         // * `--max-memory=1G` - when specifying a shared memory this must also
-        //   be specified. We conservatively choose 1GB but users should be able
+        //   be specified. We conservatively choose 4GB but users should be able
         //   to override this with `-C link-arg`.
         //
         // * `--import-memory` - it doesn't make much sense for memory to be
@@ -1262,7 +1262,12 @@ impl<'a> WasmLd<'a> {
         //      symbols are how the TLS segments are initialized and configured.
         let mut wasm_ld = WasmLd { cmd, sess };
         if sess.target_features.contains(&sym::atomics) {
-            wasm_ld.link_args(&["--shared-memory", "--max-memory=1073741824", "--import-memory"]);
+            let max_memory = if sess.target.arch == "wasm64" {
+                "--max-memory=1099511627776"
+            } else {
+                "--max-memory=4294967296"
+            };           
+            wasm_ld.link_args(&["--shared-memory", max_memory, "--import-memory"]);
             if sess.target.os == "unknown" {
                 wasm_ld.link_args(&[
                     "--export=__wasm_init_tls",
@@ -1388,7 +1393,7 @@ impl<'a> Linker for WasmLd<'a> {
         // others. Various bits and pieces of wasm32-unknown-unknown tooling use
         // this, so be sure these symbols make their way out of the linker as well.
         if self.sess.target.os == "unknown" {
-            self.link_args(&["--export=__heap_base", "--export=__data_end"]);
+            self.link_args(&["--export=__heap_base", "--export=__stack_pointer", "--export=__data_end"]);
         }
     }
 

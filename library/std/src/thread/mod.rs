@@ -152,9 +152,8 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 #![deny(unsafe_op_in_unsafe_fn)]
-// Under `test`, `__FastLocalKeyInner` seems unused.
+#![cfg_attr(all(target_os = "wasi", target_vendor = "wasmer"), allow(unused_imports))]
 #![cfg_attr(test, allow(dead_code))]
-
 #[cfg(all(test, not(target_os = "emscripten")))]
 mod tests;
 
@@ -185,7 +184,7 @@ pub use scoped::{scope, Scope, ScopedJoinHandle};
 ////////////////////////////////////////////////////////////////////////////////
 
 #[macro_use]
-mod local;
+pub(crate) mod local;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::local::{AccessError, LocalKey};
@@ -248,9 +247,9 @@ pub mod local_impl {
 #[derive(Debug)]
 pub struct Builder {
     // A name for the thread-to-be, for identification in panic messages
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     // The size of the stack for the spawned thread in bytes
-    stack_size: Option<usize>,
+    pub(crate) stack_size: Option<usize>,
 }
 
 impl Builder {
@@ -521,6 +520,7 @@ impl Builder {
             let try_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                 crate::sys::backtrace::__rust_begin_short_backtrace(f)
             }));
+
             // SAFETY: `their_packet` as been built just above and moved by the
             // closure (it is an Arc<...>) and `my_packet` will be stored in the
             // same `JoinInner` as this closure meaning the mutation will be
@@ -1326,14 +1326,14 @@ mod thread_name_string {
 pub(crate) use thread_name_string::ThreadNameString;
 
 /// The internal representation of a `Thread` handle
-struct Inner {
+pub(crate) struct Inner {
     name: ThreadName, // Guaranteed to be UTF-8
     id: ThreadId,
     parker: Parker,
 }
 
 impl Inner {
-    fn parker(self: Pin<&Self>) -> Pin<&Parker> {
+    pub(crate) fn parker(self: Pin<&Self>) -> Pin<&Parker> {
         unsafe { Pin::map_unchecked(self, |inner| &inner.parker) }
     }
 }
@@ -1503,7 +1503,7 @@ impl Thread {
         self.inner.name.as_str()
     }
 
-    fn cname(&self) -> Option<&CStr> {
+    pub(crate) fn cname(&self) -> Option<&CStr> {
         self.inner.name.as_cstr()
     }
 }
@@ -1574,7 +1574,7 @@ pub type Result<T> = crate::result::Result<T, Box<dyn Any + Send + 'static>>;
 //
 // An Arc to the packet is stored into a `JoinInner` which in turns is placed
 // in `JoinHandle`.
-struct Packet<'scope, T> {
+pub(crate) struct Packet<'scope, T> {
     scope: Option<Arc<scoped::ScopeData>>,
     result: UnsafeCell<Option<Result<T>>>,
     _marker: PhantomData<Option<&'scope scoped::ScopeData>>,
@@ -1619,14 +1619,14 @@ impl<'scope, T> Drop for Packet<'scope, T> {
 }
 
 /// Inner representation for JoinHandle
-struct JoinInner<'scope, T> {
-    native: imp::Thread,
-    thread: Thread,
-    packet: Arc<Packet<'scope, T>>,
+pub(crate) struct JoinInner<'scope, T> {
+    pub(crate) native: imp::Thread,
+    pub(crate) thread: Thread,
+    pub(crate) packet: Arc<Packet<'scope, T>>,
 }
 
 impl<'scope, T> JoinInner<'scope, T> {
-    fn join(mut self) -> Result<T> {
+    pub(crate) fn join(mut self) -> Result<T> {
         self.native.join();
         Arc::get_mut(&mut self.packet).unwrap().result.get_mut().take().unwrap()
     }
@@ -1696,7 +1696,7 @@ impl<'scope, T> JoinInner<'scope, T> {
 /// [`thread::spawn`]: spawn
 #[stable(feature = "rust1", since = "1.0.0")]
 #[cfg_attr(target_os = "teeos", must_use)]
-pub struct JoinHandle<T>(JoinInner<'static, T>);
+pub struct JoinHandle<T>(pub(crate) JoinInner<'static, T>);
 
 #[stable(feature = "joinhandle_impl_send_sync", since = "1.29.0")]
 unsafe impl<T> Send for JoinHandle<T> {}
@@ -1799,7 +1799,7 @@ impl<T> fmt::Debug for JoinHandle<T> {
     }
 }
 
-fn _assert_sync_and_send() {
+pub(crate) fn _assert_sync_and_send() {
     fn _assert_both<T: Send + Sync>() {}
     _assert_both::<JoinHandle<()>>();
     _assert_both::<Thread>();

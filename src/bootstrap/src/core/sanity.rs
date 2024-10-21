@@ -220,7 +220,7 @@ than building it.
         }
 
         // We don't use a C compiler on wasm32
-        if target.contains("wasm32") {
+        if target.contains("wasm32") || target.contains("wasm64") {
             continue;
         }
 

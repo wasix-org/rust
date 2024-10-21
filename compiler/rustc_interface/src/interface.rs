@@ -384,6 +384,18 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
 
     let sysroot = filesearch::materialize_sysroot(config.opts.maybe_sysroot.clone());
     let target = config::build_target_config(&early_dcx, &config.opts, &sysroot);
+
+    // when the vendor is wasmer, the linker should export the __wasm_signal symbol
+    let config = {
+        let mut config = config;
+
+        if target.vendor == "wasmer" {
+            config.opts.cg.link_args.push("--export=__wasm_signal".to_owned());
+        }
+
+        config
+    };
+
     let file_loader = config.file_loader.unwrap_or_else(|| Box::new(RealFileLoader));
     let path_mapping = config.opts.file_path_mapping();
     let hash_kind = config.opts.unstable_opts.src_hash_algorithm(&target);

@@ -21,7 +21,11 @@ rustc_graphviz = { path = "../rustc_graphviz" }
 rustc_index = { path = "../rustc_index", package = "rustc_index" }
 rustc_macros = { path = "../rustc_macros" }
 rustc_serialize = { path = "../rustc_serialize" }
-smallvec = { version = "1.8.1", features = ["const_generics", "union", "may_dangle"] }
+smallvec = { version = "1.8.1", features = [
+    "const_generics",
+    "union",
+    "may_dangle",
+] }
 stacker = "0.1.15"
 tempfile = "3.2"
 thin-vec = "0.2.12"
@@ -46,7 +50,7 @@ features = [
 libc = "0.2"
 # tidy-alphabetical-end
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 # tidy-alphabetical-start
 memmap2 = "0.2.1"
 # tidy-alphabetical-end

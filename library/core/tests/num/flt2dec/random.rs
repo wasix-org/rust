@@ -1,4 +1,4 @@
-#![cfg(not(target_arch = "wasm32"))]
+#![cfg(not(target_family = "wasm"))]
 
 use core::num::flt2dec::strategy::grisu::{format_exact_opt, format_shortest_opt};
 use core::num::flt2dec::{decode, DecodableFloat, Decoded, FullDecoded, MAX_SIG_DIGITS};
