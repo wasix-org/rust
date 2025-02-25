@@ -7,7 +7,7 @@ on:
   workflow_call:
 jobs:
   build-libc:
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     steps:
       - name: show git config
         run: |
@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           repository: wasix-org/wasix-libc
-          ref: main
+          ref: wasm64-rust-toolchain
           path: wasix-libc
           submodules: "recursive"
 
@@ -57,7 +57,7 @@ jobs:
           touch $GITHUB_WORKSPACE/.stub
 
       - name: Archive build output
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: wasix-libc
           path: |
@@ -159,7 +159,7 @@ jobs:
           GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
 
       - name: Archive build output (Mac OS - x86)
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: contains(matrix.os, 'macos') && matrix.arch == 'x86'
         with:
           name: rust-toolchain-x86_64-apple-darwin
@@ -185,7 +185,7 @@ jobs:
           GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
 
       - name: Archive build output (Mac OS - aarch64)
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: contains(matrix.os, 'macos') && matrix.arch == 'aarch64'
         with:
           name: rust-toolchain-aarch64-apple-darwin
@@ -217,7 +217,7 @@ jobs:
           GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
 
       - name: Archive build output (Linux)
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: contains(matrix.os, 'ubuntu')
         with:
           name: rust-toolchain-x86_64-unknown-linux-gnu
@@ -266,7 +266,7 @@ jobs:
 
       - name: Archive build output (Windows)
         if: contains(matrix.os, 'windows') && matrix.arch == 'x86'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: rust-toolchain-x86_64-pc-windows-msvc
           # name: rust-toolchain-x86_64-pc-windows-gnu
