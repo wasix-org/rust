@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: wasix-org/cargo-wasix
-          ref: main
+          ref: target-fix
           path: cargo-wasix
           fetch-depth: 2
 
@@ -88,12 +88,6 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        if: ${{ !contains(matrix.os, 'windows') }}
-        with:
-          toolchain: stable
-
       - name: Download wasix-libc artifact
         uses: actions/download-artifact@v4
         with:
@@ -124,40 +118,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: wasix-org/cargo-wasix
-          ref: main
+          ref: target-fix
           path: cargo-wasix
-
-      # Linux!
-
-      - name: Setup (Ubuntu)
-        if: matrix.arch == 'x86' && contains(matrix.os, 'ubuntu')
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential curl wget xz-utils git python3 ninja-build cmake
-
-      - name: Build (Linux)
-        if: matrix.arch == 'x86' && contains(matrix.os, 'ubuntu')
-        shell: bash
-        env:
-          WASIX_NO_UPDATE_REPOS: "1"
-          WASIX_COMPONENTS: rust
-          WASIX_RUST_HOST: x86_64-unknown-linux-gnu
-        run: |
-          cd cargo-wasix
-          # NOTE: must unset GITHUB_ACTIONS env var, because Rst bootstrap checks for it.
-          # (see bootstrap config.rs)
-          GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
-
-      - name: Archive build output (Linux)
-        uses: actions/upload-artifact@v4
-        if: contains(matrix.os, 'ubuntu')
-        with:
-          name: rust-toolchain-x86_64-unknown-linux-gnu
-          path: |
-            wasix-rust/build/x86_64-unknown-linux-gnu/stage2
-            !wasix-rust/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/src
-            !wasix-rust/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/rustc-src
 
       # Mac - x86
 
@@ -168,6 +130,19 @@ jobs:
           brew update
           # Need ninja for building llvm (for aarch64 cross compile)
           brew install ninja
+
+      # Interlude: install rust now. For some reason, brew install removes cargo, so
+      # we're doing this after as it keeps mac builds happy. This is ultimately a
+      # hack, so if anybody knows why brew install removes cargo, please fix it and
+      # move this step back up to where it originally was.
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        if: ${{ !contains(matrix.os, 'windows') }}
+        with:
+          toolchain: stable
+
+      # Mac - continued
 
       - name: Build (Mac Os, x86)
         shell: bash
@@ -219,6 +194,38 @@ jobs:
             !wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib/src
             !wasix-rust/build/aarch64-apple-darwin/stage2/lib/rustlib/rustc-src
 
+      # Linux!
+
+      - name: Setup (Ubuntu)
+        if: matrix.arch == 'x86' && contains(matrix.os, 'ubuntu')
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget xz-utils git python3 ninja-build cmake
+
+      - name: Build (Linux)
+        if: matrix.arch == 'x86' && contains(matrix.os, 'ubuntu')
+        shell: bash
+        env:
+          WASIX_NO_UPDATE_REPOS: "1"
+          WASIX_COMPONENTS: rust
+          WASIX_RUST_HOST: x86_64-unknown-linux-gnu
+        run: |
+          cd cargo-wasix
+          # NOTE: must unset GITHUB_ACTIONS env var, because Rst bootstrap checks for it.
+          # (see bootstrap config.rs)
+          GITHUB_ACTIONS=false WASIX_BUILD_DIR=$GITHUB_WORKSPACE cargo run -- wasix build-toolchain
+
+      - name: Archive build output (Linux)
+        uses: actions/upload-artifact@v4
+        if: contains(matrix.os, 'ubuntu')
+        with:
+          name: rust-toolchain-x86_64-unknown-linux-gnu
+          path: |
+            wasix-rust/build/x86_64-unknown-linux-gnu/stage2
+            !wasix-rust/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/src
+            !wasix-rust/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/rustc-src
+
       # Windows
 
       # - name: Install chocolatey deps (Windows)
@@ -266,3 +273,4 @@ jobs:
             wasix-rust/build/x86_64-pc-windows-msvc/stage2
             !wasix-rust/build/x86_64-pc-windows-msvc/stage2/lib/rustlib/src
             !wasix-rust/build/x86_64-pc-windows-msvc/stage2/lib/rustlib/rustc-src
+
