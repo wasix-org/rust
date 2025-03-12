@@ -146,7 +146,7 @@ jobs:
 
       - name: Build (Mac Os, x86)
         shell: bash
-        if: contains(matrix.os, 'macos-12') && matrix.arch == 'x86'
+        if: contains(matrix.os, 'macos-13') && matrix.arch == 'x86'
         env:
           WASIX_NO_UPDATE_REPOS: "1"
           GITHUB_ACTIONS: "false"
