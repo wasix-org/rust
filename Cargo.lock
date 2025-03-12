@@ -1958,9 +1958,8 @@ checksum = "baff4b617f7df3d896f97fe922b64817f6cd9a756bb81d40f8883f2f66dcb401"
 
 [[package]]
 name = "libc"
-version = "0.2.159"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "561d97a539a36e26a9a5fad1ea11a3039a67714694aaa379433e580854bc3dc5"
+version = "0.2.156"
+source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.156#d67b3e6dafa1c0216bac3738718fdb11d0e49be2"
 
 [[package]]
 name = "libdbus-sys"
@@ -6342,8 +6341,3 @@ dependencies = [
  "quote",
  "syn 2.0.79",
 ]
-
-[[patch.unused]]
-name = "libc"
-version = "0.2.155"
-source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.155#cbaadd9965b725ba984a371b817e559d9da36187"

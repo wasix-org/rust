@@ -92,4 +92,4 @@ codegen-units = 1
 # lto = true
 
 [patch.crates-io]
-libc = { git = "https://github.com/wasix-org/libc.git", branch = "wasix-0.2.155" }
+libc = { git = "https://github.com/wasix-org/libc.git", branch = "wasix-0.2.156" }
