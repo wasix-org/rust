@@ -71,6 +71,18 @@ pub fn is_interrupted(_errno: i32) -> bool {
     false
 }
 
+mod unsupported {
+    use crate::io;
+
+    pub fn unsupported<T>() -> io::Result<T> {
+        Err(unsupported_err())
+    }
+
+    pub fn unsupported_err() -> io::Error {
+        io::Error::UNSUPPORTED_PLATFORM
+    }
+}
+
 pub fn decode_error_kind(errno: i32) -> ErrorKind {
     use ErrorKind::*;
 

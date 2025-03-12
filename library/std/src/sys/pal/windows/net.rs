@@ -293,7 +293,7 @@ impl Socket {
     }
 
     pub fn accept_timeout(&self, _storage: *mut c::SOCKADDR, _len: *mut c_int, _timeout: crate::time::Duration) -> io::Result<Socket> {
-        super::unsupported::unsupported()
+        crate::sys::pal::windows::unsupported::unsupported()
     }
 
     pub fn duplicate(&self) -> io::Result<Socket> {
