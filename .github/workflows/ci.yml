@@ -100,6 +100,7 @@ jobs:
           submodules: "recursive"
           # Don't clean so downloaded LLVM etc can be reused.
           clean: false
+          fetch-depth: 50
 
       # We need the full history for the main repo so the build tooling can
       # determine the cached LLVM download.
