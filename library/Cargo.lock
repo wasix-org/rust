@@ -316,7 +316,7 @@ dependencies = [
  "fortanix-sgx-abi",
  "hashbrown",
  "hermit-abi",
- "libc 0.2.155",
+ "libc 0.2.164",
  "miniz_oxide",
  "object",
  "panic_abort",
