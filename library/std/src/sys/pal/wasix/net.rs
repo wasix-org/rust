@@ -1,6 +1,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(dead_code)]
 
+use libc::c_int;
+
 use super::err2io;
 use super::fd::WasiFd;
 use crate::collections::VecDeque;
@@ -8,14 +10,10 @@ use crate::fmt;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
 use crate::os::wasi::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
-
 use crate::sync::{Arc, Mutex};
-use crate::sys_common::{AsInner, FromInner, IntoInner};
-use crate::time::Duration;
-use crate::time::Instant;
-use libc::c_int;
-
 pub use crate::sys::cvt;
+use crate::sys_common::{AsInner, FromInner, IntoInner};
+use crate::time::{Duration, Instant};
 
 pub struct Socket {
     fd: Option<WasiFd>,
@@ -741,11 +739,11 @@ fn conv_addr_v4(u: wasi::AddrIp4) -> Ipv4Addr {
     Ipv4Addr::new(u.n0, u.n1, u.h0, u.h1)
 }
 
-fn conv_addr_v6(u: wasi::AddrIp6) -> Ipv6Addr {
+fn conv_addr_v6(u: wasi::AddrIp6Bare) -> Ipv6Addr {
     Ipv6Addr::new(u.n0, u.n1, u.n2, u.n3, u.h0, u.h1, u.h2, u.h3)
 }
 
-fn conv_addr(addr: wasi::Addr) -> IpAddr {
+fn conv_addr(addr: wasi::AddrIp) -> IpAddr {
     unsafe {
         match addr.tag {
             a if a == wasi::ADDRESS_FAMILY_INET6.raw() => IpAddr::V6(conv_addr_v6(addr.u.inet6)),
@@ -787,6 +785,10 @@ fn to_wasi_addr_v6(ip: Ipv6Addr) -> wasi::AddrIp6 {
         h1: segs[5],
         h2: segs[6],
         h3: segs[7],
+        flow_info0: 0,
+        flow_info1: 0,
+        scope_id0: 0,
+        scope_id1: 0,
     }
 }
 
@@ -1304,8 +1306,8 @@ impl<'a> TryFrom<(&'a str, u16)> for LookupHost {
         let port = v.1;
         let mut ret = VecDeque::new();
         unsafe {
-            let mut ips = [crate::mem::MaybeUninit::<wasi::Addr>::zeroed(); 50];
-            let cnt = wasi::resolve(host, port, ips.as_mut_ptr() as *mut wasi::Addr, ips.len())
+            let mut ips = [crate::mem::MaybeUninit::<wasi::AddrIp>::zeroed(); 50];
+            let cnt = wasi::resolve(host, port, ips.as_mut_ptr() as *mut wasi::AddrIp, ips.len())
                 .map_err(err2io)?;
             for n in 0..cnt {
                 let ip = ips[n].assume_init();

@@ -78,10 +78,10 @@ wasi = { version = "0.11.0", features = [
 ], default-features = false }
 
 [target.wasm32-wasmer-wasi.dependencies]
-wasi = { package = "wasix", version = "0.12.9", features = ['rustc-dep-of-std'], default-features = false, public = true }
+wasi = { package = "wasix", version = "0.13.0", features = ['rustc-dep-of-std'], default-features = false, public = true }
 
 [target.wasm64-wasmer-wasi.dependencies]
-wasi = { package = "wasix", version = "0.12.9", features = ['rustc-dep-of-std'], default-features = false, public = true }
+wasi = { package = "wasix", version = "0.13.0", features = ['rustc-dep-of-std'], default-features = false, public = true }
 
 [target.'cfg(target_os = "uefi")'.dependencies]
 r-efi = { version = "5.2.0", features = ['rustc-dep-of-std'] }
