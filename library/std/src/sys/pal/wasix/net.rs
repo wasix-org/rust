@@ -42,7 +42,7 @@ impl Socket {
                 AF_INET6 => wasi::ADDRESS_FAMILY_INET6,
                 AF_INET => wasi::ADDRESS_FAMILY_INET4,
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "invalid address family"
                     ));
@@ -53,7 +53,7 @@ impl Socket {
                 SOCK_STREAM => wasi::SOCK_TYPE_SOCKET_STREAM,
                 SOCK_RAW => wasi::SOCK_TYPE_SOCKET_RAW,
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "invalid socket type"
                     ));
@@ -63,7 +63,7 @@ impl Socket {
                 SOCK_DGRAM => wasi::SOCK_PROTO_UDP,
                 SOCK_STREAM => wasi::SOCK_PROTO_TCP,
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "invalid socket protocol"
                     ));
@@ -73,7 +73,7 @@ impl Socket {
                 AF_INET6 => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
                 AF_INET => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "invalid address family"
                     ));
@@ -93,7 +93,7 @@ impl Socket {
             AF_INET6 => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             AF_INET => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             _ => {
-                return Err(io::const_io_error!(
+                return Err(io::const_error!(
                     io::ErrorKind::Uncategorized,
                     "invalid address family"
                 ));
@@ -140,7 +140,7 @@ impl Socket {
         let mut pollfd = libc::pollfd { fd: self.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
 
         if timeout.as_secs() == 0 && timeout.subsec_nanos() == 0 {
-            return Err(io::const_io_error!(
+            return Err(io::const_error!(
                 io::ErrorKind::InvalidInput,
                 "cannot set a 0 duration timeout",
             ));
@@ -151,7 +151,7 @@ impl Socket {
         loop {
             let elapsed = start.elapsed();
             if elapsed >= timeout {
-                return Err(io::const_io_error!(io::ErrorKind::TimedOut, "connection timed out"));
+                return Err(io::const_error!(io::ErrorKind::TimedOut, "connection timed out"));
             }
 
             let timeout = timeout - elapsed;
@@ -178,7 +178,7 @@ impl Socket {
                     // for POLLHUP rather than read readiness
                     if pollfd.revents & libc::POLLHUP != 0 {
                         let e = self.take_error()?.unwrap_or_else(|| {
-                            io::const_io_error!(
+                            io::const_error!(
                                 io::ErrorKind::Uncategorized,
                                 "no error set after POLLHUP",
                             )
@@ -211,7 +211,7 @@ impl Socket {
             loop {
                 let elapsed = start.elapsed();
                 if elapsed >= timeout {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::TimedOut,
                         "connection timed out"
                     ));
@@ -436,7 +436,7 @@ impl Socket {
             SO_CONNTIMEO => wasi::SOCK_OPTION_CONNECT_TIMEOUT,
             SO_ACCPTIMEO => wasi::SOCK_OPTION_ACCEPT_TIMEOUT,
             _ => {
-                return Err(io::const_io_error!(
+                return Err(io::const_error!(
                     io::ErrorKind::Uncategorized,
                     "invalid timeout type"
                 ));
@@ -452,7 +452,7 @@ impl Socket {
             SO_CONNTIMEO => wasi::SOCK_OPTION_CONNECT_TIMEOUT,
             SO_ACCPTIMEO => wasi::SOCK_OPTION_ACCEPT_TIMEOUT,
             _ => {
-                return Err(io::const_io_error!(
+                return Err(io::const_error!(
                     io::ErrorKind::Uncategorized,
                     "invalid timeout type"
                 ));
@@ -487,7 +487,7 @@ impl Socket {
             },
             a if a == wasi::OPTION_NONE.raw() => None,
             _ => {
-                return Err(io::const_io_error!(io::ErrorKind::Uncategorized, "invalid response"));
+                return Err(io::const_error!(io::ErrorKind::Uncategorized, "invalid response"));
             }
         })
     }
@@ -617,7 +617,7 @@ impl Socket {
             },
             a if a == wasi::OPTION_NONE.raw() => None,
             _ => {
-                return Err(io::const_io_error!(io::ErrorKind::Uncategorized, "invalid response"));
+                return Err(io::const_error!(io::ErrorKind::Uncategorized, "invalid response"));
             }
         })
     }
@@ -1286,7 +1286,7 @@ impl<'a> TryFrom<&'a str> for LookupHost {
             ($e:expr, $msg:expr) => {
                 match $e {
                     Some(r) => r,
-                    None => return Err(io::const_io_error!(io::ErrorKind::InvalidInput, $msg)),
+                    None => return Err(io::const_error!(io::ErrorKind::InvalidInput, $msg)),
                 }
             };
         }

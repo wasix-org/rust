@@ -31,7 +31,7 @@ impl UnixListener {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn bind<P: AsRef<Path>>(_path: P) -> io::Result<UnixListener> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -44,7 +44,7 @@ impl UnixListener {
     /// Not currently supported on this platform
     #[unstable(feature = "unix_socket_abstract", issue = "85410")]
     pub fn bind_addr(socket_addr: &SocketAddr) -> io::Result<UnixListener> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -55,7 +55,7 @@ impl UnixListener {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -66,7 +66,7 @@ impl UnixListener {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn accept_timeout(&self, _timeout: crate::time::Duration) -> io::Result<(UnixStream, SocketAddr)> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -77,7 +77,7 @@ impl UnixListener {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn try_clone(&self) -> io::Result<UnixListener> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -88,7 +88,7 @@ impl UnixListener {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -99,7 +99,7 @@ impl UnixListener {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -110,7 +110,7 @@ impl UnixListener {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))

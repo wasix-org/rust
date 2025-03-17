@@ -27,7 +27,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -38,7 +38,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[unstable(feature = "unix_socket_abstract", issue = "85410")]
     pub fn connect_addr(socket_addr: &SocketAddr) -> io::Result<UnixStream> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -73,7 +73,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -84,7 +84,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -95,7 +95,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -106,7 +106,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -117,7 +117,7 @@ impl UnixStream {
     /// Not currently supported on this platforn
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -128,7 +128,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -163,7 +163,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -174,7 +174,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[stable(feature = "unix_socket", since = "1.10.0")]
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -187,7 +187,7 @@ impl UnixStream {
     /// Not currently supported on this platform
     #[unstable(feature = "unix_socket_peek", issue = "76923")]
     pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))

@@ -158,7 +158,7 @@ impl StdError for JoinPathsError {
 
 pub fn current_exe() -> io::Result<PathBuf> {
     use crate::io::ErrorKind;
-    Err(io::const_io_error!(ErrorKind::Unsupported, "Not yet implemented!"))
+    Err(io::const_error!(ErrorKind::Unsupported, "Not yet implemented!"))
 }
 
 pub struct EnvStrDebug<'a> {
