@@ -1392,9 +1392,9 @@ impl StackProbeType {
                     .and_then(|o| o.as_array())
                     .ok_or_else(|| "expected `min-llvm-version-for-inline` to be an array")?;
                 let mut iter = min_version.into_iter().map(|v| {
-                    let int = v.as_u64().ok_or_else(|| {
-                        "expected `min-llvm-version-for-inline` values to be integers"
-                    })?;
+                    let int = v.as_u64().ok_or_else(
+                        || "expected `min-llvm-version-for-inline` values to be integers",
+                    )?;
                     u32::try_from(int)
                         .map_err(|_| "`min-llvm-version-for-inline` values don't convert to u32")
                 });
@@ -1926,6 +1926,7 @@ supported_targets! {
     ("wasm32-wasip1-threads", wasm32_wasip1_threads),
     ("wasm32-wali-linux-musl", wasm32_wali_linux_musl),
     ("wasm32-wasmer-wasi", wasm32_wasmer_wasi),
+    ("wasm32-wasmer-wasi-dl", wasm32_wasmer_wasi_dl),
     ("wasm64-unknown-unknown", wasm64_unknown_unknown),
     ("wasm64-wasmer-wasi", wasm64_wasmer_wasi),
 
@@ -3435,6 +3436,8 @@ impl Target {
     fn can_use_os_unknown(&self) -> bool {
         self.llvm_target == "wasm32-unknown-unknown"
             || self.llvm_target == "wasm64-unknown-unknown"
+            || self.llvm_target == "wasm32-wasmer-wasi"
+            || self.llvm_target == "wasm32-wasmer-wasi-dl"
             || (self.env == "sgx" && self.vendor == "fortanix")
     }
 
