@@ -430,7 +430,28 @@ fn copy_self_contained_objects(
                 target.triple
             )
         });
-        for &obj in &["libc.a", "crt1-command.o", "crt1-reactor.o"] {
+        let mut files = vec!["libc.a", "crt1-command.o", "crt1-reactor.o"];
+        if target.contains("-dl") {
+            files.extend([
+                // Needed for DL side modules.
+                "scrt1.o",
+                // Need to bring these over for DL main module builds, so we can embed them.
+                "libcommon-tag-stubs.a",
+                "libcrypt.a",
+                "libwasi-emulated-mman.a",
+                "libresolv.a",
+                "librt.a",
+                "libm.a",
+                "libpthread.a",
+                "libutil.a",
+                // We don't link c++ libs in, but we bring them over anyway so that, when
+                // a rust program needs to load C++-based dylibs, the user can link these
+                // in manually via linker flags.
+                "libc++.a",
+                "libc++abi.a",
+            ]);
+        }
+        for obj in files {
             copy_and_stamp(
                 builder,
                 &libdir_self_contained,

@@ -851,11 +851,7 @@ impl Build {
     /// Component directory that Cargo will produce output into (e.g.
     /// release/debug)
     fn cargo_dir(&self) -> &'static str {
-        if self.config.rust_optimize.is_release() {
-            "release"
-        } else {
-            "debug"
-        }
+        if self.config.rust_optimize.is_release() { "release" } else { "debug" }
     }
 
     fn tools_dir(&self, compiler: Compiler) -> PathBuf {
@@ -1409,20 +1405,18 @@ impl Build {
     /// configuration, and failing that it assumes that `$WASI_SDK_PATH` is
     /// set in the environment, and failing that `None` is returned.
     fn wasi_libdir(&self, target: TargetSelection) -> Option<PathBuf> {
-        let mut target_name = target.to_string();
-        if target_name.contains("-wasmer") {
-            target_name = target_name.replace("-wasmer", "");
-        }
+        let c_target_name =
+            if target.to_string().contains("wasm32") { "wasm32-wasi" } else { "wasm64-wasi" };
         let configured =
             self.config.target_config.get(&target).and_then(|t| t.wasi_root.as_ref()).map(|p| &**p);
         if let Some(path) = configured {
-            return Some(path.join("lib").join(target_name));
+            return Some(path.join("lib").join(c_target_name));
         }
         let mut env_root = self.wasi_sdk_path.clone()?;
         env_root.push("share");
         env_root.push("wasi-sysroot");
         env_root.push("lib");
-        env_root.push(target_name);
+        env_root.push(c_target_name);
         Some(env_root)
     }
 
@@ -1954,11 +1948,7 @@ impl Build {
         use std::os::unix::fs::symlink as symlink_file;
         #[cfg(windows)]
         use std::os::windows::fs::symlink_file;
-        if !self.config.dry_run() {
-            symlink_file(src.as_ref(), link.as_ref())
-        } else {
-            Ok(())
-        }
+        if !self.config.dry_run() { symlink_file(src.as_ref(), link.as_ref()) } else { Ok(()) }
     }
 
     /// Returns if config.ninja is enabled, and checks for ninja existence,

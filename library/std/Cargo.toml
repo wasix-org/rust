@@ -32,7 +32,9 @@ miniz_oxide = { version = "0.8.0", optional = true, default-features = false }
 addr2line = { version = "0.25.0", optional = true, default-features = false }
 
 [target.'cfg(not(all(windows, target_env = "msvc")))'.dependencies]
-libc = { git = "https://github.com/wasix-org/libc.git", branch = "wasix-0.2.164", version = "0.2.164", default-features = false, features = ['rustc-dep-of-std'], public = true }
+libc = { git = "https://github.com/wasix-org/libc.git", branch = "wasix-0.2.164", version = "0.2.164", default-features = false, features = [
+    'rustc-dep-of-std',
+], public = true }
 
 [target.'cfg(all(not(target_os = "aix"), not(all(windows, target_env = "msvc", not(target_vendor = "uwp")))))'.dependencies]
 object = { version = "0.37.1", default-features = false, optional = true, features = [
@@ -78,10 +80,19 @@ wasi = { version = "0.11.0", features = [
 ], default-features = false }
 
 [target.wasm32-wasmer-wasi.dependencies]
-wasi = { package = "wasix", version = "0.13.0", features = ['rustc-dep-of-std'], default-features = false, public = true }
+wasi = { package = "wasix", version = "0.13.0", features = [
+    'rustc-dep-of-std',
+], default-features = false, public = true }
+
+[target.wasm32-wasmer-wasi-dl.dependencies]
+wasi = { package = "wasix", version = "0.13.0", features = [
+    'rustc-dep-of-std',
+], default-features = false, public = true }
 
 [target.wasm64-wasmer-wasi.dependencies]
-wasi = { package = "wasix", version = "0.13.0", features = ['rustc-dep-of-std'], default-features = false, public = true }
+wasi = { package = "wasix", version = "0.13.0", features = [
+    'rustc-dep-of-std',
+], default-features = false, public = true }
 
 [target.'cfg(target_os = "uefi")'.dependencies]
 r-efi = { version = "5.2.0", features = ['rustc-dep-of-std'] }
@@ -157,6 +168,7 @@ test = true
 level = "warn"
 check-cfg = [
     'cfg(target_vendor, values("wasmer"))',
+    'cfg(target_env, values("dl"))',
     # std use #[path] imports to portable-simd `std_float` crate
     # and to the `backtrace` crate which messes-up with Cargo list
     # of declared features, we therefor expect any feature cfg

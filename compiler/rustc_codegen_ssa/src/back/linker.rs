@@ -1328,7 +1328,7 @@ impl<'a> WasmLd<'a> {
         //      symbols are how the TLS segments are initialized and configured.
         let mut wasm_ld = WasmLd { cmd, sess };
         if sess.target_features.contains(&sym::atomics) {
-            wasm_ld.link_args(&["--shared-memory", "--max-memory=1073741824", "--import-memory"]);
+            wasm_ld.link_args(&["--shared-memory", "--max-memory=4294967296", "--import-memory"]);
             if sess.target.os == "unknown" || sess.target.os == "none" {
                 wasm_ld.link_args(&[
                     "--export=__wasm_init_tls",
@@ -1354,11 +1354,38 @@ impl<'a> Linker for WasmLd<'a> {
         _out_filename: &Path,
     ) {
         match output_kind {
-            LinkOutputKind::DynamicNoPicExe
-            | LinkOutputKind::DynamicPicExe
-            | LinkOutputKind::StaticNoPicExe
-            | LinkOutputKind::StaticPicExe => {}
-            LinkOutputKind::DynamicDylib | LinkOutputKind::StaticDylib => {
+            LinkOutputKind::DynamicNoPicExe | LinkOutputKind::StaticNoPicExe => {}
+            LinkOutputKind::StaticPicExe | LinkOutputKind::DynamicPicExe => {
+                // FIXME: The wasm32-wasmer-wasi-dl toolchain produces broken executables
+                // right now, because the start function isn't linked correctly. Instead of
+                // _start calling the rust main function, it calls __main_void from libc,
+                // which is broken because rustc does not generate a __main_argc_argv.
+                // ... probably because we're linking in libc's _start and overriding rustc's?
+
+                self.link_args(["-pie", "--export-all", "--no-gc-sections"]);
+
+                // We link and export all of libc, as well as all of rust's stdlib into dynamic
+                // executables, so that side modules can just link against the existing code at
+                // runtime. This has two benefits:
+                //  * Reduced code size for side modules
+                //  * More importantly, static and thread-local variables will exist only once.
+                //    This is especially important for libc, which stores things such as the
+                //    state of its memory allocator (malloc et al.) in static variables.
+                let whole_archive = true;
+                let verbatim = false; // No effect for WasmLd
+                self.link_staticlib_by_name("c", verbatim, whole_archive);
+                self.link_staticlib_by_name("resolv", verbatim, whole_archive);
+                self.link_staticlib_by_name("rt", verbatim, whole_archive);
+                self.link_staticlib_by_name("m", verbatim, whole_archive);
+                self.link_staticlib_by_name("pthread", verbatim, whole_archive);
+                self.link_staticlib_by_name("util", verbatim, whole_archive);
+                self.link_staticlib_by_name("wasi-emulated-mman", verbatim, whole_archive);
+                self.link_staticlib_by_name("common-tag-stubs", verbatim, whole_archive);
+            }
+            LinkOutputKind::DynamicDylib => {
+                self.link_args(["--no-entry", "-shared", "--unresolved-symbols=import-dynamic"]);
+            }
+            LinkOutputKind::StaticDylib => {
                 self.link_arg("--no-entry");
             }
             LinkOutputKind::WasiReactorExe => {
@@ -1443,7 +1470,7 @@ impl<'a> Linker for WasmLd<'a> {
     fn export_symbols(
         &mut self,
         _tmpdir: &Path,
-        _crate_type: CrateType,
+        crate_type: CrateType,
         symbols: &[(String, SymbolExportKind)],
     ) {
         for (sym, _) in symbols {
@@ -1454,7 +1481,23 @@ impl<'a> Linker for WasmLd<'a> {
         // symbols explicitly passed via the `--export` flags above and hides all
         // others. Various bits and pieces of wasm32-unknown-unknown tooling use
         // this, so be sure these symbols make their way out of the linker as well.
-        self.link_args(&["--export=__heap_base", "--export=__data_end", "--export=__stack_pointer"]);
+        self.link_args(&[
+            "--export=__wasm_init_tls",
+            "--export=__tls_size",
+            "--export=__tls_align",
+            "--export=__tls_base",
+            "--export=__wasm_call_ctors",
+            "--export=__wasm_signal",
+            "--export-if-defined=__wasm_apply_data_relocs",
+        ]);
+
+        if matches!(crate_type, CrateType::Executable) {
+            self.link_args(&[
+                "--export-if-defined=__stack_pointer",
+                "--export-if-defined=__heap_base",
+                "--export-if-defined=__data_end",
+            ]);
+        }
     }
 
     fn subsystem(&mut self, _subsystem: &str) {}

@@ -71,22 +71,31 @@
 //! best we can with this target. Don't start relying on too much here unless
 //! you know what you're getting in to!
 
-use crate::spec::{base, crt_objects, Cc, LinkSelfContainedDefault, LinkerFlavor, Target};
+use crate::spec::{Cc, LinkSelfContainedDefault, LinkerFlavor, Target, base, crt_objects};
 
 pub(crate) fn target() -> Target {
+    macro_rules! args {
+        ($prefix:literal) => {
+            &[
+                // We need shared memory for multithreading
+                concat!($prefix, "--shared-memory"),
+                concat!($prefix, "--import-memory"),
+                concat!($prefix, "--export-dynamic"),
+                concat!($prefix, "--no-check-features"),
+                concat!($prefix, "-mllvm"),
+                concat!($prefix, "--wasm-enable-sjlj"),
+            ]
+        };
+    }
+
     let mut options = base::wasm::options();
 
     options.os = "wasi".into();
     options.vendor = "wasmer".into();
-    options.add_pre_link_args(
-        LinkerFlavor::WasmLld(Cc::Yes),
-        &[
-            "--target=wasm32-wasi",
-            // We need shared memory for multithreading
-            "--shared-memory",
-            "--no-check-features",
-        ],
-    );
+    options.add_pre_link_args(LinkerFlavor::WasmLld(Cc::Yes), &["--target=wasm32-wasi"]);
+
+    options.add_pre_link_args(LinkerFlavor::WasmLld(Cc::Yes), args!("-Wl,"));
+    options.add_pre_link_args(LinkerFlavor::WasmLld(Cc::No), args!(""));
 
     options.pre_link_objects_self_contained = crt_objects::pre_wasi_self_contained();
     options.post_link_objects_self_contained = crt_objects::post_wasi_self_contained();

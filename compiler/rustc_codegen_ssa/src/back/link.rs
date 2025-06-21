@@ -1,5 +1,6 @@
 mod raw_dylib;
 
+use core::iter::Iterator;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions, read};
@@ -1020,14 +1021,6 @@ fn link_natively(
                 strip_with_external_utility(sess, stripcmd, out_filename, &["--strip-all"])
             }
             (Strip::None, _) => {}
-        }
-    }
-
-    if sess.target.is_like_solaris {
-        // Many illumos systems will have both the native 'strip' utility and
-        // the GNU one. Use the native version explicitly and do not rely on
-        // what's in the path.
-        //
         // If cross-compiling and there is not a native version, then use
         // `llvm-strip` and hope.
         let stripcmd = if !sess.host.is_like_solaris { "rust-objcopy" } else { "/usr/bin/strip" };
@@ -3004,6 +2997,11 @@ fn add_dynamic_crate(cmd: &mut dyn Linker, sess: &Session, cratepath: &Path) {
 }
 
 fn relevant_lib(sess: &Session, lib: &NativeLib) -> bool {
+    if sess.target.is_like_wasm && lib.name.as_str() == "c" {
+        // For wasm targets, WasmLd decides whether to link libc based on
+        // the output kind, so we skip it here.
+        return false;
+    }
     match lib.cfg {
         Some(ref cfg) => rustc_attr_parsing::cfg_matches(cfg, sess, CRATE_NODE_ID, None),
         None => true,
