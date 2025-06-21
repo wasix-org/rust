@@ -1,3 +1,4 @@
+use core::iter::Iterator;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions, read};
@@ -1116,16 +1117,22 @@ fn link_natively(
     if sess.target.is_like_osx {
         let stripcmd = "rust-objcopy";
         match (strip, crate_type) {
-            (Strip::Debuginfo, _) => {
-                strip_symbols_with_external_utility(sess, stripcmd, out_filename, Some("--strip-debug"))
-            }
+            (Strip::Debuginfo, _) => strip_symbols_with_external_utility(
+                sess,
+                stripcmd,
+                out_filename,
+                Some("--strip-debug"),
+            ),
             // Per the manpage, `-x` is the maximum safe strip level for dynamic libraries. (#93988)
             (Strip::Symbols, CrateType::Dylib | CrateType::Cdylib | CrateType::ProcMacro) => {
                 strip_symbols_with_external_utility(sess, stripcmd, out_filename, Some("-x"))
             }
-            (Strip::Symbols, _) => {
-                strip_symbols_with_external_utility(sess, stripcmd, out_filename, Some("--strip-all"))
-            }
+            (Strip::Symbols, _) => strip_symbols_with_external_utility(
+                sess,
+                stripcmd,
+                out_filename,
+                Some("--strip-all"),
+            ),
             (Strip::None, _) => {}
         }
     }
@@ -2986,6 +2993,11 @@ fn add_dynamic_crate(cmd: &mut dyn Linker, sess: &Session, cratepath: &Path) {
 }
 
 fn relevant_lib(sess: &Session, lib: &NativeLib) -> bool {
+    if sess.target.is_like_wasm && lib.name.as_str() == "c" {
+        // For wasm targets, WasmLd decides whether to link libc based on
+        // the output kind, so we skip it here.
+        return false;
+    }
     match lib.cfg {
         Some(ref cfg) => rustc_attr::cfg_matches(cfg, sess, CRATE_NODE_ID, None),
         None => true,
