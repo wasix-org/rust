@@ -1,9 +1,9 @@
 change-id = 125535
 
 [build]
-target = ["wasm32-wasmer-wasi", "wasm64-wasmer-wasi"]
+target = ["wasm32-wasmer-wasi", "wasm32-wasmer-wasi-dl"]
 extended = true
-tools = [ "clippy", "rustfmt" ]
+tools = ["cargo", "clippy", "rustfmt"]
 configure-args = []
 
 [rust]
@@ -14,7 +14,7 @@ llvm-tools = true
 download-ci-llvm = false
 
 [target.wasm32-wasmer-wasi]
-wasi-root = "../wasix-libc/sysroot32"
+wasi-root = "../wasix-libc/sysroot32-eh"
 
-[target.wasm64-wasmer-wasi]
-wasi-root = "../wasix-libc/sysroot64"
+[target.wasm32-wasmer-wasi-dl]
+wasi-root = "../wasix-libc/sysroot32-ehpic"
