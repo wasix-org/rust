@@ -1,19 +1,17 @@
 #![allow(unused, dead_code)]
-use crate::fmt;
-use crate::io;
+use core::ffi::CStr;
+
+use libc::{c_int, pid_t};
+use wasi::{JoinStatus, JoinStatusType};
+
+use super::common::*;
+use crate::io::ErrorKind;
 use crate::num::NonZeroI32;
 use crate::os::fd::FromRawFd;
 use crate::sys::pipe::AnonPipe;
-use crate::sys::process::process_common::*;
-use crate::sys::{unsupported, unsupported_err};
-use core::ffi::CStr;
-use wasi::{JoinStatus, JoinStatusType};
-
-use crate::io::ErrorKind;
-
-use libc::{c_int, pid_t};
-
 pub use crate::sys::{cvt, cvt_nz, cvt_r};
+use crate::sys::{unsupported, unsupported_err};
+use crate::{fmt, io};
 
 fn to_anon_pipe(option_fd: wasi::OptionFd) -> Option<AnonPipe> {
     match wasi::Option::from(option_fd.tag) {
@@ -45,7 +43,7 @@ impl Command {
         let program = self
             .get_program()
             .to_str()
-            .ok_or_else(|| io::const_io_error!(ErrorKind::Other, "Spawn failed",))?;
+            .ok_or_else(|| io::const_error!(ErrorKind::Other, "Spawn failed",))?;
 
         let handle = unsafe {
             wasi::proc_spawn(
@@ -59,7 +57,7 @@ impl Command {
                 ".",
             )
         }
-        .map_err(|_| io::const_io_error!(ErrorKind::Other, "Spawn failed",))?;
+        .map_err(|_| io::const_error!(ErrorKind::Other, "Spawn failed",))?;
 
         Ok((
             Process { pid: handle.pid as i32, status: None },
@@ -89,7 +87,7 @@ impl Command {
         let envp = self.capture_env();
 
         if self.saw_nul() {
-            return io::const_io_error!(ErrorKind::InvalidInput, "nul byte found in provided data",);
+            return io::const_error!(ErrorKind::InvalidInput, "nul byte found in provided data",);
         }
 
         match self.setup_io(default, true) {
@@ -154,13 +152,13 @@ impl Process {
         // and used for another process, and we probably shouldn't be killing
         // random processes, so just return an error.
         if self.status.is_some() {
-            Err(io::const_io_error!(
+            Err(io::const_error!(
                 ErrorKind::InvalidInput,
                 "invalid argument: can't kill an exited process",
             ))
         } else {
             unsafe { wasi::proc_signal(self.pid as u32, wasi::SIGNAL_KILL) }
-                .map_err(|_| io::const_io_error!(ErrorKind::Other, "Kill failed",))
+                .map_err(|_| io::const_error!(ErrorKind::Other, "Kill failed",))
         }
     }
 
@@ -172,7 +170,7 @@ impl Process {
         let mut pid = wasi::OptionPid { tag: 1, u: wasi::OptionPidU { some: self.pid as u32 } };
 
         let join_status = unsafe { wasi::proc_join(&mut pid, 0) }
-            .map_err(|_| io::const_io_error!(ErrorKind::Other, "Join failed",))?;
+            .map_err(|_| io::const_error!(ErrorKind::Other, "Join failed",))?;
 
         let status = ExitStatus(join_status);
 
@@ -188,7 +186,7 @@ impl Process {
         let mut pid = wasi::OptionPid { tag: 1, u: wasi::OptionPidU { some: self.pid as u32 } };
 
         let join_status = unsafe { wasi::proc_join(&mut pid, wasi::JOIN_FLAGS_NON_BLOCKING) }
-            .map_err(|_| io::const_io_error!(ErrorKind::Other, "Join failed",))?;
+            .map_err(|_| io::const_error!(ErrorKind::Other, "Join failed",))?;
 
         let status = ExitStatus(join_status);
 

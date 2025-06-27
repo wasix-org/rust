@@ -1058,6 +1058,7 @@ fn link_natively(
                 strip_with_external_utility(sess, stripcmd, out_filename, &["--strip-all"])
             }
             (Strip::None, _) => {}
+        }
         // If cross-compiling and there is not a native version, then use
         // `llvm-strip` and hope.
         let stripcmd = if !sess.host.is_like_solaris { "rust-objcopy" } else { "/usr/bin/strip" };

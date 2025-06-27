@@ -20,6 +20,11 @@ cfg_if::cfg_if! {
             mod wasip1;
             pub use wasip1::*;
         }
+    } else if #[cfg(all(target_os = "wasi", target_vendor = "wasmer"))] {
+        mod connection {
+            mod wasix;
+            pub use wasix::*;
+        }
     } else if #[cfg(target_os = "xous")] {
         mod connection {
             mod xous;

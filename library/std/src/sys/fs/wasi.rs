@@ -435,7 +435,7 @@ impl File {
     }
 
     pub fn open_c(path: &CStr, opts: &OpenOptions) -> io::Result<File> {
-        Self::open(Path::new(path.to_str().map_err(|_| io::const_io_error!(io::ErrorKind::InvalidInput, "failed to convert CStr to path"))?), opts)
+        Self::open(Path::new(path.to_str().map_err(|_| io::const_error!(io::ErrorKind::InvalidInput, "failed to convert CStr to path"))?), opts)
     }
 
     pub fn open_at(&self, path: &Path, opts: &OpenOptions) -> io::Result<File> {

@@ -11,6 +11,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(any(target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "nuttx"))] {
         mod unsupported;
         use unsupported as imp;
+    } else if #[cfg(all(target_os = "wasi", target_vendor = "wasmer"))] {
+        mod wasix;
+        use wasix as imp;
     } else {
         mod unix;
         use unix as imp;
