@@ -12,6 +12,9 @@ cfg_if::cfg_if! {
         mod unsupported;
         use unsupported as imp;
         pub use unsupported::output;
+    } else if #[cfg(all(target_os = "wasi", target_vendor = "wasmer"))] {
+        mod wasix;
+        use wasix as imp;
     } else {
         mod unix;
         use unix as imp;

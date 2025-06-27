@@ -1,12 +1,11 @@
-use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
+use super::fd::WasiFd;
+use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read};
 use crate::mem;
-use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
-use crate::sys::fd::FileDesc;
-use crate::sys_common::IntoInner;
+use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use crate::sys::err2io;
-use crate::io::Read;
-
+use crate::sys::fd::FileDesc;
 pub use crate::sys::{cvt, cvt_r};
+use crate::sys_common::{FromInner, IntoInner};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Anonymous pipes
@@ -16,23 +15,19 @@ pub use crate::sys::{cvt, cvt_r};
 pub struct AnonPipe(FileDesc);
 
 pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
-    let (fd1, fd2) = unsafe {
-        wasi::fd_pipe().map_err(err2io)?
-    };
+    let (fd1, fd2) = unsafe { wasi::fd_pipe().map_err(err2io)? };
     let fd1 = fd1 as RawFd;
     let fd2 = fd2 as RawFd;
 
-    unsafe {
-        Ok((AnonPipe(FileDesc::from_raw_fd(fd1)), AnonPipe(FileDesc::from_raw_fd(fd2))))
-    }
+    unsafe { Ok((AnonPipe(FileDesc::from_raw_fd(fd1)), AnonPipe(FileDesc::from_raw_fd(fd2)))) }
 }
 
 impl AnonPipe {
     pub fn try_clone(&self) -> io::Result<Self> {
-	let fd = self.as_raw_fd();
-	let dup_fd = cvt(unsafe { libc::dup(fd) })?;
-	let file_desc = unsafe { FileDesc::from_raw_fd(dup_fd) };
-	Ok(AnonPipe(file_desc))
+        let fd = self.as_raw_fd();
+        let dup_fd = cvt(unsafe { libc::dup(fd) })?;
+        let file_desc = unsafe { FileDesc::from_raw_fd(dup_fd) };
+        Ok(AnonPipe(file_desc))
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -79,8 +74,8 @@ impl IntoInner<FileDesc> for AnonPipe {
 pub fn read2(p1: AnonPipe, v1: &mut Vec<u8>, p2: AnonPipe, v2: &mut Vec<u8>) -> io::Result<()> {
     // Set both pipes into nonblocking mode as we're gonna be reading from both
     // in the `select` loop below, and we wouldn't want one to block the other!
-    let p1 = p1.into_inner();
-    let p2 = p2.into_inner();
+    let p1: WasiFd = p1.into_inner();
+    let p2: WasiFd = p2.into_inner();
     p1.set_nonblocking(true)?;
     p2.set_nonblocking(true)?;
 
@@ -145,5 +140,23 @@ impl IntoRawFd for AnonPipe {
 impl FromRawFd for AnonPipe {
     unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
         Self(FromRawFd::from_raw_fd(raw_fd))
+    }
+}
+
+impl FromInner<OwnedFd> for AnonPipe {
+    fn from_inner(fd: OwnedFd) -> Self {
+        Self(WasiFd { fd })
+    }
+}
+
+impl IntoInner<OwnedFd> for AnonPipe {
+    fn into_inner(self) -> OwnedFd {
+        self.0.fd
+    }
+}
+
+impl FromInner<WasiFd> for AnonPipe {
+    fn from_inner(fd: WasiFd) -> Self {
+        Self(fd)
     }
 }

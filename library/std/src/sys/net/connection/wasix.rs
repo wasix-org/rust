@@ -3,8 +3,6 @@
 
 use libc::c_int;
 
-use super::err2io;
-use super::fd::WasiFd;
 use crate::collections::VecDeque;
 use crate::fmt;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
@@ -12,6 +10,8 @@ use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
 use crate::os::wasi::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
 use crate::sync::{Arc, Mutex};
 pub use crate::sys::cvt;
+use crate::sys::err2io;
+use crate::sys::fd::WasiFd;
 use crate::sys_common::{AsInner, FromInner, IntoInner};
 use crate::time::{Duration, Instant};
 
@@ -42,7 +42,7 @@ impl Socket {
                 AF_INET6 => wasi::ADDRESS_FAMILY_INET6,
                 AF_INET => wasi::ADDRESS_FAMILY_INET4,
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "invalid address family"
                     ));
@@ -53,7 +53,7 @@ impl Socket {
                 SOCK_STREAM => wasi::SOCK_TYPE_SOCKET_STREAM,
                 SOCK_RAW => wasi::SOCK_TYPE_SOCKET_RAW,
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "invalid socket type"
                     ));
@@ -63,7 +63,7 @@ impl Socket {
                 SOCK_DGRAM => wasi::SOCK_PROTO_UDP,
                 SOCK_STREAM => wasi::SOCK_PROTO_TCP,
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "invalid socket protocol"
                     ));
@@ -73,7 +73,7 @@ impl Socket {
                 AF_INET6 => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
                 AF_INET => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "invalid address family"
                     ));
@@ -93,7 +93,7 @@ impl Socket {
             AF_INET6 => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             AF_INET => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             _ => {
-                return Err(io::const_io_error!(
+                return Err(io::const_error!(
                     io::ErrorKind::Uncategorized,
                     "invalid address family"
                 ));
@@ -140,7 +140,7 @@ impl Socket {
         let mut pollfd = libc::pollfd { fd: self.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
 
         if timeout.as_secs() == 0 && timeout.subsec_nanos() == 0 {
-            return Err(io::const_io_error!(
+            return Err(io::const_error!(
                 io::ErrorKind::InvalidInput,
                 "cannot set a 0 duration timeout",
             ));
@@ -151,7 +151,7 @@ impl Socket {
         loop {
             let elapsed = start.elapsed();
             if elapsed >= timeout {
-                return Err(io::const_io_error!(io::ErrorKind::TimedOut, "connection timed out"));
+                return Err(io::const_error!(io::ErrorKind::TimedOut, "connection timed out"));
             }
 
             let timeout = timeout - elapsed;
@@ -178,7 +178,7 @@ impl Socket {
                     // for POLLHUP rather than read readiness
                     if pollfd.revents & libc::POLLHUP != 0 {
                         let e = self.take_error()?.unwrap_or_else(|| {
-                            io::const_io_error!(
+                            io::const_error!(
                                 io::ErrorKind::Uncategorized,
                                 "no error set after POLLHUP",
                             )
@@ -211,10 +211,7 @@ impl Socket {
             loop {
                 let elapsed = start.elapsed();
                 if elapsed >= timeout {
-                    return Err(io::const_io_error!(
-                        io::ErrorKind::TimedOut,
-                        "connection timed out"
-                    ));
+                    return Err(io::const_error!(io::ErrorKind::TimedOut, "connection timed out"));
                 }
 
                 let timeout = timeout - elapsed;
@@ -278,7 +275,7 @@ impl Socket {
         ri_flags: wasi::Riflags,
     ) -> io::Result<(usize, wasi::Roflags)> {
         let (amt, flags) = unsafe {
-            wasi::sock_recv(self.fd(), super::fd::iovec(ri_data), ri_flags).map_err(err2io)?
+            wasi::sock_recv(self.fd(), crate::sys::fd::iovec(ri_data), ri_flags).map_err(err2io)?
         };
         Ok((amt as usize, flags))
     }
@@ -340,7 +337,8 @@ impl Socket {
         ri_flags: wasi::Riflags,
     ) -> io::Result<(usize, wasi::Roflags, SocketAddr)> {
         let ret = unsafe {
-            wasi::sock_recv_from(self.fd(), super::fd::iovec(ri_data), ri_flags).map_err(err2io)?
+            wasi::sock_recv_from(self.fd(), crate::sys::fd::iovec(ri_data), ri_flags)
+                .map_err(err2io)?
         };
         Ok((ret.0 as usize, ret.1, conv_addr_port(ret.2)))
     }
@@ -368,7 +366,7 @@ impl Socket {
         si_flags: wasi::Siflags,
     ) -> io::Result<usize> {
         unsafe {
-            wasi::sock_send(self.fd(), super::fd::ciovec(si_data), si_flags)
+            wasi::sock_send(self.fd(), crate::sys::fd::ciovec(si_data), si_flags)
                 .map(|a| a as usize)
                 .map_err(err2io)
         }
@@ -409,7 +407,7 @@ impl Socket {
     ) -> io::Result<usize> {
         let addr = to_wasi_addr_port(addr);
         unsafe {
-            wasi::sock_send_to(self.fd(), super::fd::ciovec(si_data), si_flags, &addr)
+            wasi::sock_send_to(self.fd(), crate::sys::fd::ciovec(si_data), si_flags, &addr)
                 .map(|a| a as usize)
                 .map_err(err2io)
         }
@@ -436,10 +434,7 @@ impl Socket {
             SO_CONNTIMEO => wasi::SOCK_OPTION_CONNECT_TIMEOUT,
             SO_ACCPTIMEO => wasi::SOCK_OPTION_ACCEPT_TIMEOUT,
             _ => {
-                return Err(io::const_io_error!(
-                    io::ErrorKind::Uncategorized,
-                    "invalid timeout type"
-                ));
+                return Err(io::const_error!(io::ErrorKind::Uncategorized, "invalid timeout type"));
             }
         };
         self.set_timeout_internal(dur, option)
@@ -452,10 +447,7 @@ impl Socket {
             SO_CONNTIMEO => wasi::SOCK_OPTION_CONNECT_TIMEOUT,
             SO_ACCPTIMEO => wasi::SOCK_OPTION_ACCEPT_TIMEOUT,
             _ => {
-                return Err(io::const_io_error!(
-                    io::ErrorKind::Uncategorized,
-                    "invalid timeout type"
-                ));
+                return Err(io::const_error!(io::ErrorKind::Uncategorized, "invalid timeout type"));
             }
         };
         self.timeout_internal(option)
@@ -487,7 +479,7 @@ impl Socket {
             },
             a if a == wasi::OPTION_NONE.raw() => None,
             _ => {
-                return Err(io::const_io_error!(io::ErrorKind::Uncategorized, "invalid response"));
+                return Err(io::const_error!(io::ErrorKind::Uncategorized, "invalid response"));
             }
         })
     }
@@ -617,7 +609,7 @@ impl Socket {
             },
             a if a == wasi::OPTION_NONE.raw() => None,
             _ => {
-                return Err(io::const_io_error!(io::ErrorKind::Uncategorized, "invalid response"));
+                return Err(io::const_error!(io::ErrorKind::Uncategorized, "invalid response"));
             }
         })
     }
@@ -1286,7 +1278,7 @@ impl<'a> TryFrom<&'a str> for LookupHost {
             ($e:expr, $msg:expr) => {
                 match $e {
                     Some(r) => r,
-                    None => return Err(io::const_io_error!(io::ErrorKind::InvalidInput, $msg)),
+                    None => return Err(io::const_error!(io::ErrorKind::InvalidInput, $msg)),
                 }
             };
         }

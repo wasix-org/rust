@@ -4,7 +4,7 @@ use crate::sys::cvt;
 use crate::{fmt, io, mem};
 
 pub(super) fn sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
-    Err(crate::io::const_io_error!(
+    Err(crate::io::const_error!(
         crate::io::ErrorKind::Unsupported,
         "unix sockets are not supported on this platform",
     ))
@@ -49,7 +49,7 @@ impl SocketAddr {
             // linux returns zero bytes of address
             len = sun_path_offset(&addr) as libc::socklen_t; // i.e., zero-length address
         } else if addr.sun_family != libc::AF_UNIX as libc::sa_family_t {
-            return Err(io::const_io_error!(
+            return Err(io::const_error!(
                 io::ErrorKind::InvalidInput,
                 "file descriptor did not correspond to a Unix socket",
             ));
@@ -66,7 +66,7 @@ impl SocketAddr {
     where
         P: AsRef<Path>,
     {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ))
@@ -108,7 +108,7 @@ impl SocketAddr {
     #[cfg(any(doc, target_os = "android", target_os = "linux",))]
     #[unstable(feature = "unix_socket_abstract", issue = "85410")]
     pub fn from_abstract_namespace(_namespace: &[u8]) -> io::Result<SocketAddr> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "unix sockets are not supported on this platform",
         ));

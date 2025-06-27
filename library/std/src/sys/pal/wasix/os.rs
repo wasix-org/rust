@@ -1,21 +1,16 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use crate::error::Error as StdError;
-use crate::ffi::{CStr, CString, OsStr, OsString};
-use crate::fmt;
-use crate::io;
-use crate::iter;
-use crate::os::wasi::prelude::*;
-use crate::path::{self, PathBuf};
-use crate::slice;
-use crate::str;
-use crate::sync::{LazyLock, Mutex, MutexGuard};
-use crate::vec;
-
 use core::slice::memchr;
+
 use libc::c_int;
 
 use super::err2io;
+use crate::error::Error as StdError;
+use crate::ffi::{CStr, CString, OsStr, OsString};
+use crate::os::wasi::prelude::*;
+use crate::path::{self, PathBuf};
+use crate::sync::{LazyLock, Mutex, MutexGuard};
+use crate::{fmt, io, iter, slice, str, vec};
 
 const PATH_SEPARATOR: u8 = b':';
 
@@ -27,7 +22,7 @@ pub fn env_lock<'a>() -> MutexGuard<'a, ()> {
 
 #[allow(unused, dead_code)]
 pub fn errno() -> i32 {
-    extern "C" {
+    unsafe extern "C" {
         #[thread_local]
         static errno: libc::c_int;
     }
@@ -37,7 +32,7 @@ pub fn errno() -> i32 {
 
 #[allow(unused, dead_code)]
 pub fn set_errno(e: i32) {
-    extern "C" {
+    unsafe extern "C" {
         #[thread_local]
         static mut errno: c_int;
     }
@@ -158,7 +153,7 @@ impl StdError for JoinPathsError {
 
 pub fn current_exe() -> io::Result<PathBuf> {
     use crate::io::ErrorKind;
-    Err(io::const_io_error!(ErrorKind::Unsupported, "Not yet implemented!"))
+    Err(io::const_error!(ErrorKind::Unsupported, "Not yet implemented!"))
 }
 
 pub struct EnvStrDebug<'a> {

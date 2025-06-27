@@ -99,9 +99,8 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f4ac86a9e5bc1e2b3449ab9d7d3a6a405e3d1bb28d7b9be8614f55846ae3766"
+version = "1.2.27"
+source = "git+https://github.com/wasix-org/cc-rs.git?branch=wasix-1.2.27#f2e7d1a1af54367cf76108e97a6b0562d2526729"
 dependencies = [
  "shlex",
 ]

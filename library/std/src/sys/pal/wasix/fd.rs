@@ -2,12 +2,11 @@
 #![allow(dead_code)]
 
 use super::err2io;
-use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
+use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read, SeekFrom};
 use crate::mem;
 use crate::net::Shutdown;
 use crate::os::wasi::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
-use crate::io::Read;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Debug)]
@@ -17,14 +16,14 @@ pub struct WasiFd {
 
 pub use WasiFd as FileDesc;
 
-pub(super) fn iovec<'a>(a: &'a mut [IoSliceMut<'_>]) -> &'a [wasi::Iovec] {
+pub(crate) fn iovec<'a>(a: &'a mut [IoSliceMut<'_>]) -> &'a [wasi::Iovec] {
     assert_eq!(mem::size_of::<IoSliceMut<'_>>(), mem::size_of::<wasi::Iovec>());
     assert_eq!(mem::align_of::<IoSliceMut<'_>>(), mem::align_of::<wasi::Iovec>());
     // SAFETY: `IoSliceMut` and `IoVec` have exactly the same memory layout
     unsafe { mem::transmute(a) }
 }
 
-pub(super) fn ciovec<'a>(a: &'a [IoSlice<'_>]) -> &'a [wasi::Ciovec] {
+pub(crate) fn ciovec<'a>(a: &'a [IoSlice<'_>]) -> &'a [wasi::Ciovec] {
     assert_eq!(mem::size_of::<IoSlice<'_>>(), mem::size_of::<wasi::Ciovec>());
     assert_eq!(mem::align_of::<IoSlice<'_>>(), mem::align_of::<wasi::Ciovec>());
     // SAFETY: `IoSlice` and `CIoVec` have exactly the same memory layout
@@ -89,7 +88,11 @@ impl WasiFd {
         unsafe { wasi::fd_fdstat_set_flags(self.as_raw_fd() as wasi::Fd, flags).map_err(err2io) }
     }
 
-    pub(crate) fn set_rights(&self, base: wasi::Rights, inheriting: wasi::Rights) -> io::Result<()> {
+    pub(crate) fn set_rights(
+        &self,
+        base: wasi::Rights,
+        inheriting: wasi::Rights,
+    ) -> io::Result<()> {
         unsafe {
             wasi::fd_fdstat_set_rights(self.as_raw_fd() as wasi::Fd, base, inheriting)
                 .map_err(err2io)
@@ -249,9 +252,8 @@ impl WasiFd {
     }
 
     pub(crate) fn sock_accept(&self, flags: wasi::Fdflags) -> io::Result<wasi::Fd> {
-        let ret = unsafe {
-            wasi::sock_accept_v2(self.as_raw_fd() as wasi::Fd, flags).map_err(err2io)?
-        };
+        let ret =
+            unsafe { wasi::sock_accept_v2(self.as_raw_fd() as wasi::Fd, flags).map_err(err2io)? };
         Ok(ret.0)
     }
 
@@ -261,14 +263,21 @@ impl WasiFd {
         ri_flags: wasi::Riflags,
     ) -> io::Result<(usize, wasi::Roflags)> {
         let (amt, flags) = unsafe {
-            wasi::sock_recv(self.as_raw_fd() as wasi::Fd, iovec(ri_data), ri_flags).map_err(err2io)?
+            wasi::sock_recv(self.as_raw_fd() as wasi::Fd, iovec(ri_data), ri_flags)
+                .map_err(err2io)?
         };
         Ok((amt as usize, flags))
     }
 
-    pub(crate) fn sock_send(&self, si_data: &[IoSlice<'_>], si_flags: wasi::Siflags) -> io::Result<usize> {
+    pub(crate) fn sock_send(
+        &self,
+        si_data: &[IoSlice<'_>],
+        si_flags: wasi::Siflags,
+    ) -> io::Result<usize> {
         unsafe {
-            wasi::sock_send(self.as_raw_fd() as wasi::Fd, ciovec(si_data), si_flags).map(|a| a as usize).map_err(err2io)
+            wasi::sock_send(self.as_raw_fd() as wasi::Fd, ciovec(si_data), si_flags)
+                .map(|a| a as usize)
+                .map_err(err2io)
         }
     }
 
@@ -280,11 +289,9 @@ impl WasiFd {
         };
         unsafe { wasi::sock_shutdown(self.as_raw_fd() as wasi::Fd, how).map_err(err2io) }
     }
-    
+
     pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        let fdstat = unsafe {
-            wasi::fd_fdstat_get(self.as_raw_fd() as wasi::Fd).map_err(err2io)?
-        };
+        let fdstat = unsafe { wasi::fd_fdstat_get(self.as_raw_fd() as wasi::Fd).map_err(err2io)? };
 
         let mut flags = fdstat.fs_flags;
 
@@ -295,8 +302,7 @@ impl WasiFd {
         }
 
         unsafe {
-            wasi::fd_fdstat_set_flags(self.as_raw_fd() as wasi::Fd, flags)
-                .map_err(err2io)?;
+            wasi::fd_fdstat_set_flags(self.as_raw_fd() as wasi::Fd, flags).map_err(err2io)?;
         }
 
         Ok(())
@@ -304,12 +310,9 @@ impl WasiFd {
 
     #[inline]
     pub(crate) fn duplicate(&self) -> io::Result<Self> {
-        let raw_fd = unsafe {
-            wasi::fd_dup(self.as_raw_fd() as wasi::Fd).map_err(err2io)?
-        } as RawFd;
-        Ok(
-            unsafe { Self { fd: OwnedFd::from_raw_fd(raw_fd) } }
-        )
+        let raw_fd =
+            unsafe { wasi::fd_dup(self.as_raw_fd() as wasi::Fd).map_err(err2io)? } as RawFd;
+        Ok(unsafe { Self { fd: OwnedFd::from_raw_fd(raw_fd) } })
     }
 }
 

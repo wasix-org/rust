@@ -1,5 +1,5 @@
 cfg_if::cfg_if! {
-    if #[cfg(target_family = "unix")] {
+    if #[cfg(any(target_family = "unix", target_os = "wasi"))] {
         mod unix;
         use unix as imp;
     } else if #[cfg(target_os = "windows")] {

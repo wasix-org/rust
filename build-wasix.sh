@@ -9,8 +9,7 @@ if [ $? -ne 0 ]; then
 fi
 cd ../..
 
-./x.py build --target=wasm32-wasmer-wasi --stage 2
-./x.py build --target=wasm32-wasmer-wasi-dl --stage 2
+./x.py build --stage 2
 
 rustup toolchain uninstall wasix-dev
 rustup toolchain link wasix-dev ./build/host/stage2

@@ -3,8 +3,7 @@
 #![allow(unused)]
 #![allow(unused_imports)]
 
-use crate::io as std_io;
-use crate::mem;
+use crate::{io as std_io, mem};
 
 // #[path = "../unix/alloc.rs"]
 // pub mod alloc;
@@ -15,20 +14,12 @@ pub mod cmath;
 #[path = "../wasi/env.rs"]
 pub mod env;
 pub mod fd;
-#[path = "../wasi/fs.rs"]
-pub mod fs;
-#[path = "../wasi/io.rs"]
-pub mod io;
-pub mod net;
 pub mod os;
 #[path = "../../os_str/mod.rs"]
 pub mod os_str;
 #[path = "../../path/mod.rs"]
 pub mod path;
 pub mod pipe;
-pub mod process;
-#[path = "../wasi/stdio.rs"]
-pub mod stdio;
 #[path = "../unsupported/thread_local_dtor.rs"]
 pub mod thread_local_dtor;
 // #[path = "../unix/thread_local_key.rs"]
@@ -106,7 +97,7 @@ pub fn hashmap_random_keys() -> (u64, u64) {
     return ret;
 }
 
-pub use os::{cvt, cvt_nz, cvt_r, IsMinusOne};
+pub use os::{IsMinusOne, cvt, cvt_nz, cvt_r};
 
 pub(crate) fn err2io<I>(err: I) -> std_io::Error
 where

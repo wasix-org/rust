@@ -1,7 +1,11 @@
 change-id = 125535
 
 [build]
-target = ["wasm32-wasmer-wasi", "wasm32-wasmer-wasi-dl"]
+target = [
+    "x86_64-unknown-linux-gnu",
+    "wasm32-wasmer-wasi",
+    "wasm32-wasmer-wasi-dl",
+]
 extended = true
 tools = ["cargo", "clippy", "rustfmt"]
 configure-args = []

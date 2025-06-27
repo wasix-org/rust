@@ -29,7 +29,7 @@ impl Mmap {
     }
 }
 
-#[cfg(any(miri, target_feature = "wasm"))]
+#[cfg(any(miri, target_family = "wasm"))]
 impl Mmap {
     #[inline]
     pub unsafe fn map(mut file: File) -> io::Result<Self> {
