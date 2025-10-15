@@ -83,7 +83,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa3a2dbee57b69fbb5dbe852fa9c0925697fb0c7fbcb1593e90e5ffaedf13d51"
 dependencies = [
  "cfg-if",
- "libc",
+ "libc 0.2.174",
  "rustc-std-workspace-core",
  "windows-sys",
 ]
@@ -140,6 +140,14 @@ dependencies = [
 
 [[package]]
 name = "libc"
+version = "0.2.164"
+source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.164#eb0350e60d4e62cdd97e672fc7b94dd5f4ce83f4"
+dependencies = [
+ "rustc-std-workspace-core",
+]
+
+[[package]]
+name = "libc"
 version = "0.2.174"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
@@ -183,7 +191,7 @@ name = "panic_abort"
 version = "0.0.0"
 dependencies = [
  "alloc",
- "libc",
+ "libc 0.2.174",
  "rustc-std-workspace-core",
 ]
 
@@ -193,7 +201,7 @@ version = "0.0.0"
 dependencies = [
  "alloc",
  "cfg-if",
- "libc",
+ "libc 0.2.174",
  "rustc-std-workspace-core",
  "unwind",
 ]
@@ -340,7 +348,7 @@ dependencies = [
  "alloc",
  "cfg-if",
  "core",
- "libc",
+ "libc 0.2.174",
 ]
 
 [[package]]
@@ -359,7 +367,7 @@ version = "0.0.0"
 dependencies = [
  "core",
  "getopts",
- "libc 0.2.162",
+ "libc 0.2.174",
  "std",
 ]
 
@@ -378,7 +386,7 @@ name = "unwind"
 version = "0.0.0"
 dependencies = [
  "cfg-if",
- "libc",
+ "libc 0.2.174",
  "rustc-std-workspace-core",
  "unwinding",
 ]

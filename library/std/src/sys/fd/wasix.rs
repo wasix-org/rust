@@ -1,17 +1,17 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(dead_code)]
 
-use super::err2io;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read, SeekFrom};
 use crate::mem;
 use crate::net::Shutdown;
 use crate::os::wasi::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use crate::sys::pal::err2io;
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Debug)]
 pub struct WasiFd {
-    pub(super) fd: OwnedFd,
+    pub(crate) fd: OwnedFd,
 }
 
 pub use WasiFd as FileDesc;

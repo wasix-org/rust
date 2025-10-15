@@ -12,6 +12,16 @@ use crate::path::{self, PathBuf};
 use crate::sync::{LazyLock, Mutex, MutexGuard};
 use crate::{fmt, io, iter, slice, str, vec};
 
+pub mod libc {
+    pub use libc::*;
+
+    unsafe extern "C" {
+        pub fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char;
+        pub fn chdir(dir: *const c_char) -> c_int;
+        pub fn __wasilibc_get_environ() -> *mut *mut c_char;
+    }
+}
+
 const PATH_SEPARATOR: u8 = b':';
 
 static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

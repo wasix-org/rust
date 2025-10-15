@@ -35,6 +35,7 @@ pub use imp::{
         ))
     ),
     target_os = "windows",
+    all(target_os = "wasi", target_vendor = "wasmer")
 ))]
 pub fn output(cmd: &mut Command) -> crate::io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
     use crate::sys::pipe::read2;
@@ -74,5 +75,6 @@ pub fn output(cmd: &mut Command) -> crate::io::Result<(ExitStatus, Vec<u8>, Vec<
         ))
     ),
     target_os = "windows",
+    all(target_os = "wasi", target_vendor = "wasmer")
 )))]
 pub use imp::output;

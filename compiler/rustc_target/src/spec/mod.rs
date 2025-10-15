@@ -1538,43 +1538,6 @@ pub enum StackProbeType {
     },
 }
 
-impl StackProbeType {
-    fn from_json(json: &Json) -> Result<Self, String> {
-        let object = json.as_object().ok_or_else(|| "expected a JSON object")?;
-        let kind = object
-            .get("kind")
-            .and_then(|o| o.as_str())
-            .ok_or_else(|| "expected `kind` to be a string")?;
-        match kind {
-            "none" => Ok(StackProbeType::None),
-            "inline" => Ok(StackProbeType::Inline),
-            "call" => Ok(StackProbeType::Call),
-            "inline-or-call" => {
-                let min_version = object
-                    .get("min-llvm-version-for-inline")
-                    .and_then(|o| o.as_array())
-                    .ok_or_else(|| "expected `min-llvm-version-for-inline` to be an array")?;
-                let mut iter = min_version.into_iter().map(|v| {
-                    let int = v.as_u64().ok_or_else(
-                        || "expected `min-llvm-version-for-inline` values to be integers",
-                    )?;
-                    u32::try_from(int)
-                        .map_err(|_| "`min-llvm-version-for-inline` values don't convert to u32")
-                });
-                let min_llvm_version_for_inline = (
-                    iter.next().unwrap_or(Ok(11))?,
-                    iter.next().unwrap_or(Ok(0))?,
-                    iter.next().unwrap_or(Ok(0))?,
-                );
-                Ok(StackProbeType::InlineOrCall { min_llvm_version_for_inline })
-            }
-            _ => Err(String::from(
-                "`kind` expected to be one of `none`, `inline`, `call` or `inline-or-call`",
-            )),
-        }
-    }
-}
-
 impl ToJson for StackProbeType {
     fn to_json(&self) -> Json {
         Json::Object(match self {

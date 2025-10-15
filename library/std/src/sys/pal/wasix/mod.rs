@@ -7,13 +7,8 @@ use crate::{io as std_io, mem};
 
 // #[path = "../unix/alloc.rs"]
 // pub mod alloc;
-#[path = "../wasi/args.rs"]
-pub mod args;
 #[path = "../../cmath.rs"]
 pub mod cmath;
-#[path = "../wasi/env.rs"]
-pub mod env;
-pub mod fd;
 pub mod os;
 #[path = "../../os_str/mod.rs"]
 pub mod os_str;
@@ -33,10 +28,10 @@ pub mod locks {
     #![allow(unsafe_op_in_unsafe_fn)]
 
     mod condvar;
-    mod mutex;
+    // mod mutex;
     mod rwlock;
     pub(crate) use condvar::Condvar;
-    pub(crate) use mutex::Mutex;
+    // pub(crate) use mutex::Mutex;
     pub(crate) use rwlock::RwLock;
 }
 

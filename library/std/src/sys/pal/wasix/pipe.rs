@@ -1,9 +1,8 @@
-use super::fd::WasiFd;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read};
 use crate::mem;
 use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use crate::sys::err2io;
-use crate::sys::fd::FileDesc;
+use crate::sys::fd::{FileDesc, WasiFd};
 pub use crate::sys::{cvt, cvt_r};
 use crate::sys_common::{FromInner, IntoInner};
 

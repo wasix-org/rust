@@ -70,17 +70,8 @@ impl Command {
     }
 
     fn get_argv_string(&self) -> String {
-        let argv = self
-            .get_argv()
-            .into_iter()
-            .map(|p| unsafe { CStr::from_ptr(p.clone()) }.to_string_lossy())
-            .collect::<Vec<_>>();
+        let argv = self.get_argv().iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>();
         argv.join("\n")
-    }
-
-    pub fn output(&mut self) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
-        let (proc, pipes) = self.spawn(Stdio::MakePipe, false)?;
-        crate::sys_common::process::wait_with_output(proc, pipes)
     }
 
     pub fn exec(&mut self, default: Stdio) -> io::Error {
