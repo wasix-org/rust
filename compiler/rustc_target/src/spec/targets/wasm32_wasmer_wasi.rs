@@ -113,7 +113,7 @@ pub(crate) fn target() -> Target {
     // need an external compiler but it's still interoperable with an external
     // compiler if configured correctly.
     options.crt_static_default = true;
-    options.crt_static_respected = true;
+    options.crt_static_respected = false;
 
     // Allow `+crt-static` to create a "cdylib" output which is just a wasm file
     // without a main function.

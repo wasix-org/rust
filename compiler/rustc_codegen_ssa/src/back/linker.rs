@@ -1354,15 +1354,19 @@ impl<'a> Linker for WasmLd<'a> {
         _out_filename: &Path,
     ) {
         match output_kind {
-            LinkOutputKind::DynamicNoPicExe | LinkOutputKind::StaticNoPicExe => {}
-            LinkOutputKind::StaticPicExe | LinkOutputKind::DynamicPicExe => {
-                // FIXME: The wasm32-wasmer-wasi-dl toolchain produces broken executables
-                // right now, because the start function isn't linked correctly. Instead of
-                // _start calling the rust main function, it calls __main_void from libc,
-                // which is broken because rustc does not generate a __main_argc_argv.
-                // ... probably because we're linking in libc's _start and overriding rustc's?
+            LinkOutputKind::StaticNoPicExe => {
+                self.link_staticlib_by_name("c", false, false);
+            }
+            LinkOutputKind::StaticPicExe => {
+                self.link_arg("-pie");
+                self.link_staticlib_by_name("c", false, false);
+            }
+            LinkOutputKind::DynamicNoPicExe | LinkOutputKind::DynamicPicExe => {
+                if matches!(output_kind, LinkOutputKind::DynamicPicExe) {
+                    self.link_arg("-pie");
+                }
 
-                self.link_args(["-pie", "--export-all", "--no-gc-sections"]);
+                self.link_args(["--export-all", "--no-gc-sections"]);
 
                 // We link and export all of libc, as well as all of rust's stdlib into dynamic
                 // executables, so that side modules can just link against the existing code at
@@ -1381,6 +1385,7 @@ impl<'a> Linker for WasmLd<'a> {
                 self.link_staticlib_by_name("util", verbatim, whole_archive);
                 self.link_staticlib_by_name("wasi-emulated-mman", verbatim, whole_archive);
                 self.link_staticlib_by_name("common-tag-stubs", verbatim, whole_archive);
+                self.link_staticlib_by_name("clang_rt.builtins-wasm32", verbatim, false);
             }
             LinkOutputKind::DynamicDylib => {
                 self.link_args(["--no-entry", "-shared", "--unresolved-symbols=import-dynamic"]);
@@ -1489,6 +1494,7 @@ impl<'a> Linker for WasmLd<'a> {
             "--export=__wasm_call_ctors",
             "--export=__wasm_signal",
             "--export-if-defined=__wasm_apply_data_relocs",
+            "--export-if-defined=__wasm_apply_tls_relocs",
         ]);
 
         if matches!(crate_type, CrateType::Executable) {

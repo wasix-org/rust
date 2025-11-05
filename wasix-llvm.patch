@@ -1,8 +1,48 @@
+diff --git a/lld/wasm/Writer.cpp b/lld/wasm/Writer.cpp
+index 2bf4b370a7db..3c1bd3bb2250 100644
+--- a/lld/wasm/Writer.cpp
++++ b/lld/wasm/Writer.cpp
+@@ -1173,7 +1173,8 @@ void Writer::createSyntheticInitFunctions() {
+     };
+     if (llvm::any_of(segments, hasTLSRelocs)) {
+       ctx.sym.applyTLSRelocs = symtab->addSyntheticFunction(
+-          "__wasm_apply_tls_relocs", WASM_SYMBOL_VISIBILITY_HIDDEN,
++          "__wasm_apply_tls_relocs",
++          WASM_SYMBOL_VISIBILITY_DEFAULT | WASM_SYMBOL_EXPORTED,
+           make<SyntheticFunction>(nullSignature, "__wasm_apply_tls_relocs"));
+       ctx.sym.applyTLSRelocs->markLive();
+     }
+@@ -1363,6 +1364,14 @@ void Writer::createInitMemoryFunction() {
+           writeUleb128(os, s->index, "segment index immediate");
+           writeU8(os, 0, "memory index immediate");
+         }
++
++        // After initializing the TLS segment, we also need to apply TLS
++        // relocations in the same way __wasm_init_tls does.
++        if (s->isTLS() && ctx.sym.applyGlobalTLSRelocs) {
++          writeU8(os, WASM_OPCODE_CALL, "CALL");
++          writeUleb128(os, ctx.sym.applyGlobalTLSRelocs->getFunctionIndex(),
++                      "function index");
++        }
+       }
+     }
+ 
+@@ -1515,8 +1524,8 @@ void Writer::createApplyGlobalRelocationsFunction() {
+ }
+ 
+ // Similar to createApplyGlobalRelocationsFunction but for
+-// TLS symbols.  This cannot be run during the start function
+-// but must be delayed until __wasm_init_tls is called.
++// TLS symbols. Can only be called after __tls_base is
++// initialized.
+ void Writer::createApplyGlobalTLSRelocationsFunction() {
+   // First write the body's contents to a string.
+   std::string bodyContent;
 diff --git a/llvm/lib/Target/WebAssembly/WebAssemblyISelLowering.cpp b/llvm/lib/Target/WebAssembly/WebAssemblyISelLowering.cpp
-index f77076d7244c..cafeed98a043 100644
+index 02db1b142a22..2b26bf778262 100644
 --- a/llvm/lib/Target/WebAssembly/WebAssemblyISelLowering.cpp
 +++ b/llvm/lib/Target/WebAssembly/WebAssemblyISelLowering.cpp
-@@ -1689,9 +1689,7 @@ WebAssemblyTargetLowering::LowerGlobalTLSAddress(SDValue Op,
+@@ -1881,9 +1881,7 @@ WebAssemblyTargetLowering::LowerGlobalTLSAddress(SDValue Op,
    // Currently only Emscripten supports dynamic linking with threads. Therefore,
    // on other targets, if we have thread-local storage, only the local-exec
    // model is possible.
