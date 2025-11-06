@@ -1,8 +1,8 @@
-change-id = 125535
+change-id = 144675
 
 [build]
 target = [
-    "x86_64-unknown-linux-gnu",
+    "%HOST%",
     "wasm32-wasmer-wasi",
     "wasm32-wasmer-wasi-dl",
 ]
@@ -18,7 +18,7 @@ llvm-tools = true
 download-ci-llvm = false
 
 [target.wasm32-wasmer-wasi]
-wasi-root = "../wasix-libc/sysroot32-eh"
+wasi-root = "%SYSROOT_EH%"
 
 [target.wasm32-wasmer-wasi-dl]
-wasi-root = "../wasix-libc/sysroot32-ehpic"
+wasi-root = "%SYSROOT_EHPIC%"
