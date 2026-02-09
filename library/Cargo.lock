@@ -141,7 +141,7 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.2.169"
-source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.169#a42a2c2eedfe171581b4850a6be439da6a72aa01"
+source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.169#bde01aefba484da9e21c7f4a6b36d59f378ca4f7"
 dependencies = [
  "rustc-std-workspace-core",
 ]
