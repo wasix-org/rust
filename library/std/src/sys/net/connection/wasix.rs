@@ -298,7 +298,7 @@ impl Socket {
             );
             match self.recv(slice) {
                 Ok(n) => {
-                    buf.advance(n);
+                    buf.advance_unchecked(n);
                     Ok(())
                 }
                 Err(e) => Err(e),
