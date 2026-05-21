@@ -700,16 +700,6 @@ impl Socket {
     }
 }
 
-impl Drop for Socket {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(fd) = self.fd.take() {
-                let _ = wasi::fd_close(fd.as_raw_fd() as wasi::Fd);
-            }
-        }
-    }
-}
-
 fn conv_addr_port(addr: wasi::AddrPort) -> SocketAddr {
     unsafe {
         match addr.tag {
