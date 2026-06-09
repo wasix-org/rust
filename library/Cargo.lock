@@ -141,7 +141,7 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.2.169"
-source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.169#bde01aefba484da9e21c7f4a6b36d59f378ca4f7"
+source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.169#4869d903f325632fd774f17841b895b68aa18297"
 dependencies = [
  "rustc-std-workspace-core",
 ]
@@ -414,9 +414,9 @@ dependencies = [
 
 [[package]]
 name = "wasix"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1757e0d1f8456693c7e5c6c629bdb54884e032aa0bb53c155f6a39f94440d332"
+checksum = "ae86f02046da16a333a9129d31451423e1657737ecdafed4193838a5f54c5cfe"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-alloc",

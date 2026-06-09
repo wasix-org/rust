@@ -1,32 +1,15 @@
 #![allow(unused, dead_code)]
-use core::ffi::CStr;
 
 use libc::{c_int, pid_t};
 use wasi::{JoinStatus, JoinStatusType};
 
-use super::common::*;
+use super::common::{sigaddset, sigemptyset, *};
 use crate::io::ErrorKind;
+use crate::mem::MaybeUninit;
 use crate::num::NonZeroI32;
-use crate::os::fd::FromRawFd;
-use crate::sys::pipe::AnonPipe;
 pub use crate::sys::{cvt, cvt_nz, cvt_r};
-use crate::sys::{unsupported, unsupported_err};
+use crate::sys::{self, unsupported_err};
 use crate::{fmt, io};
-
-fn to_anon_pipe(option_fd: wasi::OptionFd) -> Option<AnonPipe> {
-    match wasi::Option::from(option_fd.tag) {
-        wasi::OPTION_SOME => Some(unsafe { AnonPipe::from_raw_fd(option_fd.u.some as i32) }),
-        _ => None,
-    }
-}
-
-fn to_wasi_mode(input: &Stdio) -> wasi::StdioMode {
-    match input {
-        Stdio::Inherit => wasi::STDIO_MODE_INHERIT,
-        Stdio::MakePipe => wasi::STDIO_MODE_PIPED,
-        _ => wasi::STDIO_MODE_NULL,
-    }
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Command
@@ -38,40 +21,124 @@ impl Command {
         default: Stdio,
         needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
-        let null = Stdio::Null;
-        let default_stdin = if needs_stdin { &default } else { &null };
-        let program = self
-            .get_program()
-            .to_str()
-            .ok_or_else(|| io::const_error!(ErrorKind::Other, "Spawn failed",))?;
+        let envp = self.capture_env();
 
-        let handle = unsafe {
-            wasi::proc_spawn(
-                program,
-                wasi::BOOL_FALSE,
-                &self.get_argv_string(),
-                "",
-                to_wasi_mode(self.get_stdin().unwrap_or(default_stdin)),
-                to_wasi_mode(self.get_stdout().unwrap_or(&default)),
-                to_wasi_mode(self.get_stderr().unwrap_or(&default)),
-                ".",
-            )
+        if self.saw_nul() {
+            return Err(io::const_error!(
+                ErrorKind::InvalidInput,
+                "nul byte found in provided data",
+            ));
         }
-        .map_err(|_| io::const_error!(ErrorKind::Other, "Spawn failed",))?;
 
-        Ok((
-            Process { pid: handle.pid as i32, status: None },
-            StdioPipes {
-                stdin: to_anon_pipe(handle.stdin),
-                stderr: to_anon_pipe(handle.stderr),
-                stdout: to_anon_pipe(handle.stdout),
-            },
-        ))
+        let (ours, theirs) = self.setup_io(default, needs_stdin)?;
+        let p = self.posix_spawn(&theirs, envp.as_ref())?;
+        Ok((p, ours))
     }
 
-    fn get_argv_string(&self) -> String {
-        let argv = self.get_argv().iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>();
-        argv.join("\n")
+    fn posix_spawn(
+        &mut self,
+        stdio: &ChildPipes,
+        envp: Option<&CStringArray>,
+    ) -> io::Result<Process> {
+        if self.get_gid().is_some()
+            || self.get_uid().is_some()
+            || !self.get_closures().is_empty()
+            || self.get_groups().is_some()
+            || self.get_chroot().is_some()
+            || self.get_pgroup().is_some()
+            || self.get_setsid()
+        {
+            return Err(unsupported_err());
+        }
+
+        struct PosixSpawnFileActions<'a>(&'a mut MaybeUninit<libc::posix_spawn_file_actions_t>);
+
+        impl Drop for PosixSpawnFileActions<'_> {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::posix_spawn_file_actions_destroy(self.0.as_mut_ptr());
+                }
+            }
+        }
+
+        struct PosixSpawnattr<'a>(&'a mut MaybeUninit<libc::posix_spawnattr_t>);
+
+        impl Drop for PosixSpawnattr<'_> {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::posix_spawnattr_destroy(self.0.as_mut_ptr());
+                }
+            }
+        }
+
+        unsafe {
+            let mut attrs = MaybeUninit::uninit();
+            cvt_nz(libc::posix_spawnattr_init(attrs.as_mut_ptr()))?;
+            let attrs = PosixSpawnattr(&mut attrs);
+
+            let mut flags = 0;
+
+            let mut file_actions = MaybeUninit::uninit();
+            cvt_nz(libc::posix_spawn_file_actions_init(file_actions.as_mut_ptr()))?;
+            let file_actions = PosixSpawnFileActions(&mut file_actions);
+
+            if let Some(fd) = stdio.stdin.fd() {
+                cvt_nz(libc::posix_spawn_file_actions_adddup2(
+                    file_actions.0.as_mut_ptr(),
+                    fd,
+                    libc::STDIN_FILENO,
+                ))?;
+            }
+            if let Some(fd) = stdio.stdout.fd() {
+                cvt_nz(libc::posix_spawn_file_actions_adddup2(
+                    file_actions.0.as_mut_ptr(),
+                    fd,
+                    libc::STDOUT_FILENO,
+                ))?;
+            }
+            if let Some(fd) = stdio.stderr.fd() {
+                cvt_nz(libc::posix_spawn_file_actions_adddup2(
+                    file_actions.0.as_mut_ptr(),
+                    fd,
+                    libc::STDERR_FILENO,
+                ))?;
+            }
+            if let Some(cwd) = self.get_cwd() {
+                cvt_nz(libc::posix_spawn_file_actions_addchdir_np(
+                    file_actions.0.as_mut_ptr(),
+                    cwd.as_ptr(),
+                ))?;
+            }
+
+            // Reset SIGPIPE to SIG_DFL in the child for backward compatibility.
+            let mut default_set = MaybeUninit::<libc::sigset_t>::uninit();
+            cvt(sigemptyset(default_set.as_mut_ptr()))?;
+            cvt(sigaddset(default_set.as_mut_ptr(), libc::SIGPIPE))?;
+            cvt_nz(libc::posix_spawnattr_setsigdefault(
+                attrs.0.as_mut_ptr(),
+                default_set.as_ptr(),
+            ))?;
+            flags |= libc::POSIX_SPAWN_SETSIGDEF;
+
+            cvt_nz(libc::posix_spawnattr_setflags(attrs.0.as_mut_ptr(), flags as _))?;
+
+            let _env_lock = sys::env::env_read_lock();
+            let envp = envp
+                .map(|c| c.as_ptr())
+                .unwrap_or_else(|| libc::__wasilibc_get_environ() as *const _);
+
+            let mut pid = 0;
+            cvt_nz(libc::posix_spawnp(
+                &mut pid,
+                self.get_program_cstr().as_ptr(),
+                file_actions.0.as_ptr(),
+                attrs.0.as_ptr(),
+                self.get_argv().as_ptr() as *const _,
+                envp as *const _,
+            ))?;
+
+            Ok(unsafe { Process::new(pid, -1) })
+        }
     }
 
     pub fn exec(&mut self, default: Stdio) -> io::Error {

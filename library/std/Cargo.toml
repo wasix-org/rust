@@ -80,17 +80,17 @@ wasi = { version = "0.11.0", features = [
 ], default-features = false }
 
 [target.wasm32-wasmer-wasi.dependencies]
-wasi = { package = "wasix", version = "0.13.1", features = [
+wasi = { package = "wasix", version = "0.13.2", features = [
     'rustc-dep-of-std',
 ], default-features = false, public = true }
 
 [target.wasm32-wasmer-wasi-dl.dependencies]
-wasi = { package = "wasix", version = "0.13.1", features = [
+wasi = { package = "wasix", version = "0.13.2", features = [
     'rustc-dep-of-std',
 ], default-features = false, public = true }
 
 [target.wasm64-wasmer-wasi.dependencies]
-wasi = { package = "wasix", version = "0.13.1", features = [
+wasi = { package = "wasix", version = "0.13.2", features = [
     'rustc-dep-of-std',
 ], default-features = false, public = true }
 
