@@ -783,19 +783,23 @@ fn open_parent(p: &Path) -> io::Result<(ManuallyDrop<WasiFd>, PathBuf)> {
                     buf.capacity(),
                 );
                 if fd == -1 {
-                    if io::Error::last_os_error().raw_os_error() == Some(libc::ENOMEM) {
-                        // Trigger the internal buffer resizing logic of `Vec` by requiring
-                        // more space than the current capacity.
-                        let cap = buf.capacity();
-                        buf.set_len(cap);
-                        buf.reserve(1);
-                        continue;
+                    match io::Error::last_os_error().raw_os_error() {
+                        Some(libc::ENOMEM) | Some(libc::ERANGE) => {
+                            // Trigger the internal buffer resizing logic of `Vec` by requiring
+                            // more space than the current capacity.
+                            let cap = buf.capacity();
+                            buf.set_len(cap);
+                            buf.reserve(1);
+                            continue;
+                        }
+                        _ => {
+                            let msg = format!(
+                                "failed to find a pre-opened file descriptor \
+                                through which {p:?} could be opened",
+                            );
+                            return Err(io::Error::new(io::ErrorKind::Uncategorized, msg));
+                        }
                     }
-                    let msg = format!(
-                        "failed to find a pre-opened file descriptor \
-                        through which {p:?} could be opened",
-                    );
-                    return Err(io::Error::new(io::ErrorKind::Uncategorized, msg));
                 }
                 let relative = CStr::from_ptr(relative_path).to_bytes().to_vec();
 
