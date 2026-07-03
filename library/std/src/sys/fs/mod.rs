@@ -6,6 +6,10 @@ use crate::path::{Path, PathBuf};
 pub mod common;
 
 cfg_select! {
+    all(target_os = "wasi", target_vendor = "wasmer") => {
+        mod wasix;
+        use wasix as imp;
+    }
     any(target_family = "unix", target_os = "wasi") => {
         mod unix;
         use unix as imp;
@@ -52,7 +56,10 @@ cfg_select! {
 }
 
 // FIXME: Replace this with platform-specific path conversion functions.
-#[cfg(not(any(target_family = "unix", target_os = "windows", target_os = "wasi")))]
+#[cfg(any(
+    not(any(target_family = "unix", target_os = "windows", target_os = "wasi")),
+    all(target_os = "wasi", target_vendor = "wasmer")
+))]
 #[inline]
 pub fn with_native_path<T>(path: &Path, f: &dyn Fn(&Path) -> io::Result<T>) -> io::Result<T> {
     f(path)

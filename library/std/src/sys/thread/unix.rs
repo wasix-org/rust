@@ -149,6 +149,7 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
         any(
             target_os = "android",
             target_os = "emscripten",
+            target_os = "wasi",
             target_os = "fuchsia",
             target_os = "hurd",
             target_os = "linux",

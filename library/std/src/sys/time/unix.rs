@@ -37,6 +37,20 @@ impl SystemTime {
     }
 }
 
+#[cfg(target_os = "wasi")]
+impl SystemTime {
+    pub fn from_wasi_timestamp(ts: u64) -> SystemTime {
+        SystemTime::new((ts / 1_000_000_000) as i64, (ts % 1_000_000_000) as i64)
+            .expect("wasi timestamp does not fit in a SystemTime")
+    }
+
+    pub fn to_wasi_timestamp(&self) -> Option<u64> {
+        let secs: u64 = self.t.tv_sec.try_into().ok()?;
+        let nanos = self.t.tv_nsec.as_inner() as u64;
+        secs.checked_mul(1_000_000_000)?.checked_add(nanos)
+    }
+}
+
 impl fmt::Debug for SystemTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SystemTime")

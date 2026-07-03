@@ -126,6 +126,8 @@ pub(super) fn pre_wasi_self_contained() -> CrtObjects {
         (LinkOutputKind::DynamicPicExe, &["crt1-command.o"]),
         (LinkOutputKind::StaticNoPicExe, &["crt1-command.o"]),
         (LinkOutputKind::StaticPicExe, &["crt1-command.o"]),
+        (LinkOutputKind::DynamicDylib, &["scrt1.o"]),
+        (LinkOutputKind::StaticDylib, &["scrt1.o"]),
         (LinkOutputKind::WasiReactorExe, &["crt1-reactor.o"]),
     ])
 }

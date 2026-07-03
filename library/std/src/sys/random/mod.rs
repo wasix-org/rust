@@ -90,7 +90,7 @@ cfg_select! {
         mod vxworks;
         pub use vxworks::fill_bytes;
     }
-    all(target_os = "wasi", target_env = "p1") => {
+    all(target_os = "wasi", any(target_env = "p1", target_vendor = "wasmer")) => {
         mod wasip1;
         pub use wasip1::fill_bytes;
     }
@@ -119,7 +119,7 @@ cfg_select! {
     target_os = "linux",
     target_os = "android",
     all(target_family = "wasm", target_os = "unknown"),
-    all(target_os = "wasi", not(target_env = "p1")),
+    all(target_os = "wasi", not(any(target_env = "p1", target_vendor = "wasmer"))),
     target_os = "xous",
     target_os = "vexos",
 )))]

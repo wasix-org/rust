@@ -1653,7 +1653,10 @@ supported_targets! {
     ("wasm32-wasip3", wasm32_wasip3),
     ("wasm32-wasip1-threads", wasm32_wasip1_threads),
     ("wasm32-wali-linux-musl", wasm32_wali_linux_musl),
+    ("wasm32-wasmer-wasi", wasm32_wasmer_wasi),
+    ("wasm32-wasmer-wasi-dl", wasm32_wasmer_wasi_dl),
     ("wasm64-unknown-unknown", wasm64_unknown_unknown),
+    ("wasm64-wasmer-wasi", wasm64_wasmer_wasi),
 
     ("thumbv6m-none-eabi", thumbv6m_none_eabi),
     ("thumbv7m-none-eabi", thumbv7m_none_eabi),
@@ -3634,6 +3637,8 @@ impl Target {
     fn can_use_os_unknown(&self) -> bool {
         self.llvm_target == "wasm32-unknown-unknown"
             || self.llvm_target == "wasm64-unknown-unknown"
+            || self.llvm_target == "wasm32-wasmer-wasi"
+            || self.llvm_target == "wasm32-wasmer-wasi-dl"
             || (self.env == Env::Sgx && self.vendor == "fortanix")
     }
 

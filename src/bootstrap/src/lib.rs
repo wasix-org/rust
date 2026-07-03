@@ -1439,16 +1439,18 @@ impl Build {
     /// configuration, and failing that it assumes that `$WASI_SDK_PATH` is
     /// set in the environment, and failing that `None` is returned.
     fn wasi_libdir(&self, target: TargetSelection) -> Option<PathBuf> {
+        let c_target_name =
+            if target.to_string().contains("wasm32") { "wasm32-wasi" } else { "wasm64-wasi" };
         let configured =
             self.config.target_config.get(&target).and_then(|t| t.wasi_root.as_ref()).map(|p| &**p);
         if let Some(path) = configured {
-            return Some(path.join("lib").join(target.to_string()));
+            return Some(path.join("lib").join(c_target_name));
         }
         let mut env_root = self.wasi_sdk_path.clone()?;
         env_root.push("share");
         env_root.push("wasi-sysroot");
         env_root.push("lib");
-        env_root.push(target.to_string());
+        env_root.push(c_target_name);
         Some(env_root)
     }
 

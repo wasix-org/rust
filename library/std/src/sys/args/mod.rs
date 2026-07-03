@@ -37,7 +37,7 @@ cfg_select! {
         mod uefi;
         pub use uefi::*;
     }
-    all(target_os = "wasi", target_env = "p1") => {
+    all(target_os = "wasi", any(target_env = "p1", target_vendor = "wasmer")) => {
         mod wasip1;
         pub use wasip1::*;
     }

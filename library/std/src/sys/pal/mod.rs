@@ -32,6 +32,11 @@ cfg_select! {
         mod vexos;
         pub use self::vexos::*;
     }
+    all(target_vendor = "wasmer", target_os = "wasi") => {
+        #[path = "wasix/mod.rs"]
+        mod wasi;
+        pub use self::wasi::*;
+    }
     target_os = "wasi" => {
         mod wasi;
         pub use self::wasi::*;

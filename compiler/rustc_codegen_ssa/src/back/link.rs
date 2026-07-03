@@ -1,5 +1,6 @@
 mod raw_dylib;
 
+use core::iter::Iterator;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions, read};
@@ -3199,6 +3200,11 @@ fn add_dynamic_crate(cmd: &mut dyn Linker, sess: &Session, cratepath: &Path) {
 }
 
 fn relevant_lib(sess: &Session, lib: &NativeLib) -> bool {
+    if sess.target.is_like_wasm && lib.name.as_str() == "c" {
+        // For wasm targets, WasmLd decides whether to link libc based on
+        // the output kind, so we skip it here.
+        return false;
+    }
     match lib.cfg {
         Some(ref cfg) => eval_config_entry(sess, cfg).as_bool(),
         None => true,
