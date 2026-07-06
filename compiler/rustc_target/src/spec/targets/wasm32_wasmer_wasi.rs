@@ -87,7 +87,13 @@ pub(crate) fn target() -> Target {
                 // rustc now expects the target spec to provide it.
                 concat!($prefix, "--max-memory=4294967296"),
                 concat!($prefix, "--import-memory"),
-                concat!($prefix, "--export-dynamic"),
+                // Needed for reflection and call_dynamic. The remaining
+                // exports the WASIX runtime needs are added by WasmLd in
+                // rustc_codegen_ssa (see export_symbols); DL main modules get
+                // --export-all there instead. Note that --export-dynamic must
+                // NOT be passed unconditionally: it exports the entire symbol
+                // table (see WAX-596).
+                concat!($prefix, "--export-if-defined=__indirect_function_table"),
                 concat!($prefix, "--no-check-features"),
                 concat!($prefix, "-mllvm"),
                 concat!($prefix, "--wasm-enable-sjlj"),
