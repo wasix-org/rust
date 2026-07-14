@@ -83,7 +83,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06cdfe340b16dd990c54cce79743613fa09fbb16774f33a77c9fd196f8f3fa30"
 dependencies = [
  "cfg-if",
- "libc 0.2.183 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc",
  "rustc-std-workspace-core",
  "windows-sys",
 ]
@@ -147,15 +147,6 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.2.183"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
-dependencies = [
- "rustc-std-workspace-core",
-]
-
-[[package]]
-name = "libc"
-version = "0.2.183"
 source = "git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.183#029fad92706216db3c0942229acff50af66e2933"
 dependencies = [
  "rustc-std-workspace-core",
@@ -207,7 +198,7 @@ name = "panic_abort"
 version = "0.0.0"
 dependencies = [
  "alloc",
- "libc 0.2.183 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc",
  "rustc-std-workspace-core",
 ]
 
@@ -216,7 +207,7 @@ name = "panic_unwind"
 version = "0.0.0"
 dependencies = [
  "alloc",
- "libc 0.2.183 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc",
  "rustc-std-workspace-core",
  "unwind",
 ]
@@ -338,7 +329,7 @@ dependencies = [
  "fortanix-sgx-abi",
  "hashbrown",
  "hermit-abi",
- "libc 0.2.183 (git+https://github.com/wasix-org/libc.git?branch=wasix-0.2.183)",
+ "libc",
  "miniz_oxide",
  "moto-rt",
  "object",
@@ -362,7 +353,7 @@ dependencies = [
 name = "std_detect"
 version = "0.1.5"
 dependencies = [
- "libc 0.2.183 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -383,7 +374,7 @@ version = "0.0.0"
 dependencies = [
  "core",
  "getopts",
- "libc 0.2.183 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc",
  "std",
 ]
 
@@ -391,7 +382,7 @@ dependencies = [
 name = "unwind"
 version = "0.0.0"
 dependencies = [
- "libc 0.2.183 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc",
  "rustc-std-workspace-core",
  "unwinding",
 ]
