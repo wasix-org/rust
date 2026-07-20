@@ -1,0 +1,28 @@
+change-id = 144675
+
+[build]
+target = [
+    "%HOST%",
+    "wasm32-wasmer-wasi",
+    "wasm32-wasmer-wasi-dl",
+]
+extended = true
+tools = ["cargo", "clippy", "rustfmt"]
+configure-args = []
+
+[rust]
+# The plain (non-dl) wasix target does not support the `dylib` crate type, and
+# rustc's "dropping unsupported crate type" warning cannot be silenced in code,
+# so warnings must not fail the build.
+deny-warnings = false
+lld = true
+llvm-tools = true
+
+[llvm]
+download-ci-llvm = false
+
+[target.wasm32-wasmer-wasi]
+wasi-root = "%SYSROOT_EH%"
+
+[target.wasm32-wasmer-wasi-dl]
+wasi-root = "%SYSROOT_EHPIC%"

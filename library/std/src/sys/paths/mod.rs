@@ -34,6 +34,18 @@ cfg_select! {
         mod unix;
         use unix as imp;
     }
+    all(target_os = "wasi", target_vendor = "wasmer") => {
+        #[expect(dead_code)]
+        mod wasi;
+        mod wasix;
+        #[expect(dead_code)]
+        mod unsupported;
+        mod imp {
+            pub use super::wasi::{getcwd, chdir};
+            pub use super::wasix::{SplitPaths, split_paths, JoinPathsError, join_paths, temp_dir};
+            pub use super::unsupported::{current_exe, home_dir};
+        }
+    }
     target_os = "wasi" => {
         mod wasi;
         #[expect(dead_code)]

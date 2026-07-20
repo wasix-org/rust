@@ -17,6 +17,10 @@ cfg_select! {
         mod wasip1;
         pub use wasip1::*;
     }
+    all(target_os = "wasi", target_vendor = "wasmer") => {
+        mod wasix;
+        pub use wasix::*;
+    }
     target_os = "motor" => {
         mod motor;
         pub use motor::*;

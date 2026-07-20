@@ -15,6 +15,10 @@ cfg_select! {
         use unsupported as imp;
         pub use unsupported::output;
     }
+    all(target_os = "wasi", target_vendor = "wasmer") => {
+        mod wasix;
+        use wasix as imp;
+    }
     _ => {
         mod unix;
         use unix as imp;
@@ -23,7 +27,7 @@ cfg_select! {
 
 pub use imp::{ExitStatus, ExitStatusError, Process};
 
-pub use self::common::{
-    ChildPipe, Command, CommandArgs, ExitCode, Stdio, getpid, getppid, read_output,
-};
+#[cfg_attr(all(target_os = "wasi", target_vendor = "wasmer"), allow(unused_imports))]
+pub use self::common::getppid;
+pub use self::common::{ChildPipe, Command, CommandArgs, ExitCode, Stdio, getpid, read_output};
 pub use crate::ffi::OsString as EnvKey;

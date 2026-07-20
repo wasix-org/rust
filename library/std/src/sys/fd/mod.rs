@@ -3,6 +3,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 cfg_select! {
+    all(target_os = "wasi", target_vendor = "wasmer") => {
+        mod wasix;
+        pub use wasix::*;
+    }
     any(target_family = "unix", target_os = "wasi") => {
         mod unix;
         pub use unix::*;
