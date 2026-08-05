@@ -20,6 +20,11 @@ jobs:
             arch: x86
             host_triple: x86_64-unknown-linux-gnu
 
+          - name: Ubuntu (aarch64)
+            os: depot-ubuntu-22.04-arm-16
+            arch: aarch64
+            host_triple: aarch64-unknown-linux-gnu
+
           - name: Mac (aarch64)
             os: depot-macos-15
             arch: aarch64
@@ -64,7 +69,7 @@ jobs:
         uses: seanmiddleditch/gha-setup-ninja@master
 
       - name: Setup (Ubuntu)
-        if: matrix.arch == 'x86' && contains(matrix.os, 'ubuntu')
+        if: contains(matrix.os, 'ubuntu')
         shell: bash
         run: |
           sudo apt-get update
