@@ -67,6 +67,8 @@ pub struct OpenOptions {
     read: bool,
     write: bool,
     append: bool,
+    create: bool,
+    create_new: bool,
     dirflags: wasi::Lookupflags,
     fdflags: wasi::Fdflags,
     oflags: wasi::Oflags,
@@ -317,16 +319,31 @@ impl OpenOptions {
     }
 
     pub fn create(&mut self, create: bool) {
-        self.oflag(wasi::OFLAGS_CREAT, create);
+        self.create = create;
     }
 
     pub fn create_new(&mut self, create_new: bool) {
-        self.oflag(wasi::OFLAGS_EXCL, create_new);
-        self.oflag(wasi::OFLAGS_CREAT, create_new);
+        self.create_new = create_new;
     }
 
     pub fn directory(&mut self, directory: bool) {
         self.oflag(wasi::OFLAGS_DIRECTORY, directory);
+    }
+
+    /// The open flags to pass to `path_open`.
+    ///
+    /// `create` and `create_new` are combined here rather than in their
+    /// setters: `OpenOptions` setters are order-independent, so clearing
+    /// `OFLAGS_CREAT` from `create_new(false)` would wrongly undo an earlier
+    /// `create(true)`.
+    fn oflags(&self) -> wasi::Oflags {
+        let mut oflags = self.oflags;
+        if self.create_new {
+            oflags |= wasi::OFLAGS_CREAT | wasi::OFLAGS_EXCL;
+        } else if self.create {
+            oflags |= wasi::OFLAGS_CREAT;
+        }
+        oflags
     }
 
     fn oflag(&mut self, bit: wasi::Oflags, set: bool) {
@@ -765,7 +782,7 @@ fn open_at(fd: &WasiFd, path: &Path, opts: &OpenOptions) -> io::Result<File> {
     let fd = fd.open(
         opts.dirflags,
         osstr2str(path.as_ref())?,
-        opts.oflags,
+        opts.oflags(),
         opts.rights_base(),
         opts.rights_inheriting(),
         opts.fdflags,
