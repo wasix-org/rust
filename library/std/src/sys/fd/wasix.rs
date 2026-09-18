@@ -16,6 +16,16 @@ pub struct WasiFd {
 
 pub use WasiFd as FileDesc;
 
+/// Duplicate a raw file descriptor, leaving the original untouched.
+///
+/// WASIX provides `fd_dup`, unlike WASI preview1 where descriptors cannot be
+/// duplicated at all. Takes and returns a raw fd rather than a [`WasiFd`] so
+/// that the caller's descriptor keeps its existing ownership.
+pub fn duplicate_raw(fd: RawFd) -> io::Result<RawFd> {
+    let raw = unsafe { wasi::fd_dup(fd as wasi::Fd).map_err(err2io)? };
+    Ok(raw as RawFd)
+}
+
 pub(crate) fn iovec<'a>(a: &'a mut [IoSliceMut<'_>]) -> &'a [wasi::Iovec] {
     assert_eq!(mem::size_of::<IoSliceMut<'_>>(), mem::size_of::<wasi::Iovec>());
     assert_eq!(mem::align_of::<IoSliceMut<'_>>(), mem::align_of::<wasi::Iovec>());

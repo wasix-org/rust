@@ -131,10 +131,23 @@ impl BorrowedFd<'_> {
 
     /// Creates a new `OwnedFd` instance that shares the same underlying file
     /// description as the existing `BorrowedFd` instance.
-    #[cfg(any(target_family = "wasm", target_os = "hermit", target_os = "trusty"))]
+    #[cfg(all(
+        any(target_family = "wasm", target_os = "hermit", target_os = "trusty"),
+        not(all(target_os = "wasi", target_vendor = "wasmer"))
+    ))]
     #[stable(feature = "io_safety", since = "1.63.0")]
     pub fn try_clone_to_owned(&self) -> io::Result<OwnedFd> {
         Err(io::Error::UNSUPPORTED_PLATFORM)
+    }
+
+    /// Creates a new `OwnedFd` instance that shares the same underlying file
+    /// description as the existing `BorrowedFd` instance.
+    #[cfg(all(target_os = "wasi", target_vendor = "wasmer"))]
+    #[stable(feature = "io_safety", since = "1.63.0")]
+    pub fn try_clone_to_owned(&self) -> io::Result<OwnedFd> {
+        // Unlike WASI preview1, WASIX can duplicate a descriptor (`fd_dup`).
+        let fd = crate::sys::fd::duplicate_raw(self.as_raw_fd())?;
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
     /// Creates a new `OwnedFd` instance that shares the same underlying file
