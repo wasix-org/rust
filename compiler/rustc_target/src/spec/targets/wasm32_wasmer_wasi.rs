@@ -71,7 +71,9 @@
 //! best we can with this target. Don't start relying on too much here unless
 //! you know what you're getting in to!
 
-use crate::spec::{Arch, Cc, LinkSelfContainedDefault, LinkerFlavor, Os, Target, base, crt_objects};
+use crate::spec::{
+    Arch, Cc, LinkSelfContainedDefault, LinkerFlavor, Os, PanicStrategy, Target, base, crt_objects,
+};
 
 // The `vendor` field is normally set via the target tuple; wasmer targets set
 // it explicitly.
@@ -143,6 +145,16 @@ pub(crate) fn target() -> Target {
     // WASIX enables more WASM features
     options.features =
         "+bulk-memory,+atomics,+mutable-globals,+sign-ext,+nontrapping-fptoint".into();
+
+    // WebAssembly exceptions are executable in Wasm runtimes now, and each WASIX
+    // `eh`/`ehpic` sysroot ships a `libunwind.a` for `wasm32-wasi`, so the
+    // `panic=abort` default inherited from `base::wasm` (shared by all Wasm
+    // targets) no longer has to stand. Unwinding is what makes `catch_unwind`
+    // work, which a guest that recovers from a panic needs; rustc adds
+    // `+exception-handling` to the LLVM features itself once the strategy is
+    // `Unwind`, so the features line above stays as it is.
+    // `wasm32-wasmer-wasi-dl` inherits this target.
+    options.panic_strategy = PanicStrategy::Unwind;
 
     Target {
         llvm_target: "wasm32-wasi".into(),
