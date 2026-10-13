@@ -141,8 +141,9 @@ pub(crate) fn target() -> Target {
     options.entry_name = "__main_void".into();
 
     // WASIX enables more WASM features
-    options.features =
-        "+bulk-memory,+atomics,+mutable-globals,+sign-ext,+nontrapping-fptoint".into();
+    options.features = "+bulk-memory,+atomics,+mutable-globals,+sign-ext,+nontrapping-fptoint,\
+                        +simd128,+relaxed-simd,+extended-const,+wide-arithmetic"
+        .into();
 
     Target {
         llvm_target: "wasm32-wasi".into(),
